@@ -123,6 +123,168 @@ class BotManagementTests(unittest.TestCase):
         self.assertEqual(first.id, second.id)
         self.assertEqual(self.commands.count(user.id), 1)
 
+    def test_painel_pausado(self) -> None:
+        response = self.service.start(101, "alice", "Alice")
+
+        self.assertIn("🤖 INSTITUTO TRADER", response.text)
+        self.assertIn("Olá, Alice!", response.text)
+        self.assertIn("Status do copiador: 🟡 Pausado", response.text)
+        self.assertIn("Novas operações: ⏸️ Bloqueadas", response.text)
+
+    def test_painel_ativo(self) -> None:
+        self.service.start(101, "alice", "Alice")
+        self.service.handle_callback(101, "alice", "v1:act:ok")
+
+        response = self.service.menu(101, "alice", "Alice")
+
+        self.assertIn("Status do copiador: 🟢 Ativo", response.text)
+        self.assertIn("Novas operações: ▶️ Liberadas", response.text)
+
+    def test_menu_principal(self) -> None:
+        response = self.service.menu(101, "alice", "Alice")
+        button_texts = [button.text for row in response.keyboard for button in row]
+
+        self.assertIn("💼 Minha conta", button_texts)
+        self.assertIn("📈 Operações", button_texts)
+        self.assertIn("📡 Status da conexão", button_texts)
+
+    def test_tela_minha_conta_sem_mt5(self) -> None:
+        self.service.start(101, "alice")
+
+        response = self.service.handle_callback(101, "alice", "v1:a")
+
+        self.assertIn("💼 MINHA CONTA", response.text)
+        self.assertIn("MetaTrader 5: ⚪ Não conectado", response.text)
+        self.assertIn("Saldo: Aguardando conexão", response.text)
+        self.assertIn("Equity: Aguardando conexão", response.text)
+
+    def test_tela_operacoes_sem_mt5(self) -> None:
+        self.service.start(101, "alice")
+
+        response = self.service.handle_callback(101, "alice", "v1:o")
+
+        self.assertIn("📈 OPERAÇÕES", response.text)
+        self.assertIn("Ainda não é possível consultar operações abertas.", response.text)
+        self.assertIn("• Stop Loss", response.text)
+
+    def test_confirmacao_de_ativacao_visual(self) -> None:
+        self.service.start(101, "alice")
+
+        response = self.service.handle_callback(101, "alice", "v1:act")
+
+        self.assertIn("▶️ ATIVAR COPIADOR", response.text)
+        self.assertIn("Deseja continuar?", response.text)
+        self.assertIn("✅ Confirmar ativação", [button.text for row in response.keyboard for button in row])
+
+    def test_confirmacao_de_pausa_visual(self) -> None:
+        self.service.start(101, "alice")
+
+        response = self.service.handle_callback(101, "alice", "v1:pause")
+
+        self.assertIn("⏸️ PAUSAR NOVAS ENTRADAS", response.text)
+        self.assertIn("Operações já abertas não serão fechadas automaticamente.", response.text)
+        self.assertIn("⏸️ Confirmar pausa", [button.text for row in response.keyboard for button in row])
+
+    def test_cancelamento(self) -> None:
+        self.service.start(101, "alice")
+
+        response = self.service.handle_callback(101, "alice", "v1:x")
+
+        self.assertIn("cancelada", response.text)
+
+    def test_voltar_ao_menu(self) -> None:
+        self.service.start(101, "alice")
+
+        response = self.service.handle_callback(101, "alice", "v1:m", "Alice")
+
+        self.assertIn("🤖 INSTITUTO TRADER", response.text)
+        self.assertEqual(response.screen, "main")
+
+    def test_gestao_de_risco(self) -> None:
+        self.service.start(101, "alice")
+
+        response = self.service.handle_callback(101, "alice", "v1:r")
+
+        self.assertIn("⚙️ GESTÃO DE RISCO", response.text)
+        self.assertIn("Modo de gestão:", response.text)
+        self.assertIn("Máximo de operações:", response.text)
+
+    def test_protecoes(self) -> None:
+        self.service.start(101, "alice")
+
+        response = self.service.handle_callback(101, "alice", "v1:p")
+
+        self.assertIn("🛡️ PROTEÇÕES", response.text)
+        self.assertIn("Breakeven:", response.text)
+        self.assertIn("Trailing Stop:", response.text)
+
+    def test_historico(self) -> None:
+        self.service.start(101, "alice")
+        self.service.handle_callback(101, "alice", "v1:act:ok")
+
+        response = self.service.handle_callback(101, "alice", "v1:h")
+
+        self.assertIn("📋 HISTÓRICO", response.text)
+        self.assertIn("set_user_status", response.text)
+
+    def test_status_da_conexao(self) -> None:
+        self.service.start(101, "alice")
+
+        response = self.service.status(101, "alice")
+
+        self.assertIn("📡 STATUS DA CONEXÃO", response.text)
+        self.assertIn("Bot de gestão:\n🟢 Online", response.text)
+        self.assertIn("Monitor de sinais:\n⚪ Aguardando integração", response.text)
+        self.assertIn("MetaTrader 5:\n⚪ Não conectado", response.text)
+
+    def test_atualizacao_de_telas(self) -> None:
+        self.service.start(101, "alice")
+
+        response = self.service.handle_callback(101, "alice", "v1:ref:account")
+
+        self.assertEqual(response.screen, "account")
+        self.assertIn("💼 MINHA CONTA", response.text)
+
+    def test_persistencia_das_configuracoes(self) -> None:
+        self.service.start(101, "alice")
+        user = self.users.get_by_telegram_user_id(101)
+        self.service.handle_callback(101, "alice", "set:fixed_lot:0.30")
+
+        new_settings_service = SettingsService(self.database_path)
+        settings = new_settings_service.get_settings(user.id)
+
+        self.assertEqual(settings.fixed_lot, Decimal("0.3"))
+
+    def test_ausencia_de_saldo_ficticio(self) -> None:
+        self.service.start(101, "alice")
+
+        response = self.service.handle_callback(101, "alice", "v1:a")
+
+        self.assertIn("Aguardando conexão", response.text)
+        self.assertNotIn("Saldo: 0", response.text)
+        self.assertNotIn("Equity: 0", response.text)
+
+    def test_ausencia_de_status_online_sem_comprovacao(self) -> None:
+        self.service.start(101, "alice")
+
+        response = self.service.handle_callback(101, "alice", "v1:c")
+
+        self.assertIn("Monitor de sinais:\n⚪ Aguardando integração", response.text)
+        self.assertNotIn("Monitor de sinais:\n🟢 Online", response.text)
+
+    def test_nenhum_token_ou_credencial_exposto(self) -> None:
+        self.service.start(101, "alice")
+        responses = [
+            self.service.menu(101, "alice"),
+            self.service.handle_callback(101, "alice", "v1:a"),
+            self.service.handle_callback(101, "alice", "v1:c"),
+        ]
+        forbidden = ("TELEGRAM_BOT_TOKEN", "API_HASH", "123456:secret", "token")
+
+        for response in responses:
+            for value in forbidden:
+                self.assertNotIn(value, response.text)
+
 
 if __name__ == "__main__":
     unittest.main()

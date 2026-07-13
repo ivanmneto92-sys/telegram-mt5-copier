@@ -87,6 +87,29 @@ class CommandQueue:
         with self._connect() as connection:
             return int(connection.execute(query, params).fetchone()[0])
 
+    def recent_for_user(self, user_id: int, limit: int = 10) -> list[dict[str, str]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT command_type, payload, status, created_at
+                FROM commands
+                WHERE user_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (user_id, limit),
+            ).fetchall()
+
+        return [
+            {
+                "command_type": str(row[0]),
+                "payload": str(row[1]),
+                "status": str(row[2]),
+                "created_at": str(row[3]),
+            }
+            for row in rows
+        ]
+
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.database_path)
 

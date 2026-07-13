@@ -6,9 +6,9 @@ from .bot_keyboards import build_inline_keyboard
 from .bot_service import BotResponse, BotService
 
 
-def telegram_user_from_update(update: Any) -> tuple[int, str | None]:
+def telegram_user_from_update(update: Any) -> tuple[int, str | None, str | None]:
     user = update.effective_user
-    return int(user.id), getattr(user, "username", None)
+    return int(user.id), getattr(user, "username", None), getattr(user, "first_name", None)
 
 
 async def send_response(target: Any, response: BotResponse) -> None:
@@ -17,27 +17,27 @@ async def send_response(target: Any, response: BotResponse) -> None:
 
 
 async def start_handler(update: Any, _context: Any, service: BotService) -> None:
-    telegram_user_id, username = telegram_user_from_update(update)
-    response = service.start(telegram_user_id, username)
+    telegram_user_id, username, first_name = telegram_user_from_update(update)
+    response = service.start(telegram_user_id, username, first_name)
     await send_response(update.message, response)
 
 
 async def menu_handler(update: Any, _context: Any, service: BotService) -> None:
-    telegram_user_id, username = telegram_user_from_update(update)
-    response = service.menu(telegram_user_id, username)
+    telegram_user_id, username, first_name = telegram_user_from_update(update)
+    response = service.menu(telegram_user_id, username, first_name)
     await send_response(update.message, response)
 
 
 async def status_handler(update: Any, _context: Any, service: BotService) -> None:
-    telegram_user_id, username = telegram_user_from_update(update)
-    response = service.status(telegram_user_id, username)
+    telegram_user_id, username, first_name = telegram_user_from_update(update)
+    response = service.status(telegram_user_id, username, first_name)
     await send_response(update.message, response)
 
 
 async def callback_handler(update: Any, _context: Any, service: BotService) -> None:
     query = update.callback_query
     await query.answer()
-    telegram_user_id, username = telegram_user_from_update(update)
-    response = service.handle_callback(telegram_user_id, username, query.data)
+    telegram_user_id, username, first_name = telegram_user_from_update(update)
+    response = service.handle_callback(telegram_user_id, username, query.data, first_name)
     reply_markup = build_inline_keyboard(response.keyboard) if response.keyboard else None
     await query.edit_message_text(response.text, reply_markup=reply_markup)
