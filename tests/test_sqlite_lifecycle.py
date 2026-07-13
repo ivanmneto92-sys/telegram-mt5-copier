@@ -7,9 +7,16 @@ import unittest
 
 from telegram_mt5_copier.bot_service import BotService
 from telegram_mt5_copier.command_queue import CommandQueue
+from telegram_mt5_copier.credential_service import CredentialService
 from telegram_mt5_copier.database import SignalDatabase
+from telegram_mt5_copier.mt5.account_service import MT5AccountForm, MT5AccountService
+from telegram_mt5_copier.mt5.client import SimulatedMT5Client
+from telegram_mt5_copier.mt5.pending_order_executor import PendingOrderExecutor
+from telegram_mt5_copier.mt5.pending_order_monitor import PendingOrderMonitor
+from telegram_mt5_copier.mt5.terminal_manager import TerminalManager
+from telegram_mt5_copier.parser import parse_signal_text
 from telegram_mt5_copier.settings_service import SettingsService
-from telegram_mt5_copier.users import UserRepository
+from telegram_mt5_copier.users import USER_STATUS_ACTIVE, UserRepository
 
 
 class SQLiteLifecycleTests(unittest.TestCase):
@@ -62,6 +69,47 @@ class SQLiteLifecycleTests(unittest.TestCase):
         with SignalDatabase(db_path) as database:
             database.initialize()
             database.record_event(status_dummy(), "test")
+
+        db_path.unlink()
+        shutil.rmtree(root)
+
+    def test_pending_execution_services_allow_immediate_directory_delete(self) -> None:
+        root = Path(tempfile.mkdtemp())
+        db_path = root / "bot.sqlite3"
+        users = UserRepository(db_path)
+        accounts = MT5AccountService(
+            db_path,
+            credential_service=CredentialService(CredentialService.generate_key()),
+            terminal_manager=TerminalManager(root / "mt5"),
+            client_factory=lambda: SimulatedMT5Client(),
+        )
+        executor = PendingOrderExecutor(db_path, accounts, global_kill_switch=False)
+        monitor = PendingOrderMonitor(db_path)
+
+        try:
+            user = users.get_or_create_user(101, "alice")
+            users.set_status(user.id, USER_STATUS_ACTIVE)
+            account = accounts.register_account(
+                user.id,
+                MT5AccountForm("Broker", "Broker-Demo", "12345678", "secret", "Demo"),
+            )
+            accounts.update_execution_profile_fixed_lot(user.id, account.id, "0.04")
+            signal = parse_signal_text(
+                "XAUUSD BUY\nENTRY 4059-4061\nSL 4044\nTP 4066\nTP 4071\nTP 4076\nTP 4096"
+            ).signal
+
+            executor.execute_for_signal(signal)
+            monitor.expire_orders()
+        finally:
+            executor.close()
+            monitor.close()
+            accounts.close()
+            users.close()
+
+        executor.close()
+        monitor.close()
+        accounts.close()
+        users.close()
 
         db_path.unlink()
         shutil.rmtree(root)

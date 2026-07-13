@@ -28,7 +28,11 @@ def main() -> int:
         print("python-telegram-bot nao instalado. Execute o setup do ambiente primeiro.", file=sys.stderr)
         return 2
 
-    service = BotService(config.database_path, admin_ids=config.bot_admin_ids)
+    service = BotService(
+        config.database_path,
+        admin_ids=config.bot_admin_ids,
+        mt5_onboarding_url=config.mt5_onboarding_url,
+    )
     application = Application.builder().token(config.telegram_bot_token).build()
     application.add_handler(CommandHandler("start", functools.partial(start_handler, service=service)))
     application.add_handler(CommandHandler("menu", functools.partial(menu_handler, service=service)))

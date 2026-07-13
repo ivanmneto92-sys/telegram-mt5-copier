@@ -69,6 +69,15 @@ class AppConfig:
     data_dir: Path
     session_dir: Path
     log_dir: Path
+    mt5_credential_key: str | None = field(repr=False)
+    mt5_template_path: Path | None
+    mt5_base_dir: Path
+    mt5_execution_mode: str
+    mt5_max_accounts_per_vps: int
+    mt5_onboarding_url: str | None = field(repr=False)
+    allow_live_accounts: bool
+    default_pending_expiration_minutes: int
+    global_execution_kill_switch: bool
 
     @classmethod
     def load(
@@ -96,6 +105,27 @@ class AppConfig:
             data_dir=_configured_path("DATA_DIR", file_values, runtime_env, root, "./data"),
             session_dir=_configured_path("SESSION_DIR", file_values, runtime_env, root, "./sessions"),
             log_dir=_configured_path("LOG_DIR", file_values, runtime_env, root, "./logs"),
+            mt5_credential_key=_optional_value("MT5_CREDENTIAL_KEY", file_values, runtime_env),
+            mt5_template_path=_optional_path("MT5_TEMPLATE_PATH", file_values, runtime_env, root),
+            mt5_base_dir=_configured_path("MT5_BASE_DIR", file_values, runtime_env, root, "./mt5_accounts"),
+            mt5_execution_mode=_value("MT5_EXECUTION_MODE", file_values, runtime_env, "simulation").strip().lower(),
+            mt5_max_accounts_per_vps=parse_positive_int(
+                _value("MT5_MAX_ACCOUNTS_PER_VPS", file_values, runtime_env, "10"),
+                "MT5_MAX_ACCOUNTS_PER_VPS",
+            ),
+            mt5_onboarding_url=_optional_value("MT5_ONBOARDING_URL", file_values, runtime_env),
+            allow_live_accounts=parse_bool(
+                _value("ALLOW_LIVE_ACCOUNTS", file_values, runtime_env, "false"),
+                default=False,
+            ),
+            default_pending_expiration_minutes=parse_positive_int(
+                _value("DEFAULT_PENDING_EXPIRATION_MINUTES", file_values, runtime_env, "120"),
+                "DEFAULT_PENDING_EXPIRATION_MINUTES",
+            ),
+            global_execution_kill_switch=parse_bool(
+                _value("GLOBAL_EXECUTION_KILL_SWITCH", file_values, runtime_env, "true"),
+                default=True,
+            ),
         )
 
         if create_dirs:
@@ -104,7 +134,7 @@ class AppConfig:
         return config
 
     def ensure_directories(self) -> None:
-        for directory in (self.data_dir, self.session_dir, self.log_dir):
+        for directory in (self.data_dir, self.session_dir, self.log_dir, self.mt5_base_dir):
             directory.mkdir(parents=True, exist_ok=True)
 
     @property
@@ -142,6 +172,16 @@ def parse_admin_ids(value: str | None) -> tuple[int, ...]:
     return tuple(admin_ids)
 
 
+def parse_positive_int(value: str, name: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} deve ser um numero inteiro.") from exc
+    if parsed < 1:
+        raise ValueError(f"{name} deve ser maior que zero.")
+    return parsed
+
+
 def _value(
     name: str,
     file_values: Mapping[str, str],
@@ -168,6 +208,18 @@ def _configured_path(
     default: str,
 ) -> Path:
     value = _value(name, file_values, runtime_env, default) or default
+    return project_path(value, project_root)
+
+
+def _optional_path(
+    name: str,
+    file_values: Mapping[str, str],
+    runtime_env: Mapping[str, str],
+    project_root: Path,
+) -> Path | None:
+    value = _optional_value(name, file_values, runtime_env)
+    if value is None:
+        return None
     return project_path(value, project_root)
 
 

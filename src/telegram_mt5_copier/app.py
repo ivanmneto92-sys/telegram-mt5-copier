@@ -17,6 +17,8 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Executa login interativo no Telegram e salva a sessao em SESSION_DIR.",
     )
+    parser.add_argument("--provision-mt5-account", type=int, help="Provisiona terminal isolado para uma conta MT5.")
+    parser.add_argument("--user-id", type=int, help="ID interno do usuario dono da conta MT5.")
     args = parser.parse_args(argv)
 
     try:
@@ -31,6 +33,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.telegram_login:
         return run_telegram_login(config)
 
+    if args.provision_mt5_account is not None:
+        if args.user_id is None:
+            print("--user-id e obrigatorio com --provision-mt5-account.", file=sys.stderr)
+            return 2
+        return run_mt5_provision(config, args.user_id, args.provision_mt5_account)
+
     return run_service(config)
 
 
@@ -43,6 +51,12 @@ def run_check(config: AppConfig) -> int:
     print(f"SESSION_DIR={config.session_dir}")
     print(f"LOG_DIR={config.log_dir}")
     print(f"SQLITE_DB={config.database_path}")
+    print(f"MT5_BASE_DIR={config.mt5_base_dir}")
+    print(f"MT5_EXECUTION_MODE={config.mt5_execution_mode}")
+    print(f"MT5_MAX_ACCOUNTS_PER_VPS={config.mt5_max_accounts_per_vps}")
+    print(f"ALLOW_LIVE_ACCOUNTS={str(config.allow_live_accounts).lower()}")
+    print(f"DEFAULT_PENDING_EXPIRATION_MINUTES={config.default_pending_expiration_minutes}")
+    print(f"GLOBAL_EXECUTION_KILL_SWITCH={str(config.global_execution_kill_switch).lower()}")
 
     if missing and not config.dry_run:
         print("Variaveis obrigatorias ausentes: " + ", ".join(missing), file=sys.stderr)
@@ -64,6 +78,25 @@ def run_telegram_login(config: AppConfig) -> int:
         return 2
 
     return 0
+
+
+def run_mt5_provision(config: AppConfig, user_id: int, account_id: int) -> int:
+    try:
+        from .mt5.account_service import MT5AccountService
+        from .mt5.terminal_manager import TerminalManager
+
+        terminal_manager = TerminalManager(config.mt5_base_dir, config.mt5_template_path)
+        provisioned = terminal_manager.provision_account(account_id)
+        accounts = MT5AccountService(config.database_path)
+        try:
+            accounts.update_terminal_path(user_id, account_id, provisioned.terminal_path)
+        finally:
+            accounts.close()
+        print(f"Terminal isolado provisionado em: {provisioned.account_dir}")
+        return 0
+    except Exception as exc:
+        print(f"Falha ao provisionar terminal MT5: {exc}", file=sys.stderr)
+        return 2
 
 
 def run_service(config: AppConfig) -> int:

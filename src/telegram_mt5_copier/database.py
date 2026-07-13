@@ -242,6 +242,160 @@ def initialize_database(database_path: Path) -> None:
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS mt5_accounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                broker_name TEXT NOT NULL,
+                server_name TEXT NOT NULL,
+                login TEXT NOT NULL,
+                encrypted_password TEXT NOT NULL,
+                account_alias TEXT NOT NULL,
+                terminal_path TEXT,
+                account_type TEXT NOT NULL,
+                account_mode TEXT NOT NULL DEFAULT 'hedging',
+                connection_status TEXT NOT NULL,
+                last_error TEXT,
+                last_connected_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                UNIQUE (user_id, login, server_name)
+            );
+
+            CREATE TABLE IF NOT EXISTS execution_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                mt5_account_id INTEGER NOT NULL,
+                enabled INTEGER NOT NULL,
+                risk_mode TEXT NOT NULL,
+                fixed_lot TEXT NOT NULL,
+                risk_percent TEXT NOT NULL,
+                max_spread_points INTEGER NOT NULL,
+                max_slippage_points INTEGER NOT NULL,
+                daily_profit_target TEXT NOT NULL,
+                daily_loss_limit TEXT NOT NULL,
+                max_open_signals INTEGER NOT NULL,
+                split_tps INTEGER NOT NULL,
+                breakeven_enabled INTEGER NOT NULL,
+                trailing_enabled INTEGER NOT NULL,
+                entry_execution_mode TEXT NOT NULL DEFAULT 'pending_order',
+                entry_price_mode TEXT NOT NULL DEFAULT 'first_touch',
+                pending_expiration_minutes INTEGER NOT NULL DEFAULT 120,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (mt5_account_id) REFERENCES mt5_accounts(id),
+                UNIQUE (user_id, mt5_account_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS executions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                mt5_account_id INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                requested_volume TEXT NOT NULL,
+                executed_volume TEXT NOT NULL,
+                entry_price TEXT NOT NULL,
+                stop_loss TEXT NOT NULL,
+                take_profit TEXT NOT NULL,
+                terminal_ticket TEXT,
+                error_code TEXT,
+                error_message TEXT,
+                created_at TEXT NOT NULL,
+                executed_at TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (mt5_account_id) REFERENCES mt5_accounts(id),
+                UNIQUE (signal_id, user_id, mt5_account_id, take_profit)
+            );
+
+            CREATE TABLE IF NOT EXISTS execution_groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                mt5_account_id INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                entry_low TEXT NOT NULL,
+                entry_high TEXT NOT NULL,
+                selected_entry_price TEXT NOT NULL,
+                order_type TEXT NOT NULL,
+                total_volume TEXT NOT NULL,
+                stop_loss TEXT NOT NULL,
+                expiration_at TEXT NOT NULL,
+                execution_mode TEXT NOT NULL,
+                signal_received_at TEXT NOT NULL,
+                pending_created_at TEXT NOT NULL,
+                telegram_message_at TEXT,
+                listener_received_at TEXT,
+                signal_parsed_at TEXT,
+                execution_planned_at TEXT,
+                validation_started_at TEXT,
+                validation_finished_at TEXT,
+                mt5_order_sent_at TEXT,
+                broker_response_at TEXT,
+                telegram_to_listener_ms INTEGER,
+                parsing_ms INTEGER,
+                planning_ms INTEGER,
+                validation_ms INTEGER,
+                mt5_submission_ms INTEGER,
+                broker_response_ms INTEGER,
+                total_ms INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                error_code TEXT,
+                error_message TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (mt5_account_id) REFERENCES mt5_accounts(id),
+                UNIQUE (signal_id, user_id, mt5_account_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS execution_orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                execution_group_id INTEGER NOT NULL,
+                tp_index INTEGER NOT NULL,
+                requested_volume TEXT NOT NULL,
+                normalized_volume TEXT NOT NULL,
+                entry_price TEXT NOT NULL,
+                stop_loss TEXT NOT NULL,
+                take_profit TEXT NOT NULL,
+                order_type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                mt5_order_ticket TEXT UNIQUE,
+                mt5_position_ticket TEXT,
+                broker_retcode TEXT,
+                broker_message TEXT,
+                submitted_at TEXT,
+                filled_at TEXT,
+                closed_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (execution_group_id) REFERENCES execution_groups(id),
+                UNIQUE (execution_group_id, tp_index)
+            );
+
+            CREATE TABLE IF NOT EXISTS execution_notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                execution_group_id INTEGER NOT NULL,
+                execution_order_id INTEGER,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (execution_group_id) REFERENCES execution_groups(id),
+                FOREIGN KEY (execution_order_id) REFERENCES execution_orders(id),
+                UNIQUE (event_type, execution_group_id, execution_order_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS audit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                action_type TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_signal_events_status
                 ON signal_events(status);
 
@@ -253,9 +407,40 @@ def initialize_database(database_path: Path) -> None:
 
             CREATE INDEX IF NOT EXISTS idx_admin_actions_admin
                 ON admin_actions(admin_telegram_user_id);
+
+            CREATE INDEX IF NOT EXISTS idx_mt5_accounts_user
+                ON mt5_accounts(user_id);
+
+            CREATE INDEX IF NOT EXISTS idx_mt5_accounts_status
+                ON mt5_accounts(connection_status);
+
+            CREATE INDEX IF NOT EXISTS idx_execution_profiles_user_account
+                ON execution_profiles(user_id, mt5_account_id);
+
+            CREATE INDEX IF NOT EXISTS idx_executions_signal
+                ON executions(signal_id);
+
+            CREATE INDEX IF NOT EXISTS idx_executions_user_account
+                ON executions(user_id, mt5_account_id);
+
+            CREATE INDEX IF NOT EXISTS idx_execution_groups_status
+                ON execution_groups(status);
+
+            CREATE INDEX IF NOT EXISTS idx_execution_groups_user_account
+                ON execution_groups(user_id, mt5_account_id);
+
+            CREATE INDEX IF NOT EXISTS idx_execution_orders_group
+                ON execution_orders(execution_group_id);
+
+            CREATE INDEX IF NOT EXISTS idx_execution_orders_status
+                ON execution_orders(status);
+
+            CREATE INDEX IF NOT EXISTS idx_audit_events_user
+                ON audit_events(user_id);
             """
         )
         cursor.close()
+        run_schema_migrations(connection)
 
 
 @contextmanager
@@ -287,3 +472,39 @@ def as_text(value: int | str | None) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def run_schema_migrations(connection: sqlite3.Connection) -> None:
+    ensure_column(connection, "mt5_accounts", "account_mode", "TEXT NOT NULL DEFAULT 'hedging'")
+    ensure_column(
+        connection,
+        "execution_profiles",
+        "entry_execution_mode",
+        "TEXT NOT NULL DEFAULT 'pending_order'",
+    )
+    ensure_column(
+        connection,
+        "execution_profiles",
+        "entry_price_mode",
+        "TEXT NOT NULL DEFAULT 'first_touch'",
+    )
+    ensure_column(
+        connection,
+        "execution_profiles",
+        "pending_expiration_minutes",
+        "INTEGER NOT NULL DEFAULT 120",
+    )
+
+
+def ensure_column(connection: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:
+    cursor = connection.execute(f"PRAGMA table_info({table_name})")
+    try:
+        existing_columns = {str(row[1]) for row in cursor.fetchall()}
+    finally:
+        cursor.close()
+
+    if column_name in existing_columns:
+        return
+
+    cursor = connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
+    cursor.close()

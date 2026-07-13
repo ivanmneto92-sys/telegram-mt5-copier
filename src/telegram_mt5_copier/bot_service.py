@@ -15,27 +15,67 @@ from .bot_keyboards import (
     CB_CONFIRM_ACTIVATE,
     CB_CONFIRM_PAUSE,
     CB_CONNECTION,
+    CB_CONNECT_MT5,
+    CB_EXEC_ENTRY_MENU,
+    CB_EXEC_ENTRY_MARKET_ZONE,
+    CB_EXEC_ENTRY_PENDING,
+    CB_EXEC_EXPIRATION_MENU,
+    CB_EXEC_EXPIRATION_120,
+    CB_EXEC_EXPIRATION_240,
+    CB_EXEC_EXPIRATION_30,
+    CB_EXEC_EXPIRATION_60,
+    CB_EXEC_EXPIRATION_DAY,
+    CB_EXEC_PRICE_MENU,
+    CB_EXEC_PRICE_DISTRIBUTED,
+    CB_EXEC_PRICE_FIRST_TOUCH,
+    CB_EXEC_PRICE_MIDDLE,
+    CB_EXEC_SPLIT_TPS,
     CB_HISTORY,
     CB_MAIN,
+    CB_MT5_ACCOUNTS,
+    CB_MT5_CONFIG,
+    CB_MT5_CONFIRM_REMOVE,
+    CB_MT5_REMOVE,
+    CB_MT5_SECURE,
+    CB_MT5_TEST,
+    CB_MT5_VIEW,
     CB_OPERATIONS,
     CB_PAUSE,
     CB_PROTECTIONS,
     CB_RISK,
+    CB_SIGNAL_EXECUTION,
     CONFIRM_ACTIVATE,
     CONFIRM_PAUSE,
+    CONFIRM_REMOVE_MT5,
     CONNECTION_MENU,
     HISTORY_MENU,
     MAIN_MENU,
+    MT5_ACCOUNTS_MENU,
     OPERATIONS_MENU,
     PAUSED_MENU,
     PROTECTIONS_MENU,
     RISK_MENU,
+    ENTRY_MODE_MENU,
+    ENTRY_PRICE_MENU,
+    EXPIRATION_MENU,
+    SIGNAL_EXECUTION_MENU,
     extract_fixed_lot,
     extract_refresh_screen,
     is_valid_callback_data,
+    mt5_connect_menu,
     normalize_callback_data,
 )
 from .command_queue import CommandQueue
+from .mt5.account_service import MT5AccountService
+from .mt5.models import (
+    CONNECTION_STATUS_CONNECTED,
+    ENTRY_EXECUTION_MARKET_ON_ZONE,
+    ENTRY_EXECUTION_PENDING_ORDER,
+    ENTRY_PRICE_DISTRIBUTED,
+    ENTRY_PRICE_FIRST_TOUCH,
+    ENTRY_PRICE_MIDDLE,
+    MT5Account,
+)
 from .settings_service import SettingsService, UserSettings, decimal_to_storage
 from .users import USER_STATUS_ACTIVE, USER_STATUS_PAUSED, User, UserRepository
 
@@ -73,11 +113,15 @@ class BotService:
         admin_ids: tuple[int, ...] = (),
         rate_limiter: RateLimiter | None = None,
         account_service: AccountService | None = None,
+        mt5_account_service: MT5AccountService | None = None,
+        mt5_onboarding_url: str | None = None,
     ) -> None:
         self.users = UserRepository(database_path)
         self.settings = SettingsService(database_path)
         self.commands = CommandQueue(database_path)
         self.account_service = account_service or AccountService()
+        self.mt5_accounts = mt5_account_service or MT5AccountService(database_path)
+        self.mt5_onboarding_url = mt5_onboarding_url
         self.admin_ids = set(admin_ids)
         self.rate_limiter = rate_limiter or RateLimiter()
         self._closed = False
@@ -85,7 +129,7 @@ class BotService:
     def close(self) -> None:
         if self._closed:
             return
-        for service in (self.users, self.settings, self.commands):
+        for service in (self.users, self.settings, self.commands, self.mt5_accounts):
             service.close()
         self._closed = True
 
@@ -156,6 +200,113 @@ class BotService:
             return self._history_screen(user)
         if callback == CB_CONNECTION:
             return self._connection_screen(user)
+        if callback == CB_CONNECT_MT5:
+            return self._connect_mt5_screen()
+        if callback == CB_MT5_SECURE:
+            return BotResponse(
+                "Link seguro ainda nao configurado. Defina MT5_ONBOARDING_URL com uma URL HTTPS da Mini App.",
+                mt5_connect_menu(self.mt5_onboarding_url),
+                screen="mt5_connect",
+            )
+        if callback == CB_MT5_ACCOUNTS:
+            return self._mt5_accounts_screen(user)
+        if callback == CB_MT5_VIEW:
+            return self._mt5_accounts_screen(user)
+        if callback == CB_MT5_CONFIG:
+            return self._signal_execution_screen(user)
+        if callback == CB_SIGNAL_EXECUTION:
+            return self._signal_execution_screen(user)
+        if callback == CB_EXEC_ENTRY_MENU:
+            return BotResponse("📍 MODO DE ENTRADA", ENTRY_MODE_MENU, screen="signal_execution")
+        if callback == CB_EXEC_PRICE_MENU:
+            return BotResponse("🎯 PREÇO DA FAIXA", ENTRY_PRICE_MENU, screen="signal_execution")
+        if callback == CB_EXEC_EXPIRATION_MENU:
+            return BotResponse("⏳ VALIDADE DAS ORDENS", EXPIRATION_MENU, screen="signal_execution")
+        if callback in {CB_EXEC_ENTRY_PENDING, CB_EXEC_ENTRY_MARKET_ZONE}:
+            account = self.mt5_accounts.first_account(user.id)
+            if account is None:
+                return self._connect_mt5_screen()
+            value = (
+                ENTRY_EXECUTION_PENDING_ORDER
+                if callback == CB_EXEC_ENTRY_PENDING
+                else ENTRY_EXECUTION_MARKET_ON_ZONE
+            )
+            self.mt5_accounts.update_execution_profile_field(user.id, account.id, "entry_execution_mode", value)
+            return self._signal_execution_screen(user)
+        if callback in {CB_EXEC_PRICE_FIRST_TOUCH, CB_EXEC_PRICE_MIDDLE, CB_EXEC_PRICE_DISTRIBUTED}:
+            account = self.mt5_accounts.first_account(user.id)
+            if account is None:
+                return self._connect_mt5_screen()
+            value = {
+                CB_EXEC_PRICE_FIRST_TOUCH: ENTRY_PRICE_FIRST_TOUCH,
+                CB_EXEC_PRICE_MIDDLE: ENTRY_PRICE_MIDDLE,
+                CB_EXEC_PRICE_DISTRIBUTED: ENTRY_PRICE_DISTRIBUTED,
+            }[callback]
+            self.mt5_accounts.update_execution_profile_field(user.id, account.id, "entry_price_mode", value)
+            return self._signal_execution_screen(user)
+        if callback in {
+            CB_EXEC_EXPIRATION_30,
+            CB_EXEC_EXPIRATION_60,
+            CB_EXEC_EXPIRATION_120,
+            CB_EXEC_EXPIRATION_240,
+            CB_EXEC_EXPIRATION_DAY,
+        }:
+            account = self.mt5_accounts.first_account(user.id)
+            if account is None:
+                return self._connect_mt5_screen()
+            minutes = {
+                CB_EXEC_EXPIRATION_30: 30,
+                CB_EXEC_EXPIRATION_60: 60,
+                CB_EXEC_EXPIRATION_120: 120,
+                CB_EXEC_EXPIRATION_240: 240,
+                CB_EXEC_EXPIRATION_DAY: 1440,
+            }[callback]
+            self.mt5_accounts.update_execution_profile_field(
+                user.id,
+                account.id,
+                "pending_expiration_minutes",
+                minutes,
+            )
+            return self._signal_execution_screen(user)
+        if callback == CB_EXEC_SPLIT_TPS:
+            account = self.mt5_accounts.first_account(user.id)
+            if account is None:
+                return self._connect_mt5_screen()
+            profile = self.mt5_accounts.ensure_execution_profile(user.id, account.id)
+            self.mt5_accounts.update_execution_profile_field(user.id, account.id, "split_tps", int(not profile.split_tps))
+            return self._signal_execution_screen(user)
+        if callback == CB_MT5_TEST:
+            account = self.mt5_accounts.first_account(user.id)
+            if account is None:
+                return self._connect_mt5_screen()
+            try:
+                updated = self.mt5_accounts.test_connection(user.id, account.id)
+            except Exception as exc:
+                return BotResponse(f"Teste de conexao falhou: {exc}", MT5_ACCOUNTS_MENU, screen="mt5_accounts")
+            return BotResponse(
+                f"Conexao testada com sucesso para {updated.masked_login}.",
+                MT5_ACCOUNTS_MENU,
+                screen="mt5_accounts",
+            )
+        if callback == CB_MT5_REMOVE:
+            account = self.mt5_accounts.first_account(user.id)
+            if account is None:
+                return self._connect_mt5_screen()
+            return BotResponse(
+                "\n".join(
+                    [
+                        "🗑️ REMOVER CONTA MT5",
+                        "",
+                        f"Conta: {account.masked_login}",
+                        "",
+                        "Ao confirmar, a senha criptografada e o perfil de execucao serao removidos.",
+                        "",
+                        "Deseja continuar?",
+                    ]
+                ),
+                CONFIRM_REMOVE_MT5,
+                screen="mt5_remove",
+            )
         if callback == CB_ACTIVATE:
             return BotResponse(
                 "\n".join(
@@ -192,6 +343,16 @@ class BotService:
             )
         if callback == CB_CANCEL:
             return BotResponse("Ação cancelada.", MAIN_MENU)
+        if callback == CB_MT5_CONFIRM_REMOVE:
+            account = self.mt5_accounts.first_account(user.id)
+            if account is not None:
+                self.mt5_accounts.remove_account(user.id, account.id)
+                self.commands.enqueue(user.id, "remove_mt5_account", {"account_id": account.id})
+            return BotResponse(
+                "Conta MT5 removida com segurança.",
+                mt5_connect_menu(self.mt5_onboarding_url),
+                screen="mt5_connect",
+            )
         if callback == CB_CONFIRM_ACTIVATE:
             self.users.set_status(user.id, USER_STATUS_ACTIVE)
             self.commands.enqueue(user.id, "set_user_status", {"status": USER_STATUS_ACTIVE})
@@ -285,6 +446,8 @@ class BotService:
             return self._history_screen(user)
         if screen == "connection":
             return self._connection_screen(user)
+        if screen == "mt5_accounts":
+            return self._mt5_accounts_screen(user)
         return self._main_panel(user, first_name=first_name)
 
     def _main_panel(self, user: User, first_name: str | None = None) -> BotResponse:
@@ -439,6 +602,10 @@ class BotService:
         )
 
     def _connection_screen(self, user: User) -> BotResponse:
+        account = self.mt5_accounts.first_account(user.id)
+        mt5_status = "⚪ Não conectado"
+        if account is not None:
+            mt5_status = mt5_account_connection_label(account.connection_status)
         return BotResponse(
             "\n".join(
                 [
@@ -451,7 +618,7 @@ class BotService:
                     "⚪ Aguardando integração",
                     "",
                     "MetaTrader 5:",
-                    "⚪ Não conectado",
+                    mt5_status,
                     "",
                     "Última atualização:",
                     time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -459,6 +626,70 @@ class BotService:
             ),
             CONNECTION_MENU,
             screen="connection",
+        )
+
+    def _connect_mt5_screen(self) -> BotResponse:
+        return BotResponse(
+            "\n".join(
+                [
+                    "🔗 CONECTAR CONTA MT5",
+                    "",
+                    "Nenhuma conta conectada.",
+                    "",
+                    "Cadastre primeiro uma conta de demonstração para validar a conexão.",
+                ]
+            ),
+            mt5_connect_menu(self.mt5_onboarding_url),
+            screen="mt5_connect",
+        )
+
+    def _mt5_accounts_screen(self, user: User) -> BotResponse:
+        account = self.mt5_accounts.first_account(user.id)
+        if account is None:
+            return self._connect_mt5_screen()
+
+        status_label, operations_label = status_labels(user.status)
+        return BotResponse(
+            "\n".join(
+                [
+                    "🖥️ MINHAS CONTAS",
+                    "",
+                    f"Conta: {account.masked_login}",
+                    f"Servidor: {account.server_name}",
+                    f"Tipo: {account_type_label(account)}",
+                    f"Conexão: {mt5_account_connection_label(account.connection_status)}",
+                    f"Copiador: {status_label} / {operations_label}",
+                ]
+            ),
+            MT5_ACCOUNTS_MENU,
+            screen="mt5_accounts",
+        )
+
+    def _signal_execution_screen(self, user: User) -> BotResponse:
+        account = self.mt5_accounts.first_account(user.id)
+        if account is None:
+            return self._connect_mt5_screen()
+        profile = self.mt5_accounts.ensure_execution_profile(user.id, account.id)
+        return BotResponse(
+            "\n".join(
+                [
+                    "⚙️ EXECUÇÃO DOS SINAIS",
+                    "",
+                    "Modo de entrada:",
+                    entry_execution_label(profile.entry_execution_mode),
+                    "",
+                    "Preço dentro da faixa:",
+                    entry_price_label(profile.entry_price_mode),
+                    "",
+                    "Validade:",
+                    expiration_minutes_label(profile.pending_expiration_minutes),
+                    "",
+                    "Divisão entre TPs:",
+                    enabled_label(profile.split_tps),
+                ]
+            ),
+            SIGNAL_EXECUTION_MENU,
+            screen="signal_execution",
         )
 
     def _log_admin_if_needed(self, telegram_user_id: int, target_user_id: int, action_type: str) -> None:
@@ -479,9 +710,50 @@ def status_labels(status: str) -> tuple[str, str]:
 
 
 def connection_label(status: str) -> str:
-    if status == "connected":
+    if status == CONNECTION_STATUS_CONNECTED:
         return "🟢 Conectado"
     return "⚪ Não conectado"
+
+
+def mt5_account_connection_label(status: str) -> str:
+    if status == CONNECTION_STATUS_CONNECTED:
+        return "🟢 Conectada"
+    return "🔴 Desconectada"
+
+
+def account_type_label(account: MT5Account) -> str:
+    if account.account_type == "real":
+        return "Real"
+    return "Demonstração"
+
+
+def entry_execution_label(value: str) -> str:
+    if value == ENTRY_EXECUTION_MARKET_ON_ZONE:
+        return "Mercado ao entrar na zona"
+    return "Ordem pendente"
+
+
+def entry_price_label(value: str) -> str:
+    labels = {
+        ENTRY_PRICE_FIRST_TOUCH: "Primeiro toque",
+        ENTRY_PRICE_MIDDLE: "Meio da faixa",
+        ENTRY_PRICE_DISTRIBUTED: "Distribuir na faixa",
+    }
+    return labels.get(value, "Primeiro toque")
+
+
+def expiration_minutes_label(value: int) -> str:
+    if value == 30:
+        return "30 minutos"
+    if value == 60:
+        return "1 hora"
+    if value == 120:
+        return "2 horas"
+    if value == 240:
+        return "4 horas"
+    if value >= 1440:
+        return "Até o fim do dia"
+    return f"{value} minutos"
 
 
 def financial_value(value: str | None) -> str:

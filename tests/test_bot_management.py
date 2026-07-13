@@ -7,6 +7,11 @@ import unittest
 
 from telegram_mt5_copier.bot_service import BotService
 from telegram_mt5_copier.command_queue import CommandQueue
+from telegram_mt5_copier.credential_service import CredentialService
+from telegram_mt5_copier.mt5.account_service import MT5AccountForm, MT5AccountService
+from telegram_mt5_copier.mt5.client import SimulatedMT5Client
+from telegram_mt5_copier.mt5.models import ENTRY_PRICE_MIDDLE
+from telegram_mt5_copier.mt5.terminal_manager import TerminalManager
 from telegram_mt5_copier.settings_service import SettingsService
 from telegram_mt5_copier.users import USER_STATUS_ACTIVE, USER_STATUS_PAUSED, UserRepository
 
@@ -150,6 +155,57 @@ class BotManagementTests(unittest.TestCase):
         self.assertIn("💼 Minha conta", button_texts)
         self.assertIn("📈 Operações", button_texts)
         self.assertIn("📡 Status da conexão", button_texts)
+        self.assertIn("🔗 Conectar conta MT5", button_texts)
+        self.assertIn("🖥️ Minhas contas", button_texts)
+        self.assertIn("⚙️ Execução dos sinais", button_texts)
+
+    def test_submenu_execucao_dos_sinais_salva_preferencias(self) -> None:
+        accounts = MT5AccountService(
+            self.database_path,
+            credential_service=CredentialService(CredentialService.generate_key()),
+            terminal_manager=TerminalManager(Path(self.temp_dir.name) / "mt5"),
+            client_factory=lambda: SimulatedMT5Client(),
+        )
+        service = BotService(self.database_path, mt5_account_service=accounts)
+        try:
+            service.start(101, "alice")
+            user = self.users.get_by_telegram_user_id(101)
+            account = accounts.register_account(
+                user.id,
+                MT5AccountForm("Broker", "Broker-Demo", "12345678", "secret", "Demo"),
+            )
+
+            response = service.handle_callback(101, "alice", "v1:ex")
+            service.handle_callback(101, "alice", "v1:ex:price:middle")
+            service.handle_callback(101, "alice", "v1:ex:exp:60")
+            service.handle_callback(101, "alice", "v1:ex:split")
+            profile = accounts.get_execution_profile(user.id, account.id)
+
+            self.assertIn("EXECUÇÃO DOS SINAIS", response.text)
+            self.assertEqual(profile.entry_price_mode, ENTRY_PRICE_MIDDLE)
+            self.assertEqual(profile.pending_expiration_minutes, 60)
+            self.assertFalse(profile.split_tps)
+        finally:
+            service.close()
+            accounts.close()
+
+    def test_tela_conectar_conta_mt5_sem_conta(self) -> None:
+        self.service.start(101, "alice")
+
+        response = self.service.handle_callback(101, "alice", "v1:mt5:connect")
+        button_texts = [button.text for row in response.keyboard for button in row]
+
+        self.assertIn("🔗 CONECTAR CONTA MT5", response.text)
+        self.assertIn("Nenhuma conta conectada.", response.text)
+        self.assertIn("🔐 Abrir conexão segura", button_texts)
+
+    def test_minha_contas_sem_conta_abre_onboarding(self) -> None:
+        self.service.start(101, "alice")
+
+        response = self.service.handle_callback(101, "alice", "v1:mt5:accounts")
+
+        self.assertEqual(response.screen, "mt5_connect")
+        self.assertIn("Cadastre primeiro uma conta de demonstração", response.text)
 
     def test_tela_minha_conta_sem_mt5(self) -> None:
         self.service.start(101, "alice")

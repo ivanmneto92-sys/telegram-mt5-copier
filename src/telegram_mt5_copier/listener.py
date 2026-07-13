@@ -11,6 +11,8 @@ from .parser import parse_signal_text
 from .publisher import TelegramPublisher, format_signal
 from .telegram_login import validate_telegram_credentials
 from .validator import validate_signal
+from .mt5.account_service import MT5AccountService
+from .mt5.pending_order_executor import PendingOrderExecutor
 
 SUPPORTED_TEXT_MEDIA = {"text", "photo"}
 IGNORED_MEDIA = {"video", "audio", "voice", "sticker", "document", "media"}
@@ -22,16 +24,20 @@ class SignalProcessor:
         database: SignalDatabase,
         publisher: TelegramPublisher,
         logger: logging.Logger,
+        pending_order_executor: PendingOrderExecutor | None = None,
     ) -> None:
         self.database = database
         self.publisher = publisher
         self.logger = logger
+        self.pending_order_executor = pending_order_executor
         self._closed = False
 
     def close(self) -> None:
         if self._closed:
             return
         self.database.close()
+        if self.pending_order_executor is not None:
+            self.pending_order_executor.close()
         self._closed = True
 
     def __enter__(self) -> "SignalProcessor":
@@ -83,6 +89,17 @@ class SignalProcessor:
         formatted_message = format_signal(signal)
         await self.publisher.publish(signal, formatted_message, client=client)
         self.database.record_accepted(signal, formatted_message)
+        if self.pending_order_executor is not None:
+            execution_results = self.pending_order_executor.execute_for_signal(signal)
+            for result in execution_results:
+                if result.group_result.duplicate:
+                    self.logger.info(
+                        "pending_order_execution: duplicada para user_id=%s account_id=%s",
+                        result.account.user_id,
+                        result.account.id,
+                    )
+                    continue
+                self.logger.info("pending_order_execution:\n%s", result.message)
         accepted_decision = ProcessingDecision(
             DecisionStatus.ACCEPTED,
             "accepted",
@@ -126,7 +143,20 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
     database = SignalDatabase(config.database_path)
     database.initialize()
     publisher = TelegramPublisher(config, logger)
-    processor = SignalProcessor(database, publisher, logger)
+    pending_order_executor = None
+    if config.mt5_execution_mode == "simulation":
+        mt5_accounts = MT5AccountService(
+            config.database_path,
+            allow_live_accounts=config.allow_live_accounts,
+            max_accounts_per_vps=config.mt5_max_accounts_per_vps,
+        )
+        pending_order_executor = PendingOrderExecutor(
+            config.database_path,
+            mt5_accounts,
+            execution_mode=config.mt5_execution_mode,
+            global_kill_switch=config.global_execution_kill_switch,
+        )
+    processor = SignalProcessor(database, publisher, logger, pending_order_executor=pending_order_executor)
 
     client = TelegramClient(str(config.telegram_session_name), api_id, api_hash)
     await client.connect()

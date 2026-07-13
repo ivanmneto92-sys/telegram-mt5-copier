@@ -70,6 +70,7 @@ class ConfigTests(unittest.TestCase):
                 "TELEGRAM_API_ID": "987654321",
                 "TELEGRAM_API_HASH": "super-secret-api-hash",
                 "TELEGRAM_BOT_TOKEN": "123456:secret-bot-token",
+                "MT5_CREDENTIAL_KEY": "mt5-secret-key",
                 "SOURCE_CHAT_ID": "-1001111111111",
                 "DESTINATION_CHAT_ID": "-1002222222222",
                 "BOT_ADMIN_IDS": "123456789",
@@ -115,6 +116,18 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(parse_bool("0"))
         with self.assertRaises(ValueError):
             parse_bool("talvez")
+
+    def test_mt5_defaults_are_safe_for_simulation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp)
+
+            config = AppConfig.load(project_root=project_root, env={}, create_dirs=True)
+
+            self.assertEqual(config.mt5_execution_mode, "simulation")
+            self.assertEqual(config.mt5_max_accounts_per_vps, 10)
+            self.assertFalse(config.allow_live_accounts)
+            self.assertEqual(config.mt5_base_dir, project_root / "mt5_accounts")
+            self.assertTrue(config.mt5_base_dir.is_dir())
 
 
 if __name__ == "__main__":
