@@ -13,24 +13,57 @@ except ImportError:  # pragma: no cover
 
 
 class MT5Client:
+    DEFAULT_TIMEOUT_MS = 60000
+
     def __init__(self, mt5_module: Any | None = None) -> None:
         self._mt5 = mt5_module if mt5_module is not None else _mt5
         self._initialized = False
+        self._last_error: object | None = None
 
-    def initialize(self, terminal_path: Path, login: int, password: str, server: str) -> bool:
+    def initialize(
+        self,
+        terminal_path: Path,
+        login: int,
+        password: str,
+        server: str,
+        *,
+        timeout_ms: int = DEFAULT_TIMEOUT_MS,
+    ) -> bool:
         if self._mt5 is None:
             raise RuntimeError("Pacote MetaTrader5 indisponivel neste ambiente.")
-        initialized = bool(
+        self._last_error = None
+        terminal_initialized = bool(
             self._mt5.initialize(
                 path=str(terminal_path),
-                login=int(login),
-                password=password,
-                server=server,
                 portable=True,
+                timeout=timeout_ms,
             )
         )
-        self._initialized = initialized
-        return initialized
+        self._initialized = terminal_initialized
+        if not terminal_initialized:
+            self._last_error = self.last_error()
+            return False
+
+        logged_in = bool(
+            self._mt5.login(
+                int(login),
+                password=password,
+                server=server,
+                timeout=timeout_ms,
+            )
+        )
+        if not logged_in:
+            self._last_error = self.last_error()
+            return False
+        return True
+
+    def last_error(self) -> object | None:
+        if self._mt5 is None:
+            return self._last_error
+        try:
+            return self._mt5.last_error()
+        except AttributeError:
+            return self._last_error
 
     def shutdown(self) -> None:
         if self._mt5 is not None and self._initialized:
@@ -148,14 +181,27 @@ class SimulatedMT5Client:
         self.order_send_results = list(order_send_results or [])
         self._login: int | None = None
         self._server = ""
+        self._last_error: object | None = None
 
-    def initialize(self, terminal_path: Path, login: int, password: str, server: str) -> bool:
+    def initialize(
+        self,
+        terminal_path: Path,
+        login: int,
+        password: str,
+        server: str,
+        *,
+        timeout_ms: int = MT5Client.DEFAULT_TIMEOUT_MS,
+    ) -> bool:
         _ = terminal_path
         _ = password
+        _ = timeout_ms
         self.initialized = True
         self._login = int(login)
         self._server = server
         return True
+
+    def last_error(self) -> object | None:
+        return self._last_error
 
     def shutdown(self) -> None:
         self.initialized = False

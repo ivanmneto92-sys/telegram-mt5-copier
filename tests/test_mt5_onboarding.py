@@ -204,7 +204,41 @@ class MT5OnboardingTests(unittest.TestCase):
 
         self.assertTrue(fake_mt5.initialize_kwargs["portable"])
         self.assertEqual(fake_mt5.initialize_kwargs["path"], "terminal64.exe")
+        self.assertNotIn("login", fake_mt5.initialize_kwargs)
+        self.assertEqual(fake_mt5.login_args[0], 1234)
+        self.assertEqual(fake_mt5.login_kwargs["server"], "Broker-Demo")
+        self.assertEqual(fake_mt5.call_order, ["initialize", "login"])
         client.shutdown()
+
+    def test_mt5_client_registra_last_error_quando_login_falha(self) -> None:
+        fake_mt5 = FakeMT5Module(login_result=False, last_error=(10004, "server not found"))
+        client = MT5Client(fake_mt5)
+
+        self.assertFalse(client.initialize(Path("terminal64.exe"), 1234, "secret", "Broker-Demo"))
+
+        self.assertEqual(client.last_error(), (10004, "server not found"))
+        client.shutdown()
+
+    def test_falha_de_conexao_salva_last_error_sem_senha(self) -> None:
+        user = self.create_user()
+        failing_client = FailingLoginClient()
+        accounts = MT5AccountService(
+            self.database_path,
+            credential_service=self.credential_service,
+            terminal_manager=self.terminal_manager,
+            client_factory=lambda: failing_client,
+        )
+
+        try:
+            with self.assertRaises(ValueError) as context:
+                accounts.register_account(
+                    user.id,
+                    MT5AccountForm("Broker", "Broker-Demo", "445566", "mt5-secret-password", "Demo"),
+                )
+            self.assertIn("server not found", str(context.exception))
+            self.assertNotIn("mt5-secret-password", str(context.exception))
+        finally:
+            accounts.close()
 
     def test_lock_de_worker(self) -> None:
         provisioned = self.terminal_manager.provision_account(55)
@@ -395,14 +429,41 @@ class FlakyConnectionClient(SimulatedMT5Client):
         return super().account_info()
 
 
+class FailingLoginClient(SimulatedMT5Client):
+    def initialize(self, terminal_path: Path, login: int, password: str, server: str, *, timeout_ms: int = 60000) -> bool:
+        _ = terminal_path
+        _ = login
+        _ = password
+        _ = server
+        _ = timeout_ms
+        self._last_error = (10004, "server not found")
+        return False
+
+
 class FakeMT5Module:
-    def __init__(self) -> None:
+    def __init__(self, *, initialize_result: bool = True, login_result: bool = True, last_error: object = (0, "ok")) -> None:
         self.initialize_kwargs: dict[str, object] = {}
+        self.login_args: tuple[object, ...] = ()
+        self.login_kwargs: dict[str, object] = {}
         self.shutdown_called = False
+        self.initialize_result = initialize_result
+        self.login_result = login_result
+        self._last_error = last_error
+        self.call_order: list[str] = []
 
     def initialize(self, **kwargs):
+        self.call_order.append("initialize")
         self.initialize_kwargs = kwargs
-        return True
+        return self.initialize_result
+
+    def login(self, *args, **kwargs):
+        self.call_order.append("login")
+        self.login_args = args
+        self.login_kwargs = kwargs
+        return self.login_result
+
+    def last_error(self):
+        return self._last_error
 
     def shutdown(self):
         self.shutdown_called = True

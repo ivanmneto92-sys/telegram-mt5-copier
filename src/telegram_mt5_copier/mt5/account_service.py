@@ -147,10 +147,11 @@ class MT5AccountService:
         password: str | None = None
         try:
             password = self.credential_service.decrypt_password(account.encrypted_password)
-            client.initialize(account.terminal_path, int(account.login), password, account.server_name)
+            if not client.initialize(account.terminal_path, int(account.login), password, account.server_name):
+                raise ValueError(mt5_connection_error_message(client))
             info = client.account_info()
             if info is None:
-                raise ValueError("MT5 nao retornou informacoes da conta.")
+                raise ValueError(mt5_connection_error_message(client, "MT5 nao retornou informacoes da conta."))
             if int(info.login) != int(account.login):
                 raise ValueError("Login retornado pelo MT5 nao corresponde a conta cadastrada.")
             if not info.trade_allowed:
@@ -587,3 +588,25 @@ def require_login(value: str) -> str:
     if not normalized.isdigit():
         raise ValueError("login deve conter apenas numeros.")
     return normalized
+
+
+def mt5_connection_error_message(client: object, fallback: str = "MT5 nao conseguiu conectar a conta.") -> str:
+    last_error = None
+    if hasattr(client, "last_error"):
+        try:
+            last_error = client.last_error()
+        except Exception:
+            last_error = None
+    detail = sanitize_mt5_error(last_error)
+    if detail:
+        return f"{fallback} Detalhe MT5: {detail}"
+    return fallback
+
+
+def sanitize_mt5_error(value: object | None) -> str:
+    if value is None:
+        return ""
+    text = " ".join(str(value).split())
+    if not text or "password" in text.lower() or "senha" in text.lower():
+        return ""
+    return text[:240]
