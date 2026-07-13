@@ -3,11 +3,10 @@ from __future__ import annotations
 import argparse
 import logging
 from logging.handlers import RotatingFileHandler
-import signal
 import sys
-from threading import Event
 
 from .config import AppConfig
+from .listener import run_listener
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -17,12 +16,6 @@ def main(argv: list[str] | None = None) -> int:
         "--telegram-login",
         action="store_true",
         help="Executa login interativo no Telegram e salva a sessao em SESSION_DIR.",
-    )
-    parser.add_argument(
-        "--interval-seconds",
-        type=int,
-        default=60,
-        help="Intervalo do loop principal do servico.",
     )
     args = parser.parse_args(argv)
 
@@ -38,7 +31,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.telegram_login:
         return run_telegram_login(config)
 
-    return run_service(config, interval_seconds=args.interval_seconds)
+    return run_service(config)
 
 
 def run_check(config: AppConfig) -> int:
@@ -73,16 +66,13 @@ def run_telegram_login(config: AppConfig) -> int:
     return 0
 
 
-def run_service(config: AppConfig, interval_seconds: int) -> int:
+def run_service(config: AppConfig) -> int:
     logger = build_logger(config)
     missing = config.missing_required_telegram_values()
 
-    if missing and not config.dry_run:
+    if missing:
         logger.error("Variaveis obrigatorias ausentes: %s", ", ".join(missing))
         return 2
-
-    if missing:
-        logger.warning("Valores do Telegram ausentes; servico iniciado em DRY_RUN.")
 
     logger.info("Servico iniciado. DRY_RUN=%s", str(config.dry_run).lower())
     logger.info("DATA_DIR=%s", config.data_dir)
@@ -90,22 +80,11 @@ def run_service(config: AppConfig, interval_seconds: int) -> int:
     logger.info("LOG_DIR=%s", config.log_dir)
     logger.info("SQLITE_DB=%s", config.database_path)
 
-    stop_event = Event()
-
-    def handle_stop(signum: int, _frame: object) -> None:
-        logger.info("Sinal recebido para encerrar: %s", signum)
-        stop_event.set()
-
-    signal.signal(signal.SIGINT, handle_stop)
-    if hasattr(signal, "SIGTERM"):
-        signal.signal(signal.SIGTERM, handle_stop)
-
-    interval = max(1, interval_seconds)
-    while not stop_event.wait(interval):
-        logger.info("Servico ativo.")
-
-    logger.info("Servico encerrado.")
-    return 0
+    try:
+        return run_listener(config, logger)
+    except Exception as exc:
+        logger.error("Falha no monitoramento: %s", exc)
+        return 2
 
 
 def build_logger(config: AppConfig) -> logging.Logger:

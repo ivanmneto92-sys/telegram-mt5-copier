@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 from pathlib import Path
 from typing import Mapping
@@ -58,10 +58,13 @@ def project_path(value: str, project_root: Path) -> Path:
 @dataclass(frozen=True)
 class AppConfig:
     project_root: Path
-    telegram_api_id: str | None
-    telegram_api_hash: str | None
-    source_chat_id: str | None
-    destination_chat_id: str | None
+    telegram_api_id: str | None = field(repr=False)
+    telegram_api_hash: str | None = field(repr=False)
+    telegram_bot_token: str | None = field(repr=False)
+    source_chat_id: str | None = field(repr=False)
+    destination_chat_id: str | None = field(repr=False)
+    bot_admin_ids: tuple[int, ...] = field(repr=False)
+    bot_enabled: bool
     dry_run: bool
     data_dir: Path
     session_dir: Path
@@ -84,8 +87,11 @@ class AppConfig:
             project_root=root,
             telegram_api_id=_optional_value("TELEGRAM_API_ID", file_values, runtime_env),
             telegram_api_hash=_optional_value("TELEGRAM_API_HASH", file_values, runtime_env),
+            telegram_bot_token=_optional_value("TELEGRAM_BOT_TOKEN", file_values, runtime_env),
             source_chat_id=_optional_value("SOURCE_CHAT_ID", file_values, runtime_env),
             destination_chat_id=_optional_value("DESTINATION_CHAT_ID", file_values, runtime_env),
+            bot_admin_ids=parse_admin_ids(_value("BOT_ADMIN_IDS", file_values, runtime_env, "")),
+            bot_enabled=parse_bool(_value("BOT_ENABLED", file_values, runtime_env, "true"), default=True),
             dry_run=parse_bool(_value("DRY_RUN", file_values, runtime_env, "true"), default=True),
             data_dir=_configured_path("DATA_DIR", file_values, runtime_env, root, "./data"),
             session_dir=_configured_path("SESSION_DIR", file_values, runtime_env, root, "./sessions"),
@@ -117,6 +123,23 @@ class AppConfig:
             "DESTINATION_CHAT_ID": self.destination_chat_id,
         }
         return tuple(name for name, value in required.items() if not value)
+
+
+def parse_admin_ids(value: str | None) -> tuple[int, ...]:
+    if not value:
+        return ()
+
+    admin_ids: list[int] = []
+    for raw_item in value.split(","):
+        item = raw_item.strip()
+        if not item:
+            continue
+        try:
+            admin_ids.append(int(item))
+        except ValueError as exc:
+            raise ValueError("BOT_ADMIN_IDS deve conter apenas IDs numericos separados por virgula.") from exc
+
+    return tuple(admin_ids)
 
 
 def _value(

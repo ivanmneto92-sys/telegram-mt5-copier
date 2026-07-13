@@ -1,11 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-import sys
 import tempfile
 import unittest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from telegram_mt5_copier.config import AppConfig, parse_bool, project_path
 
@@ -66,6 +63,42 @@ class ConfigTests(unittest.TestCase):
                     "DESTINATION_CHAT_ID",
                 ),
             )
+
+    def test_config_repr_does_not_expose_telegram_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            secret_values = {
+                "TELEGRAM_API_ID": "987654321",
+                "TELEGRAM_API_HASH": "super-secret-api-hash",
+                "TELEGRAM_BOT_TOKEN": "123456:secret-bot-token",
+                "SOURCE_CHAT_ID": "-1001111111111",
+                "DESTINATION_CHAT_ID": "-1002222222222",
+                "BOT_ADMIN_IDS": "123456789",
+            }
+
+            config = AppConfig.load(
+                project_root=Path(tmp),
+                env=secret_values,
+                create_dirs=False,
+            )
+            rendered_config = repr(config)
+
+            for key, secret_value in secret_values.items():
+                if key == "BOT_ADMIN_IDS":
+                    continue
+                self.assertNotIn(secret_value, rendered_config)
+
+    def test_session_directory_is_created_from_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp)
+
+            config = AppConfig.load(
+                project_root=project_root,
+                env={"SESSION_DIR": "./custom-sessions"},
+                create_dirs=True,
+            )
+
+            self.assertEqual(config.session_dir, project_root / "custom-sessions")
+            self.assertTrue(config.session_dir.is_dir())
 
     def test_relative_and_absolute_paths_are_supported(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

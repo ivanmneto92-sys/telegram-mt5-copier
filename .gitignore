@@ -4,6 +4,7 @@ venv/
 **pycache**/
 __pycache__/
 *.pyc
+*.egg-info/
 *.session
 *.session-journal
 data/

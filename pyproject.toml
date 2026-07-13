@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=69"]
+requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -10,10 +10,19 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "Telethon>=1.36,<2.0",
+    "python-telegram-bot>=21.0,<22.0",
+    "pytest>=8.0,<9.0",
 ]
 
 [project.scripts]
 telegram-mt5-copier = "telegram_mt5_copier.__main__:main"
+telegram-copier = "telegram_mt5_copier.app:main"
+telegram-login = "telegram_mt5_copier.telegram_login:main"
+telegram-management-bot = "telegram_mt5_copier.bot:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["telegram_mt5_copier*"]
