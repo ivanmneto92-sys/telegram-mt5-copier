@@ -10,6 +10,8 @@ class ProvisionedTerminal:
     account_id: int
     account_dir: Path
     terminal_path: Path
+    data_dir: Path
+    logs_dir: Path
 
 
 class TerminalManager:
@@ -31,6 +33,8 @@ class TerminalManager:
         else:
             account_dir.mkdir(parents=True, exist_ok=True)
 
+        data_dir = account_dir / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
         logs_dir = account_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
         heartbeat_path = account_dir / "heartbeat.txt"
@@ -38,4 +42,10 @@ class TerminalManager:
         terminal_path = self.terminal_path(account_id)
         if not terminal_path.exists():
             terminal_path.touch()
-        return ProvisionedTerminal(account_id=account_id, account_dir=account_dir, terminal_path=terminal_path)
+        return ProvisionedTerminal(
+            account_id=account_id,
+            account_dir=account_dir,
+            terminal_path=terminal_path,
+            data_dir=data_dir,
+            logs_dir=logs_dir,
+        )

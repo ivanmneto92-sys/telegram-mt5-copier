@@ -11,7 +11,9 @@ from .parser import parse_signal_text
 from .publisher import TelegramPublisher, format_signal
 from .telegram_login import validate_telegram_credentials
 from .validator import validate_signal
+from .credential_service import CredentialService
 from .mt5.account_service import MT5AccountService
+from .mt5.client import MT5Client, SimulatedMT5Client
 from .mt5.pending_order_executor import PendingOrderExecutor
 
 SUPPORTED_TEXT_MEDIA = {"text", "photo"}
@@ -144,9 +146,13 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
     database.initialize()
     publisher = TelegramPublisher(config, logger)
     pending_order_executor = None
-    if config.mt5_execution_mode == "simulation":
+    if config.mt5_execution_mode in {"simulation", "demo_execution"}:
+        credential_service = CredentialService(config.mt5_credential_key) if config.mt5_credential_key else None
+        if config.mt5_execution_mode == "demo_execution" and credential_service is None:
+            raise ValueError("MT5_CREDENTIAL_KEY obrigatoria para demo_execution.")
         mt5_accounts = MT5AccountService(
             config.database_path,
+            credential_service=credential_service,
             allow_live_accounts=config.allow_live_accounts,
             max_accounts_per_vps=config.mt5_max_accounts_per_vps,
         )
@@ -155,6 +161,7 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
             mt5_accounts,
             execution_mode=config.mt5_execution_mode,
             global_kill_switch=config.global_execution_kill_switch,
+            client_factory=MT5Client if config.mt5_execution_mode == "demo_execution" else SimulatedMT5Client,
         )
     processor = SignalProcessor(database, publisher, logger, pending_order_executor=pending_order_executor)
 

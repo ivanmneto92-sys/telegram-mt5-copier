@@ -256,6 +256,9 @@ def initialize_database(database_path: Path) -> None:
                 connection_status TEXT NOT NULL,
                 last_error TEXT,
                 last_connected_at TEXT,
+                balance TEXT,
+                equity TEXT,
+                worker_heartbeat_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(id),
@@ -476,6 +479,9 @@ def as_text(value: int | str | None) -> str | None:
 
 def run_schema_migrations(connection: sqlite3.Connection) -> None:
     ensure_column(connection, "mt5_accounts", "account_mode", "TEXT NOT NULL DEFAULT 'hedging'")
+    ensure_column(connection, "mt5_accounts", "balance", "TEXT")
+    ensure_column(connection, "mt5_accounts", "equity", "TEXT")
+    ensure_column(connection, "mt5_accounts", "worker_heartbeat_at", "TEXT")
     ensure_column(
         connection,
         "execution_profiles",

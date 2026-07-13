@@ -8,6 +8,8 @@ from typing import Any
 from .database import connect_database, initialize_database, utc_now
 
 COMMAND_STATUS_PENDING = "pending"
+COMMAND_STATUS_DONE = "done"
+COMMAND_STATUS_FAILED = "failed"
 
 
 @dataclass(frozen=True)
@@ -134,6 +136,47 @@ class CommandQueue:
             for row in rows
         ]
 
+    def pending_for_account(self, user_id: int, account_id: int) -> list[Command]:
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                """
+                SELECT id, user_id, command_type, payload, status
+                FROM commands
+                WHERE user_id = ? AND status = ?
+                ORDER BY id ASC
+                """,
+                (user_id, COMMAND_STATUS_PENDING),
+            )
+            try:
+                rows = cursor.fetchall()
+            finally:
+                cursor.close()
+
+        commands = [command_from_row(row, created=False) for row in rows]
+        return [
+            command
+            for command in commands
+            if payload_account_id(command.payload) == account_id
+        ]
+
+    def mark_done(self, command_id: int) -> None:
+        self._mark_status(command_id, COMMAND_STATUS_DONE, None)
+
+    def mark_failed(self, command_id: int, error_message: str) -> None:
+        self._mark_status(command_id, COMMAND_STATUS_FAILED, error_message)
+
+    def _mark_status(self, command_id: int, status: str, error_message: str | None) -> None:
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE commands
+                SET status = ?, executed_at = ?, error_message = ?
+                WHERE id = ?
+                """,
+                (status, utc_now(), error_message, command_id),
+            )
+            cursor.close()
+
 def encode_payload(payload: dict[str, Any]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
@@ -147,3 +190,11 @@ def command_from_row(row: tuple[object, ...], *, created: bool) -> Command:
         status=str(row[4]),
         created=created,
     )
+
+
+def payload_account_id(payload: dict[str, Any]) -> int | None:
+    raw_value = payload.get("mt5_account_id", payload.get("account_id"))
+    try:
+        return int(raw_value)
+    except (TypeError, ValueError):
+        return None

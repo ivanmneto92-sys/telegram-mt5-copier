@@ -260,13 +260,19 @@ class PendingOrderTests(unittest.TestCase):
         self.assertEqual(results[0].account.user_id, self.user.id)
 
     def test_kill_switch_bloqueia_execucao_demo(self) -> None:
-        result = self.executor(execution_mode="demo_execution", global_kill_switch=True).execute_for_account(
+        client = SimulatedMT5Client()
+        result = self.executor(
+            client=client,
+            execution_mode="demo_execution",
+            global_kill_switch=True,
+        ).execute_for_account(
             parse_signal_text(BUY_SIGNAL).signal,
             self.account,
             self.profile(),
         )
 
         self.assertEqual(result.group_result.rejected_reason, "kill_switch_enabled")
+        self.assertFalse(client.initialized)
 
     def test_conta_desconectada_e_conta_real_bloqueadas(self) -> None:
         signal = parse_signal_text(BUY_SIGNAL).signal
@@ -320,6 +326,56 @@ class PendingOrderTests(unittest.TestCase):
             "Lote total insuficiente para dividir entre todos os TPs.",
         )
         self.assertEqual(count_execution_orders(self.database_path), 4)
+
+    def test_demo_execution_roda_order_check_em_todas_e_salva_tickets(self) -> None:
+        client = SimulatedMT5Client(tick=TickInfo(bid=Decimal("4062"), ask=Decimal("4062")))
+        result = self.executor(
+            client=client,
+            execution_mode="demo_execution",
+            global_kill_switch=False,
+        ).execute_for_account(parse_signal_text(BUY_SIGNAL).signal, self.account, self.profile())
+
+        self.assertIsNone(result.group_result.rejected_reason)
+        self.assertEqual(len(client.order_check_requests), 4)
+        self.assertEqual(len(client.order_send_requests), 4)
+        self.assertEqual(client.shutdown_count, 1)
+        self.assertEqual(group_status(self.database_path, result.group_result.group.id), "pending_active")
+        rows = execution_order_rows(self.database_path, result.group_result.group.id)
+        self.assertEqual([row["status"] for row in rows], ["pending_active"] * 4)
+        self.assertEqual([row["ticket"] for row in rows], ["100001", "100002", "100003", "100004"])
+        self.assertIn("ORDENS PENDENTES ENVIADAS EM CONTA DEMO", result.message)
+
+    def test_demo_execution_nao_envia_parcial_se_order_check_falhar(self) -> None:
+        client = SimulatedMT5Client(
+            tick=TickInfo(bid=Decimal("4062"), ask=Decimal("4062")),
+            order_check_results=[
+                {"retcode": 0, "comment": "ok"},
+                {"retcode": 10030, "comment": "invalid stops"},
+            ],
+        )
+
+        result = self.executor(
+            client=client,
+            execution_mode="demo_execution",
+            global_kill_switch=False,
+        ).execute_for_account(parse_signal_text(BUY_SIGNAL).signal, self.account, self.profile())
+
+        self.assertEqual(len(client.order_check_requests), 4)
+        self.assertEqual(len(client.order_send_requests), 0)
+        self.assertEqual(result.group_result.rejected_reason, "order_check_failed:invalid stops")
+        self.assertEqual(count_execution_orders(self.database_path), 0)
+
+    def test_live_execution_permanece_bloqueado_sem_order_send(self) -> None:
+        client = SimulatedMT5Client()
+
+        result = self.executor(
+            client=client,
+            execution_mode="live_execution",
+            global_kill_switch=False,
+        ).execute_for_account(parse_signal_text(BUY_SIGNAL).signal, self.account, self.profile())
+
+        self.assertEqual(result.group_result.rejected_reason, "live_execution_blocked")
+        self.assertEqual(len(client.order_send_requests), 0)
 
     def test_duplicidade_de_sinal_expiracao_120_e_metricas(self) -> None:
         signal = parse_signal_text(BUY_SIGNAL).signal
@@ -432,6 +488,24 @@ def group_status(database_path: Path, group_id: int) -> str:
         finally:
             cursor.close()
     return str(row[0])
+
+
+def execution_order_rows(database_path: Path, group_id: int) -> list[dict[str, str]]:
+    with connect_database(database_path) as connection:
+        cursor = connection.execute(
+            """
+            SELECT status, mt5_order_ticket
+            FROM execution_orders
+            WHERE execution_group_id = ?
+            ORDER BY tp_index ASC
+            """,
+            (group_id,),
+        )
+        try:
+            rows = cursor.fetchall()
+        finally:
+            cursor.close()
+    return [{"status": str(row[0]), "ticket": str(row[1])} for row in rows]
 
 
 if __name__ == "__main__":

@@ -8,8 +8,10 @@ from ..models import decimal_to_text
 from .models import (
     ExecutionGroup,
     ExecutionOrder,
+    GROUP_STATUS_FAILED,
     GROUP_STATUS_SIMULATED,
     LatencyMetrics,
+    ORDER_STATUS_FAILED,
     ORDER_STATUS_SIMULATED,
     PendingOrderPlan,
 )
@@ -285,6 +287,72 @@ class ExecutionRepository:
             )
             cursor.close()
         return int(changed)
+
+    def update_group_status(
+        self,
+        group_id: int,
+        status: str,
+        *,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE execution_groups
+                SET status = ?, updated_at = ?, error_code = ?, error_message = ?
+                WHERE id = ?
+                """,
+                (status, utc_now(), error_code, error_message, group_id),
+            )
+            cursor.close()
+
+    def mark_order_submitted(
+        self,
+        order_id: int,
+        *,
+        ticket: str,
+        broker_retcode: str,
+        broker_message: str,
+        status: str,
+    ) -> None:
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE execution_orders
+                SET status = ?,
+                    mt5_order_ticket = ?,
+                    broker_retcode = ?,
+                    broker_message = ?,
+                    submitted_at = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (status, ticket, broker_retcode, broker_message, utc_now(), utc_now(), order_id),
+            )
+            cursor.close()
+
+    def mark_group_failed(self, group_id: int, reason: str) -> None:
+        now = utc_now()
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE execution_groups
+                SET status = ?, updated_at = ?, error_code = ?, error_message = ?
+                WHERE id = ?
+                """,
+                (GROUP_STATUS_FAILED, now, reason, reason, group_id),
+            )
+            cursor.close()
+            cursor = connection.execute(
+                """
+                UPDATE execution_orders
+                SET status = ?, broker_message = ?, updated_at = ?
+                WHERE execution_group_id = ? AND mt5_order_ticket IS NULL
+                """,
+                (ORDER_STATUS_FAILED, reason, now, group_id),
+            )
+            cursor.close()
 
     def record_notification_once(
         self,

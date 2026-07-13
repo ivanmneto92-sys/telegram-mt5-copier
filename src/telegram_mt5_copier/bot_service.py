@@ -657,7 +657,11 @@ class BotService:
                     f"Conta: {account.masked_login}",
                     f"Servidor: {account.server_name}",
                     f"Tipo: {account_type_label(account)}",
+                    f"Modo: {account_mode_label(account)}",
+                    f"Saldo: {money_label(account.balance)}",
+                    f"Equity: {money_label(account.equity)}",
                     f"Conexão: {mt5_account_connection_label(account.connection_status)}",
+                    f"Heartbeat: {account.worker_heartbeat_at or 'Aguardando worker'}",
                     f"Copiador: {status_label} / {operations_label}",
                 ]
             ),
@@ -725,6 +729,18 @@ def account_type_label(account: MT5Account) -> str:
     if account.account_type == "real":
         return "Real"
     return "Demonstração"
+
+
+def account_mode_label(account: MT5Account) -> str:
+    if account.account_mode == "netting":
+        return "Netting"
+    return "Hedging"
+
+
+def money_label(value: Decimal | None) -> str:
+    if value is None:
+        return "Indisponível"
+    return str(value)
 
 
 def entry_execution_label(value: str) -> str:

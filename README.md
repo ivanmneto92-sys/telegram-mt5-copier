@@ -170,3 +170,52 @@ No Agendador de Tarefas do Windows:
 10. Configure varias tentativas de reinicio para manter o servico ativo apos falhas temporarias.
 
 Confirme que o diretorio de trabalho e a raiz do projeto, pois o script resolve `.env`, `.venv`, `DATA_DIR`, `SESSION_DIR` e `LOG_DIR` a partir dessa pasta.
+
+## Fluxo MT5 completo na VPS Windows
+
+A Mini App de conexão deve ficar publicada atrás de HTTPS. Na VPS, execute `telegram-mt5-onboarding` em `127.0.0.1:8080` e publique essa porta com IIS, Nginx ou outro proxy HTTPS. Configure a URL HTTPS final em `MT5_ONBOARDING_URL` e também no BotFather como Web App do botão de conexão.
+
+Gere a chave de criptografia diretamente na VPS:
+
+```powershell
+.\.venv\Scripts\python.exe -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+Salve o valor em `MT5_CREDENTIAL_KEY` no `.env` da VPS. Nunca envie essa chave ao GitHub.
+
+Configure no `.env` da VPS:
+
+```env
+MT5_TEMPLATE_PATH=C:\Caminho\Para\MT5Modelo
+MT5_BASE_DIR=C:\MT5Accounts
+MT5_EXECUTION_MODE=simulation
+ALLOW_LIVE_ACCOUNTS=false
+GLOBAL_EXECUTION_KILL_SWITCH=true
+MT5_ONBOARDING_URL=https://seu-dominio/mt5
+```
+
+O script `scripts/setup_windows.ps1` instala o pacote `MetaTrader5` somente no Windows. No macOS, o projeto continua sem essa dependência.
+
+Cada conta cadastrada recebe uma pasta isolada em `MT5_BASE_DIR\<mt5_account_id>\`, com `terminal64.exe`, `data\`, `logs\`, `worker.lock` e `heartbeat.txt`. A chamada ao MetaTrader usa modo portable, mantendo os dados junto da cópia isolada do terminal e evitando alternar contas dentro de um mesmo terminal.
+
+Para validar uma conta demo na VPS:
+
+1. Inicie `telegram-mt5-onboarding` atrás de HTTPS.
+2. Inicie `telegram-management-bot`.
+3. No Telegram, toque em `🔗 Conectar conta MT5`.
+4. Cadastre corretora, servidor, login, senha e alias pela Mini App. A senha é enviada por POST, criptografada e nunca é exibida novamente.
+5. Use `🖥️ Minhas contas` e `🔄 Testar conexão` para confirmar login, servidor, tipo Demo/Real, modo Hedging/Netting, saldo e equity.
+6. Inicie `telegram-mt5-worker` para manter heartbeat e reconexão por conta.
+7. Mantenha `MT5_EXECUTION_MODE=simulation` até validar tudo.
+8. Para teste real em conta demo, ajuste `MT5_EXECUTION_MODE=demo_execution` e `GLOBAL_EXECUTION_KILL_SWITCH=false`.
+
+Mantenha `ALLOW_LIVE_ACCOUNTS=false`. Contas reais e `live_execution` permanecem bloqueados.
+
+Serviços sugeridos no Agendador de Tarefas ou serviço Windows dedicado:
+
+- `telegram-management-bot`
+- `telegram-mt5-onboarding`
+- `telegram-copier`
+- `telegram-mt5-worker`
+
+Cada serviço deve usar a pasta raiz do projeto como diretorio de trabalho. Configure reinício automático em caso de falha.

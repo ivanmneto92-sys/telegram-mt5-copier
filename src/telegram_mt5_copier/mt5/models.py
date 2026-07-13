@@ -24,10 +24,16 @@ GROUP_STATUS_SIMULATED = "simulated"
 GROUP_STATUS_REJECTED = "rejected"
 GROUP_STATUS_EXPIRED = "expired"
 GROUP_STATUS_CANCELLED = "cancelled"
+GROUP_STATUS_PENDING_SUBMISSION = "pending_submission"
+GROUP_STATUS_PENDING_ACTIVE = "pending_active"
+GROUP_STATUS_FAILED = "failed"
 ORDER_STATUS_PLANNED = "planned"
 ORDER_STATUS_SIMULATED = "simulated"
 ORDER_STATUS_REJECTED = "rejected"
 ORDER_STATUS_EXPIRED = "expired"
+ORDER_STATUS_PENDING_SUBMISSION = "pending_submission"
+ORDER_STATUS_PENDING_ACTIVE = "pending_active"
+ORDER_STATUS_FAILED = "failed"
 
 
 class PendingOrderType(StrEnum):
@@ -52,6 +58,9 @@ class MT5Account:
     connection_status: str
     last_error: str | None
     last_connected_at: str | None
+    balance: Decimal | None = None
+    equity: Decimal | None = None
+    worker_heartbeat_at: str | None = None
 
     @property
     def masked_login(self) -> str:
@@ -65,6 +74,8 @@ class AccountConnectionInfo:
     server: str
     account_type: str = ACCOUNT_TYPE_DEMO
     account_mode: str = ACCOUNT_MODE_HEDGING
+    balance: Decimal | None = None
+    equity: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -82,6 +93,7 @@ class SymbolInfo:
     trade_tick_size: Decimal = Decimal("0.01")
     digits: int = 2
     stops_level_points: int = 0
+    filling_mode: int | None = None
     trade_allowed: bool = True
 
 

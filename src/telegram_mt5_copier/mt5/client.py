@@ -26,6 +26,7 @@ class MT5Client:
                 login=int(login),
                 password=password,
                 server=server,
+                portable=True,
             )
         )
         self._initialized = initialized
@@ -50,6 +51,8 @@ class MT5Client:
             server=str(getattr(info, "server", "")),
             account_type=account_type,
             account_mode=account_mode,
+            balance=Decimal(str(getattr(info, "balance"))) if hasattr(info, "balance") else None,
+            equity=Decimal(str(getattr(info, "equity"))) if hasattr(info, "equity") else None,
         )
 
     def terminal_info(self) -> TerminalInfo | None:
@@ -73,6 +76,7 @@ class MT5Client:
             trade_tick_size=Decimal(str(getattr(info, "trade_tick_size", "0.01"))),
             digits=int(getattr(info, "digits", 2)),
             stops_level_points=int(getattr(info, "trade_stops_level", 0)),
+            filling_mode=int(getattr(info, "filling_mode")) if hasattr(info, "filling_mode") else None,
             trade_allowed=bool(getattr(info, "trade_mode", 0) != 0),
         )
 
@@ -93,10 +97,23 @@ class MT5Client:
         orders = self._mt5.orders_get() if self._mt5 is not None else None
         return tuple(orders or ())
 
+    def symbol_select(self, symbol: str, enable: bool = True) -> bool:
+        if self._mt5 is None:
+            return False
+        return bool(self._mt5.symbol_select(symbol, enable))
+
     def order_check(self, request: dict[str, object]) -> object | None:
         if self._mt5 is None:
             return None
         return self._mt5.order_check(request)
+
+    def order_send(self, request: dict[str, object]) -> object | None:
+        if self._mt5 is None:
+            return None
+        return self._mt5.order_send(request)
+
+    def constant(self, name: str, default: int) -> int:
+        return int(getattr(self._mt5, name, default)) if self._mt5 is not None else default
 
     def __enter__(self) -> "MT5Client":
         return self
@@ -114,6 +131,8 @@ class SimulatedMT5Client:
         trade_allowed: bool = True,
         symbol_info: SymbolInfo | None = None,
         tick: TickInfo | None = None,
+        order_check_results: list[object] | None = None,
+        order_send_results: list[object] | None = None,
     ) -> None:
         self.account_type = account_type
         self.account_mode = account_mode
@@ -123,6 +142,10 @@ class SimulatedMT5Client:
         self.initialized = False
         self.shutdown_count = 0
         self.order_send_called = False
+        self.order_check_requests: list[dict[str, object]] = []
+        self.order_send_requests: list[dict[str, object]] = []
+        self.order_check_results = list(order_check_results or [])
+        self.order_send_results = list(order_send_results or [])
         self._login: int | None = None
         self._server = ""
 
@@ -147,6 +170,8 @@ class SimulatedMT5Client:
             server=self._server,
             account_type=self.account_type,
             account_mode=self.account_mode,
+            balance=Decimal("10000"),
+            equity=Decimal("10000"),
         )
 
     def terminal_info(self) -> TerminalInfo:
@@ -167,5 +192,33 @@ class SimulatedMT5Client:
     def orders_get(self) -> tuple[object, ...]:
         return ()
 
+    def symbol_select(self, symbol: str, enable: bool = True) -> bool:
+        _ = enable
+        return self.symbol_info(symbol) is not None
+
     def order_check(self, request: dict[str, object]) -> dict[str, object]:
+        self.order_check_requests.append(dict(request))
+        if self.order_check_results:
+            return self.order_check_results.pop(0)
         return {"retcode": 0, "request": request}
+
+    def order_send(self, request: dict[str, object]) -> dict[str, object]:
+        self.order_send_called = True
+        self.order_send_requests.append(dict(request))
+        if self.order_send_results:
+            return self.order_send_results.pop(0)
+        return {"retcode": 10009, "order": 100000 + len(self.order_send_requests), "comment": "simulated"}
+
+    def constant(self, name: str, default: int) -> int:
+        constants = {
+            "TRADE_ACTION_PENDING": 5,
+            "ORDER_TYPE_BUY_LIMIT": 2,
+            "ORDER_TYPE_SELL_LIMIT": 3,
+            "ORDER_TYPE_BUY_STOP": 4,
+            "ORDER_TYPE_SELL_STOP": 5,
+            "ORDER_TIME_SPECIFIED": 2,
+            "ORDER_FILLING_RETURN": 2,
+            "TRADE_RETCODE_PLACED": 10008,
+            "TRADE_RETCODE_DONE": 10009,
+        }
+        return constants.get(name, default)

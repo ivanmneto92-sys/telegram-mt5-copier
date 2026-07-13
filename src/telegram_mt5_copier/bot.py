@@ -6,6 +6,10 @@ import sys
 from .bot_handlers import callback_handler, menu_handler, start_handler, status_handler
 from .bot_service import BotService
 from .config import AppConfig
+from .credential_service import CredentialService
+from .mt5.account_service import MT5AccountService
+from .mt5.client import MT5Client
+from .mt5.terminal_manager import TerminalManager
 
 
 def main() -> int:
@@ -28,9 +32,21 @@ def main() -> int:
         print("python-telegram-bot nao instalado. Execute o setup do ambiente primeiro.", file=sys.stderr)
         return 2
 
+    mt5_account_service = None
+    if config.mt5_credential_key:
+        mt5_account_service = MT5AccountService(
+            config.database_path,
+            credential_service=CredentialService(config.mt5_credential_key),
+            terminal_manager=TerminalManager(config.mt5_base_dir, config.mt5_template_path),
+            client_factory=MT5Client,
+            allow_live_accounts=config.allow_live_accounts,
+            max_accounts_per_vps=config.mt5_max_accounts_per_vps,
+        )
+
     service = BotService(
         config.database_path,
         admin_ids=config.bot_admin_ids,
+        mt5_account_service=mt5_account_service,
         mt5_onboarding_url=config.mt5_onboarding_url,
     )
     application = Application.builder().token(config.telegram_bot_token).build()

@@ -3,6 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import os
 from pathlib import Path
+from typing import Callable
+
+from ..command_queue import Command, CommandQueue
+from .account_service import MT5AccountService
+from .models import MT5Account
 
 
 class WorkerAlreadyRunningError(RuntimeError):
@@ -39,6 +44,103 @@ class AccountWorkerLock:
 
     def __enter__(self) -> "AccountWorkerLock":
         self.acquire()
+        return self
+
+    def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
+        self.close()
+
+
+class MT5AccountWorker:
+    def __init__(
+        self,
+        *,
+        accounts: MT5AccountService,
+        account: MT5Account,
+        backoff_sequence: tuple[int, ...] = (1, 2, 5, 10, 30),
+        command_queue: CommandQueue | None = None,
+        on_error: Callable[[Exception], None] | None = None,
+    ) -> None:
+        if account.terminal_path is None:
+            raise ValueError("Conta MT5 sem terminal provisionado.")
+        self.accounts = accounts
+        self.account = account
+        self.account_dir = account.terminal_path.parent
+        self.lock = AccountWorkerLock(self.account_dir)
+        self.backoff_sequence = backoff_sequence
+        self.command_queue = command_queue
+        self.on_error = on_error
+        self._backoff_index = 0
+        self._started = False
+
+    @property
+    def current_backoff_seconds(self) -> int:
+        return self.backoff_sequence[self._backoff_index]
+
+    def start(self) -> None:
+        if self._started:
+            return
+        self.lock.acquire()
+        self._started = True
+        self.heartbeat()
+
+    def heartbeat(self) -> None:
+        self.lock.heartbeat()
+        self.accounts.update_worker_heartbeat(self.account.user_id, self.account.id)
+
+    def reconnect_once(self) -> bool:
+        if not self._started:
+            self.start()
+        try:
+            self.accounts.test_connection(self.account.user_id, self.account.id)
+            self.heartbeat()
+            self._backoff_index = 0
+            return True
+        except Exception as exc:
+            if self.on_error is not None:
+                self.on_error(exc)
+            self._backoff_index = min(self._backoff_index + 1, len(self.backoff_sequence) - 1)
+            return False
+
+    def process_once(self) -> bool:
+        connected = self.reconnect_once()
+        self.process_commands()
+        return connected
+
+    def process_commands(self) -> int:
+        if self.command_queue is None:
+            return 0
+
+        processed = 0
+        for command in self.command_queue.pending_for_account(self.account.user_id, self.account.id):
+            try:
+                self.process_command(command)
+                self.command_queue.mark_done(command.id)
+            except Exception as exc:
+                self.command_queue.mark_failed(command.id, str(exc))
+                if self.on_error is not None:
+                    self.on_error(exc)
+            processed += 1
+        return processed
+
+    def process_command(self, command: Command) -> None:
+        if command.command_type in {"test_mt5_connection", "refresh_mt5_connection"}:
+            self.accounts.test_connection(self.account.user_id, self.account.id)
+            self.heartbeat()
+            return
+        if command.command_type == "remove_mt5_account":
+            self.stop()
+            return
+        raise ValueError(f"Comando MT5 nao suportado: {command.command_type}")
+
+    def stop(self) -> None:
+        self.lock.close()
+        self._started = False
+
+    def close(self) -> None:
+        self.stop()
+
+    def __enter__(self) -> "MT5AccountWorker":
+        self.start()
         return self
 
     def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:

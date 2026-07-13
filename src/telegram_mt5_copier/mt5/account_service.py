@@ -8,7 +8,7 @@ from typing import Callable
 
 from ..credential_service import CredentialService
 from ..database import connect_database, initialize_database, utc_now
-from .client import SimulatedMT5Client
+from .client import MT5Client
 from .models import (
     ACCOUNT_MODE_HEDGING,
     ACCOUNT_TYPE_DEMO,
@@ -57,7 +57,7 @@ class MT5AccountService:
         self.database_path = database_path
         self.credential_service = credential_service
         self.terminal_manager = terminal_manager
-        self.client_factory = client_factory or SimulatedMT5Client
+        self.client_factory = client_factory or MT5Client
         self.allow_live_accounts = allow_live_accounts
         self.max_accounts_per_vps = max_accounts_per_vps
         self._closed = False
@@ -166,6 +166,9 @@ class MT5AccountService:
                 account_mode=info.account_mode,
                 last_error=None,
                 connected=True,
+                server_name=info.server,
+                balance=info.balance,
+                equity=info.equity,
             )
             self.record_audit(user_id, "mt5_connection_tested", {"account_id": account_id, "status": "connected"})
             return self.get_account(user_id, account_id)
@@ -206,14 +209,20 @@ class MT5AccountService:
         account_mode: str,
         last_error: str | None,
         connected: bool,
+        server_name: str | None = None,
+        balance: Decimal | None = None,
+        equity: Decimal | None = None,
     ) -> None:
         with connect_database(self.database_path) as connection:
             cursor = connection.execute(
                 """
                 UPDATE mt5_accounts
                 SET connection_status = ?,
+                    server_name = COALESCE(NULLIF(?, ''), server_name),
                     account_type = ?,
                     account_mode = ?,
+                    balance = ?,
+                    equity = ?,
                     last_error = ?,
                     last_connected_at = ?,
                     updated_at = ?
@@ -221,8 +230,11 @@ class MT5AccountService:
                 """,
                 (
                     status,
+                    server_name,
                     account_type,
                     account_mode,
+                    str(balance) if balance is not None else None,
+                    str(equity) if equity is not None else None,
                     last_error,
                     utc_now() if connected else None,
                     utc_now(),
@@ -238,7 +250,8 @@ class MT5AccountService:
                 """
                 SELECT id, user_id, broker_name, server_name, login, encrypted_password,
                        account_alias, terminal_path, account_type, connection_status,
-                       last_error, last_connected_at, account_mode
+                       last_error, last_connected_at, account_mode, balance, equity,
+                       worker_heartbeat_at
                 FROM mt5_accounts
                 WHERE user_id = ?
                 ORDER BY id ASC
@@ -257,7 +270,8 @@ class MT5AccountService:
                 """
                 SELECT id, user_id, broker_name, server_name, login, encrypted_password,
                        account_alias, terminal_path, account_type, connection_status,
-                       last_error, last_connected_at, account_mode
+                       last_error, last_connected_at, account_mode, balance, equity,
+                       worker_heartbeat_at
                 FROM mt5_accounts
                 WHERE id = ? AND user_id = ?
                 """,
@@ -425,7 +439,7 @@ class MT5AccountService:
                 SELECT a.id, a.user_id, a.broker_name, a.server_name, a.login,
                        a.encrypted_password, a.account_alias, a.terminal_path,
                        a.account_type, a.connection_status, a.last_error, a.last_connected_at,
-                       a.account_mode,
+                       a.account_mode, a.balance, a.equity, a.worker_heartbeat_at,
                        p.enabled, p.risk_mode, p.fixed_lot, p.risk_percent,
                        p.max_spread_points, p.max_slippage_points, p.daily_profit_target,
                        p.daily_loss_limit, p.max_open_signals, p.split_tps,
@@ -449,10 +463,57 @@ class MT5AccountService:
 
         results: list[tuple[MT5Account, ExecutionProfile]] = []
         for row in rows:
-            account = account_from_row(row[:13])
-            profile = execution_profile_from_row((row[1], row[0], *row[13:]))
+            account = account_from_row(row[:16])
+            profile = execution_profile_from_row((row[1], row[0], *row[16:]))
             results.append((account, profile))
         return results
+
+    def accounts_for_active_users(self) -> list[tuple[MT5Account, ExecutionProfile]]:
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                """
+                SELECT a.id, a.user_id, a.broker_name, a.server_name, a.login,
+                       a.encrypted_password, a.account_alias, a.terminal_path,
+                       a.account_type, a.connection_status, a.last_error, a.last_connected_at,
+                       a.account_mode, a.balance, a.equity, a.worker_heartbeat_at,
+                       p.enabled, p.risk_mode, p.fixed_lot, p.risk_percent,
+                       p.max_spread_points, p.max_slippage_points, p.daily_profit_target,
+                       p.daily_loss_limit, p.max_open_signals, p.split_tps,
+                       p.breakeven_enabled, p.trailing_enabled, p.entry_execution_mode,
+                       p.entry_price_mode, p.pending_expiration_minutes
+                FROM mt5_accounts a
+                JOIN users u ON u.id = a.user_id
+                JOIN execution_profiles p ON p.user_id = a.user_id AND p.mt5_account_id = a.id
+                WHERE u.status = 'active'
+                  AND p.enabled = 1
+                ORDER BY a.id ASC
+                """,
+            )
+            try:
+                rows = cursor.fetchall()
+            finally:
+                cursor.close()
+
+        return [
+            (account_from_row(row[:16]), execution_profile_from_row((row[1], row[0], *row[16:])))
+            for row in rows
+        ]
+
+    def decrypted_password_for_account(self, account: MT5Account) -> str:
+        self._require_credentials()
+        return self.credential_service.decrypt_password(account.encrypted_password)
+
+    def update_worker_heartbeat(self, user_id: int, account_id: int) -> None:
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE mt5_accounts
+                SET worker_heartbeat_at = ?, updated_at = ?
+                WHERE id = ? AND user_id = ?
+                """,
+                (utc_now(), utc_now(), account_id, user_id),
+            )
+            cursor.close()
 
     def record_audit(self, user_id: int, action_type: str, payload: dict[str, object]) -> None:
         with connect_database(self.database_path) as connection:
@@ -486,6 +547,9 @@ def account_from_row(row: tuple[object, ...]) -> MT5Account:
         last_error=str(row[10]) if row[10] else None,
         last_connected_at=str(row[11]) if row[11] else None,
         account_mode=str(row[12]) if len(row) > 12 and row[12] else ACCOUNT_MODE_HEDGING,
+        balance=Decimal(str(row[13])) if len(row) > 13 and row[13] is not None else None,
+        equity=Decimal(str(row[14])) if len(row) > 14 and row[14] is not None else None,
+        worker_heartbeat_at=str(row[15]) if len(row) > 15 and row[15] else None,
     )
 
 

@@ -68,6 +68,8 @@ def validate_telegram_web_app_init_data(
         raise WebAppValidationError("auth_date invalido.") from exc
 
     current_time = int(time.time()) if now is None else now
+    if auth_date > current_time + 60:
+        raise WebAppValidationError("auth_date invalido.")
     if current_time - auth_date > max_age_seconds:
         raise WebAppValidationError("Sessao do Web App expirada.")
 
@@ -249,6 +251,12 @@ def render_onboarding_form(csrf_token: str = "") -> str:
         .then((data) => {{ document.querySelector("input[name='csrf_token']").value = data.csrf_token || ""; }})
         .catch(() => {{}});
     }}
+    document.querySelector("form").addEventListener("submit", () => {{
+      setTimeout(() => {{
+        const passwordInput = document.querySelector("input[name='password']");
+        if (passwordInput) {{ passwordInput.value = ""; }}
+      }}, 0);
+    }});
   </script>
 </body>
 </html>"""

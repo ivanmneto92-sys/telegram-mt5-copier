@@ -140,6 +140,7 @@ if (-not (Test-Path $VenvPython)) {
 
 & $VenvPython -m pip install --upgrade pip
 & $VenvPython -m pip install -r "requirements.txt"
+& $VenvPython -m pip install MetaTrader5
 & $VenvPython -m pip install -e "."
 & $VenvPython -m pytest -v
 

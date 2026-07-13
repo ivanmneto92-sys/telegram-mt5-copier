@@ -8,10 +8,11 @@ import time
 import unittest
 
 from telegram_mt5_copier.credential_service import CredentialService
+from telegram_mt5_copier.command_queue import CommandQueue
 from telegram_mt5_copier.database import connect_database
 from telegram_mt5_copier.mt5.account_service import MT5AccountForm, MT5AccountService
-from telegram_mt5_copier.mt5.account_worker import AccountWorkerLock, WorkerAlreadyRunningError
-from telegram_mt5_copier.mt5.client import SimulatedMT5Client
+from telegram_mt5_copier.mt5.account_worker import AccountWorkerLock, MT5AccountWorker, WorkerAlreadyRunningError
+from telegram_mt5_copier.mt5.client import MT5Client, SimulatedMT5Client
 from telegram_mt5_copier.mt5.execution_simulator import ExecutionSimulator
 from telegram_mt5_copier.mt5.models import CONNECTION_STATUS_CONNECTED, SymbolInfo
 from telegram_mt5_copier.mt5.terminal_manager import TerminalManager
@@ -120,6 +121,20 @@ class MT5OnboardingTests(unittest.TestCase):
         with self.assertRaises(WebAppValidationError):
             validate_telegram_web_app_init_data(init_data, token, now=1001, replay_cache=replay_cache)
 
+    def test_init_data_com_auth_date_futuro_e_rejeitado(self) -> None:
+        token = "123456:bot-token"
+        init_data = build_signed_init_data(
+            token,
+            {
+                "query_id": "abc",
+                "auth_date": "2000",
+                "user": json.dumps({"id": 101}, separators=(",", ":")),
+            },
+        )
+
+        with self.assertRaises(WebAppValidationError):
+            validate_telegram_web_app_init_data(init_data, token, now=1000)
+
     def test_cadastro_de_conta_mascara_login_e_criptografa_senha(self) -> None:
         user = self.create_user()
         form = MT5AccountForm("Broker", "Broker-Demo", "12345678", "mt5-secret-password", "Demo")
@@ -131,6 +146,9 @@ class MT5OnboardingTests(unittest.TestCase):
         self.assertNotEqual(account.encrypted_password, "mt5-secret-password")
         self.assertNotIn("mt5-secret-password", repr(account))
         self.assertEqual(form.password, "")
+        self.assertEqual(account.balance, Decimal("10000"))
+        self.assertEqual(account.equity, Decimal("10000"))
+        self.assertEqual(account.server_name, "Broker-Demo")
 
     def test_isolamento_entre_usuarios(self) -> None:
         alice = self.create_user(101)
@@ -172,7 +190,21 @@ class MT5OnboardingTests(unittest.TestCase):
 
         self.assertEqual(provisioned.account_dir, self.root / "mt5_accounts" / "44")
         self.assertEqual(provisioned.terminal_path, provisioned.account_dir / "terminal64.exe")
+        self.assertEqual(provisioned.data_dir, provisioned.account_dir / "data")
+        self.assertEqual(provisioned.logs_dir, provisioned.account_dir / "logs")
         self.assertTrue(provisioned.account_dir.is_dir())
+        self.assertTrue(provisioned.data_dir.is_dir())
+        self.assertTrue(provisioned.logs_dir.is_dir())
+
+    def test_mt5_client_inicializa_em_modo_portable(self) -> None:
+        fake_mt5 = FakeMT5Module()
+        client = MT5Client(fake_mt5)
+
+        self.assertTrue(client.initialize(Path("terminal64.exe"), 1234, "secret", "Broker-Demo"))
+
+        self.assertTrue(fake_mt5.initialize_kwargs["portable"])
+        self.assertEqual(fake_mt5.initialize_kwargs["path"], "terminal64.exe")
+        client.shutdown()
 
     def test_lock_de_worker(self) -> None:
         provisioned = self.terminal_manager.provision_account(55)
@@ -186,6 +218,65 @@ class MT5OnboardingTests(unittest.TestCase):
         finally:
             first.close()
             second.close()
+
+    def test_worker_atualiza_heartbeat(self) -> None:
+        user = self.create_user()
+        account = self.create_account(user.id)
+        worker = MT5AccountWorker(accounts=self.accounts, account=account)
+
+        try:
+            self.assertTrue(worker.process_once())
+            updated = self.accounts.get_account(user.id, account.id)
+        finally:
+            worker.close()
+
+        self.assertIsNotNone(updated.worker_heartbeat_at)
+        self.assertFalse((account.terminal_path.parent / "worker.lock").exists())
+
+    def test_worker_reconecta_com_backoff(self) -> None:
+        user = self.create_user()
+        account = self.create_account(user.id)
+        attempts = {"count": 0}
+
+        def client_factory():
+            attempts["count"] += 1
+            return FlakyConnectionClient(fail=attempts["count"] == 1)
+
+        flaky_accounts = MT5AccountService(
+            self.database_path,
+            credential_service=self.credential_service,
+            terminal_manager=self.terminal_manager,
+            client_factory=client_factory,
+        )
+        worker = MT5AccountWorker(accounts=flaky_accounts, account=account, backoff_sequence=(1, 2, 5))
+
+        try:
+            self.assertFalse(worker.process_once())
+            self.assertEqual(worker.current_backoff_seconds, 2)
+            self.assertTrue(worker.process_once())
+            self.assertEqual(worker.current_backoff_seconds, 1)
+        finally:
+            worker.close()
+            flaky_accounts.close()
+
+    def test_worker_processa_apenas_comandos_da_propria_conta(self) -> None:
+        user = self.create_user()
+        first = self.create_account(user.id, "111111")
+        second = self.create_account(user.id, "222222")
+        queue = CommandQueue(self.database_path)
+        first_command = queue.enqueue(user.id, "test_mt5_connection", {"mt5_account_id": first.id})
+        second_command = queue.enqueue(user.id, "test_mt5_connection", {"mt5_account_id": second.id})
+        worker = MT5AccountWorker(accounts=self.accounts, account=first, command_queue=queue)
+
+        try:
+            processed = worker.process_commands()
+        finally:
+            worker.close()
+            queue.close()
+
+        self.assertEqual(processed, 1)
+        self.assertEqual(command_status(self.database_path, first_command.id), "done")
+        self.assertEqual(command_status(self.database_path, second_command.id), "pending")
 
     def test_execucao_simulada_divide_tps(self) -> None:
         user = self.create_user()
@@ -291,6 +382,40 @@ def count_executions(database_path: Path) -> int:
             return int(cursor.fetchone()[0])
         finally:
             cursor.close()
+
+
+class FlakyConnectionClient(SimulatedMT5Client):
+    def __init__(self, *, fail: bool) -> None:
+        super().__init__()
+        self.fail = fail
+
+    def account_info(self):
+        if self.fail:
+            return None
+        return super().account_info()
+
+
+class FakeMT5Module:
+    def __init__(self) -> None:
+        self.initialize_kwargs: dict[str, object] = {}
+        self.shutdown_called = False
+
+    def initialize(self, **kwargs):
+        self.initialize_kwargs = kwargs
+        return True
+
+    def shutdown(self):
+        self.shutdown_called = True
+
+
+def command_status(database_path: Path, command_id: int) -> str:
+    with connect_database(database_path) as connection:
+        cursor = connection.execute("SELECT status FROM commands WHERE id = ?", (command_id,))
+        try:
+            row = cursor.fetchone()
+        finally:
+            cursor.close()
+    return str(row[0])
 
 
 if __name__ == "__main__":
