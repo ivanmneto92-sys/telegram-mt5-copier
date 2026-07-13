@@ -208,6 +208,11 @@ class MT5OnboardingService:
         )
 
 
+OUTSIDE_TELEGRAM_MESSAGE = "Abra esta página pelo botão Conectar conta MT5 dentro do bot."
+EMPTY_INIT_DATA_MESSAGE = "Não foi possível identificar sua sessão. Feche esta tela e abra novamente pelo bot."
+VALIDATION_FAILED_MESSAGE = "Não foi possível validar sua sessão do Telegram."
+
+
 def render_onboarding_form(csrf_token: str = "") -> str:
     return f"""<!doctype html>
 <html lang="pt-BR">
@@ -216,17 +221,30 @@ def render_onboarding_form(csrf_token: str = "") -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Conectar MT5</title>
   <style>
-    body {{ font-family: system-ui, -apple-system, Segoe UI, sans-serif; margin: 0; padding: 24px; background: #f6f7f9; color: #15171a; }}
+    :root {{ color-scheme: light; }}
+    body {{ font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif; margin: 0; padding: 24px; background: #f6f7f9; color: #15171a; }}
     main {{ max-width: 520px; margin: 0 auto; }}
+    h1 {{ font-size: 24px; margin: 0 0 10px; }}
+    p {{ line-height: 1.45; }}
+    .panel {{ background: #ffffff; border: 1px solid #dde2ea; border-radius: 8px; padding: 18px; }}
+    .message {{ display: none; margin: 14px 0; padding: 12px; border-radius: 8px; border: 1px solid #d6dae2; background: #ffffff; }}
+    .message.error {{ border-color: #f0b8b8; background: #fff5f5; color: #8a1f1f; }}
+    .message.ok {{ border-color: #b9dfc2; background: #f3fff5; color: #185c28; }}
+    form {{ display: none; }}
     label {{ display: block; margin-top: 14px; font-weight: 600; }}
     input {{ width: 100%; box-sizing: border-box; padding: 12px; border: 1px solid #c9ced6; border-radius: 8px; margin-top: 6px; }}
     button {{ margin-top: 20px; width: 100%; padding: 13px; border: 0; border-radius: 8px; background: #1473e6; color: white; font-weight: 700; }}
+    button:disabled {{ opacity: .62; }}
   </style>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
   <main>
-    <h1>Conectar conta MT5</h1>
-    <form method="post" action="/connect" autocomplete="off">
+    <section class="panel">
+      <h1>Conectar conta MT5</h1>
+      <p id="intro">Preencha os dados da sua conta de demonstração pelo ambiente seguro do Telegram.</p>
+      <div id="message" class="message" role="alert"></div>
+    <form id="connect-form" method="post" action="/api/connect" autocomplete="off">
       <input type="hidden" name="csrf_token" value="{csrf_token}">
       <input type="hidden" name="init_data" id="init_data">
       <label>Corretora<input name="broker_name" required></label>
@@ -236,27 +254,156 @@ def render_onboarding_form(csrf_token: str = "") -> str:
       <label>Apelido da conta<input name="account_alias" required></label>
       <button type="submit">Salvar conexão segura</button>
     </form>
+    <noscript>
+      <div class="message error" style="display:block">Abra esta página pelo botão Conectar conta MT5 dentro do bot.</div>
+    </noscript>
+    </section>
   </main>
   <script>
-    const webApp = window.Telegram && window.Telegram.WebApp;
-    if (webApp) {{
-      webApp.ready();
-      document.getElementById("init_data").value = webApp.initData || "";
-      fetch("/csrf", {{
-        method: "POST",
-        headers: {{ "Content-Type": "application/x-www-form-urlencoded" }},
-        body: new URLSearchParams({{ init_data: webApp.initData || "" }})
-      }})
-        .then((response) => response.ok ? response.json() : Promise.reject())
-        .then((data) => {{ document.querySelector("input[name='csrf_token']").value = data.csrf_token || ""; }})
-        .catch(() => {{}});
-    }}
-    document.querySelector("form").addEventListener("submit", () => {{
-      setTimeout(() => {{
-        const passwordInput = document.querySelector("input[name='password']");
-        if (passwordInput) {{ passwordInput.value = ""; }}
-      }}, 0);
-    }});
+    (function () {{
+      const tg = window.Telegram && window.Telegram.WebApp
+        ? window.Telegram.WebApp
+        : null;
+      var form = document.getElementById("connect-form");
+      var message = document.getElementById("message");
+      var initDataInput = document.getElementById("init_data");
+      var submitButton = form.querySelector("button");
+
+      function showMessage(text, kind) {{
+        message.className = "message " + (kind || "error");
+        message.textContent = text;
+        message.style.display = "block";
+      }}
+
+      function hideMessage() {{
+        message.textContent = "";
+        message.style.display = "none";
+      }}
+
+      function showForm() {{
+        form.style.display = "block";
+      }}
+
+      function hideForm() {{
+        form.style.display = "none";
+      }}
+
+      function encodeForm(fields) {{
+        var pairs = [];
+        for (var key in fields) {{
+          if (Object.prototype.hasOwnProperty.call(fields, key)) {{
+            pairs.push(encodeURIComponent(key) + "=" + encodeURIComponent(fields[key] || ""));
+          }}
+        }}
+        return pairs.join("&");
+      }}
+
+      function postApi(path, fields) {{
+        return fetch(path, {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/x-www-form-urlencoded" }},
+          body: encodeForm(fields)
+        }});
+      }}
+
+      function logFrontend(eventName, fields) {{
+        var payload = fields || {{}};
+        payload.event = eventName;
+        postApi("/api/log", payload).catch(function () {{}});
+      }}
+
+      function friendlyApiError() {{
+        showMessage("Não foi possível validar sua sessão do Telegram.", "error");
+      }}
+
+      window.addEventListener("error", function () {{
+        hideForm();
+        showMessage("Não foi possível abrir a conexão segura. Feche esta tela e tente novamente pelo bot.", "error");
+        logFrontend("frontend_error", {{ has_init_data: initDataInput.value ? "true" : "false" }});
+      }});
+
+      window.addEventListener("unhandledrejection", function () {{
+        hideForm();
+        showMessage("Não foi possível abrir a conexão segura. Feche esta tela e tente novamente pelo bot.", "error");
+        logFrontend("frontend_unhandledrejection", {{ has_init_data: initDataInput.value ? "true" : "false" }});
+      }});
+
+      if (tg) {{
+        tg.ready();
+        tg.expand();
+      }}
+
+      if (!tg) {{
+        hideForm();
+        showMessage("Abra esta página pelo botão Conectar conta MT5 dentro do bot.", "error");
+        logFrontend("telegram_webapp_missing", {{ has_init_data: "false" }});
+        return;
+      }}
+
+      var initData = tg.initData || "";
+      initDataInput.value = initData;
+      logFrontend("telegram_webapp_detected", {{ has_init_data: initData ? "true" : "false" }});
+
+      if (!initData) {{
+        hideForm();
+        showMessage("Não foi possível identificar sua sessão. Feche esta tela e abra novamente pelo bot.", "error");
+        return;
+      }}
+
+      hideMessage();
+      showForm();
+      postApi("/api/csrf", {{ init_data: initData }})
+        .then(function (response) {{
+          if (!response.ok) {{
+            throw new Error("csrf rejected");
+          }}
+          return response.json();
+        }})
+        .then(function (data) {{
+          if (!data || !data.csrf_token) {{
+            throw new Error("csrf missing");
+          }}
+          document.querySelector("input[name='csrf_token']").value = data.csrf_token;
+        }})
+        .catch(function () {{
+          hideForm();
+          friendlyApiError();
+          logFrontend("api_error", {{ endpoint: "csrf", has_init_data: "true" }});
+        }});
+
+      form.addEventListener("submit", function (event) {{
+        event.preventDefault();
+        submitButton.disabled = true;
+        var passwordInput = document.querySelector("input[name='password']");
+        var fields = {{
+          csrf_token: document.querySelector("input[name='csrf_token']").value,
+          init_data: initDataInput.value,
+          broker_name: document.querySelector("input[name='broker_name']").value,
+          server_name: document.querySelector("input[name='server_name']").value,
+          login: document.querySelector("input[name='login']").value,
+          password: passwordInput.value,
+          account_alias: document.querySelector("input[name='account_alias']").value
+        }};
+        postApi("/api/connect", fields)
+          .then(function (response) {{
+            if (!response.ok) {{
+              throw new Error("connect failed");
+            }}
+            return response.json();
+          }})
+          .then(function () {{
+            passwordInput.value = "";
+            hideForm();
+            showMessage("Conta MT5 cadastrada com segurança.", "ok");
+          }})
+          .catch(function () {{
+            passwordInput.value = "";
+            submitButton.disabled = false;
+            showMessage("Não foi possível validar sua sessão do Telegram.", "error");
+            logFrontend("api_error", {{ endpoint: "connect", has_init_data: initDataInput.value ? "true" : "false" }});
+          }});
+      }});
+    }}());
   </script>
 </body>
 </html>"""
