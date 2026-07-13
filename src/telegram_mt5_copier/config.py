@@ -1,0 +1,154 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import os
+from pathlib import Path
+from typing import Mapping
+
+ENV_FILE = ".env"
+
+TRUE_VALUES = {"1", "true", "yes", "y", "on"}
+FALSE_VALUES = {"0", "false", "no", "n", "off"}
+
+
+def load_env_file(env_path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not env_path.exists():
+        return values
+
+    with env_path.open("r", encoding="utf-8") as file:
+        for line_number, raw_line in enumerate(file, start=1):
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                raise ValueError(f"Linha invalida em {ENV_FILE}:{line_number}. Use CHAVE=VALOR.")
+
+            key, value = line.split("=", 1)
+            key = key.strip()
+            if not key:
+                raise ValueError(f"Chave vazia em {ENV_FILE}:{line_number}.")
+            values[key] = _strip_quotes(value.strip())
+
+    return values
+
+
+def parse_bool(value: str | bool | None, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None or value == "":
+        return default
+
+    normalized = value.strip().lower()
+    if normalized in TRUE_VALUES:
+        return True
+    if normalized in FALSE_VALUES:
+        return False
+
+    raise ValueError(f"Valor booleano invalido: {value!r}.")
+
+
+def project_path(value: str, project_root: Path) -> Path:
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path
+    return project_root / path
+
+
+@dataclass(frozen=True)
+class AppConfig:
+    project_root: Path
+    telegram_api_id: str | None
+    telegram_api_hash: str | None
+    source_chat_id: str | None
+    destination_chat_id: str | None
+    dry_run: bool
+    data_dir: Path
+    session_dir: Path
+    log_dir: Path
+
+    @classmethod
+    def load(
+        cls,
+        project_root: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        env_file: Path | None = None,
+        create_dirs: bool = True,
+    ) -> "AppConfig":
+        root = Path.cwd() if project_root is None else Path(project_root)
+        env_path = env_file if env_file is not None else root / ENV_FILE
+        file_values = load_env_file(env_path)
+        runtime_env = os.environ if env is None else env
+
+        config = cls(
+            project_root=root,
+            telegram_api_id=_optional_value("TELEGRAM_API_ID", file_values, runtime_env),
+            telegram_api_hash=_optional_value("TELEGRAM_API_HASH", file_values, runtime_env),
+            source_chat_id=_optional_value("SOURCE_CHAT_ID", file_values, runtime_env),
+            destination_chat_id=_optional_value("DESTINATION_CHAT_ID", file_values, runtime_env),
+            dry_run=parse_bool(_value("DRY_RUN", file_values, runtime_env, "true"), default=True),
+            data_dir=_configured_path("DATA_DIR", file_values, runtime_env, root, "./data"),
+            session_dir=_configured_path("SESSION_DIR", file_values, runtime_env, root, "./sessions"),
+            log_dir=_configured_path("LOG_DIR", file_values, runtime_env, root, "./logs"),
+        )
+
+        if create_dirs:
+            config.ensure_directories()
+
+        return config
+
+    def ensure_directories(self) -> None:
+        for directory in (self.data_dir, self.session_dir, self.log_dir):
+            directory.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def database_path(self) -> Path:
+        return self.data_dir / "telegram_mt5_copier.sqlite3"
+
+    @property
+    def telegram_session_name(self) -> Path:
+        return self.session_dir / "telegram_mt5_copier"
+
+    def missing_required_telegram_values(self) -> tuple[str, ...]:
+        required = {
+            "TELEGRAM_API_ID": self.telegram_api_id,
+            "TELEGRAM_API_HASH": self.telegram_api_hash,
+            "SOURCE_CHAT_ID": self.source_chat_id,
+            "DESTINATION_CHAT_ID": self.destination_chat_id,
+        }
+        return tuple(name for name, value in required.items() if not value)
+
+
+def _value(
+    name: str,
+    file_values: Mapping[str, str],
+    runtime_env: Mapping[str, str],
+    default: str,
+) -> str:
+    return runtime_env.get(name, file_values.get(name, default))
+
+
+def _optional_value(
+    name: str,
+    file_values: Mapping[str, str],
+    runtime_env: Mapping[str, str],
+) -> str | None:
+    value = _value(name, file_values, runtime_env, "")
+    return value or None
+
+
+def _configured_path(
+    name: str,
+    file_values: Mapping[str, str],
+    runtime_env: Mapping[str, str],
+    project_root: Path,
+    default: str,
+) -> Path:
+    value = _value(name, file_values, runtime_env, default) or default
+    return project_path(value, project_root)
+
+
+def _strip_quotes(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value

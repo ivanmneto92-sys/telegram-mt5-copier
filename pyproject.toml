@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "telegram-mt5-copier"
+version = "0.1.0"
+description = "Base portavel para copiador Telegram -> MetaTrader 5."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "Telethon>=1.36,<2.0",
+]
+
+[project.scripts]
+telegram-mt5-copier = "telegram_mt5_copier.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

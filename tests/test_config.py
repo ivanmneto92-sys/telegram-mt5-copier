@@ -1,0 +1,88 @@
+from __future__ import annotations
+
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from telegram_mt5_copier.config import AppConfig, parse_bool, project_path
+
+
+class ConfigTests(unittest.TestCase):
+    def test_default_directories_are_relative_to_project_root_and_created(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp)
+
+            config = AppConfig.load(project_root=project_root, env={}, create_dirs=True)
+
+            self.assertEqual(config.data_dir, project_root / "data")
+            self.assertEqual(config.session_dir, project_root / "sessions")
+            self.assertEqual(config.log_dir, project_root / "logs")
+            self.assertEqual(config.database_path, project_root / "data" / "telegram_mt5_copier.sqlite3")
+            self.assertEqual(config.telegram_session_name, project_root / "sessions" / "telegram_mt5_copier")
+            self.assertTrue(config.data_dir.is_dir())
+            self.assertTrue(config.session_dir.is_dir())
+            self.assertTrue(config.log_dir.is_dir())
+
+    def test_env_file_is_utf8_and_runtime_environment_wins(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp)
+            env_file = project_root / ".env"
+            env_file.write_text(
+                "DRY_RUN=false\n"
+                "DATA_DIR=./dados\n"
+                "SESSION_DIR=./sessoes\n"
+                "LOG_DIR=./logs-do-arquivo\n",
+                encoding="utf-8",
+            )
+
+            config = AppConfig.load(
+                project_root=project_root,
+                env={"LOG_DIR": "./logs-do-ambiente"},
+                create_dirs=False,
+            )
+
+            self.assertFalse(config.dry_run)
+            self.assertEqual(config.data_dir, project_root / "dados")
+            self.assertEqual(config.session_dir, project_root / "sessoes")
+            self.assertEqual(config.log_dir, project_root / "logs-do-ambiente")
+
+    def test_non_dry_run_requires_telegram_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = AppConfig.load(
+                project_root=Path(tmp),
+                env={"DRY_RUN": "false"},
+                create_dirs=False,
+            )
+
+            self.assertEqual(
+                config.missing_required_telegram_values(),
+                (
+                    "TELEGRAM_API_ID",
+                    "TELEGRAM_API_HASH",
+                    "SOURCE_CHAT_ID",
+                    "DESTINATION_CHAT_ID",
+                ),
+            )
+
+    def test_relative_and_absolute_paths_are_supported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp)
+            absolute_path = project_root / "custom-data"
+
+            self.assertEqual(project_path("./data", project_root), project_root / "data")
+            self.assertEqual(project_path(str(absolute_path), project_root), absolute_path)
+
+    def test_bool_parser_accepts_common_values(self) -> None:
+        self.assertTrue(parse_bool("true"))
+        self.assertTrue(parse_bool("1"))
+        self.assertFalse(parse_bool("false"))
+        self.assertFalse(parse_bool("0"))
+        with self.assertRaises(ValueError):
+            parse_bool("talvez")
+
+
+if __name__ == "__main__":
+    unittest.main()

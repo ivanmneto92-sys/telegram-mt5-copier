@@ -1,0 +1,17 @@
+.env
+.venv/
+venv/
+**pycache**/
+__pycache__/
+*.pyc
+*.session
+*.session-journal
+data/
+logs/
+sessions/
+.pytest_cache/
+.DS_Store
+*.sqlite
+*.sqlite3
+*.db
+*.log
