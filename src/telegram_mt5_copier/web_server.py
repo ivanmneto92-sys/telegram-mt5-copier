@@ -288,8 +288,7 @@ def content_security_policy(script_nonce: str = "") -> str:
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data:; "
         "base-uri 'self'; "
-        "form-action 'self'; "
-        "frame-ancestors 'self' https://web.telegram.org https://*.telegram.org"
+        "form-action 'self'"
     )
 
 

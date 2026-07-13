@@ -109,7 +109,9 @@ class MiniAppFrontendTests(unittest.TestCase):
         self.assertEqual(headers.get("Cache-Control"), "no-store")
         self.assertIsNone(headers.get("X-Frame-Options"))
         self.assertIn("https://telegram.org", headers.get("Content-Security-Policy", ""))
+        self.assertNotIn("frame-ancestors", headers.get("Content-Security-Policy", ""))
         self.assertIn("Conectar conta MT5", html)
+        self.assertIn("web_app_ready", html)
 
     def test_nonce_do_html_igual_ao_nonce_da_csp(self) -> None:
         with mini_app_server() as base_url:
@@ -199,6 +201,8 @@ class MiniAppFrontendTests(unittest.TestCase):
         self.assertIn("application/javascript", headers.get("Content-Type", ""))
         self.assertEqual(headers.get("Cache-Control"), "no-store")
         self.assertIn("tg.ready();", body)
+        self.assertIn("TelegramWebviewProxy", body)
+        self.assertIn("web_app_ready", body)
         self.assertIn('postApi("/api/csrf"', body)
 
     def test_navegador_comum_mostra_mensagem_clara(self) -> None:
@@ -216,6 +220,7 @@ class MiniAppFrontendTests(unittest.TestCase):
         self.assertIn("if (!initData)", script)
         self.assertIn('postApi("/api/csrf"', script)
         self.assertIn("setSubmitEnabled(true);", script)
+        self.assertIn("notifyTelegramReady();", script)
         self.assertIn('id="connect-form"', html)
 
 
@@ -274,7 +279,7 @@ def head(url: str) -> dict[str, object]:
 
 
 def extract_inline_script_nonce(html: str) -> str:
-    match = re.search(r"<script nonce=\"([^\"]+)\">window\.__telegramMt5InlineNonceOk", html)
+    match = re.search(r"<script nonce=\"([^\"]+)\">\s+\(function \(\)", html)
     if match is None:
         raise AssertionError("Nonce do script inline nao encontrado.")
     return match.group(1)

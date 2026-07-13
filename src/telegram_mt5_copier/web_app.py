@@ -240,8 +240,25 @@ def render_onboarding_form(script_nonce: str = "", csrf_token: str = "") -> str:
     button {{ margin-top: 20px; width: 100%; padding: 13px; border: 0; border-radius: 8px; background: #1473e6; color: white; font-weight: 700; }}
     button:disabled {{ opacity: .62; }}
   </style>
-  <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <script{nonce_attribute}>window.__telegramMt5InlineNonceOk = true;</script>
+  <script{nonce_attribute}>
+    (function () {{
+      window.__telegramMt5InlineNonceOk = true;
+      function postTelegramEvent(eventType) {{
+        try {{
+          if (window.TelegramWebviewProxy && typeof window.TelegramWebviewProxy.postEvent === "function") {{
+            window.TelegramWebviewProxy.postEvent(eventType, "{{}}");
+            return;
+          }}
+          if (window.external && typeof window.external.notify === "function") {{
+            window.external.notify(JSON.stringify({{ eventType: eventType, eventData: {{}} }}));
+          }}
+        }} catch (_eventError) {{}}
+      }}
+      postTelegramEvent("web_app_ready");
+    }}());
+  </script>
+  <script defer src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script defer src="/miniapp.js"></script>
 </head>
 <body>
   <main>
@@ -264,7 +281,6 @@ def render_onboarding_form(script_nonce: str = "", csrf_token: str = "") -> str:
     </noscript>
     </section>
   </main>
-  <script src="/miniapp.js"></script>
 </body>
 </html>"""
 
@@ -289,12 +305,48 @@ def render_miniapp_script() -> str:
     ? window.Telegram.WebApp
     : null;
 
-  if (tg) {
+  function postTelegramEvent(eventType) {
     try {
-      tg.ready();
-      tg.expand();
-    } catch (_telegramError) {}
+      if (window.TelegramWebviewProxy && typeof window.TelegramWebviewProxy.postEvent === "function") {
+        window.TelegramWebviewProxy.postEvent(eventType, "{}");
+        return;
+      }
+      if (window.external && typeof window.external.notify === "function") {
+        window.external.notify(JSON.stringify({ eventType: eventType, eventData: {} }));
+        return;
+      }
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage(JSON.stringify({ eventType: eventType, eventData: {} }), "*");
+      }
+    } catch (_eventError) {}
   }
+
+  function notifyTelegramReady() {
+    try {
+      if (tg && typeof tg.ready === "function") {
+        tg.ready();
+      } else {
+        postTelegramEvent("web_app_ready");
+      }
+    } catch (_readyError) {
+      postTelegramEvent("web_app_ready");
+    }
+  }
+
+  function notifyTelegramExpanded() {
+    try {
+      if (tg && typeof tg.expand === "function") {
+        tg.expand();
+      } else {
+        postTelegramEvent("web_app_expand");
+      }
+    } catch (_expandError) {
+      postTelegramEvent("web_app_expand");
+    }
+  }
+
+  notifyTelegramReady();
+  notifyTelegramExpanded();
 
   function onReady(callback) {
     if (document.readyState === "loading") {
@@ -375,6 +427,7 @@ def render_miniapp_script() -> str:
     }
 
     window.addEventListener("error", function () {
+      notifyTelegramReady();
       showForm();
       setSubmitEnabled(false);
       showMessage(messages.openError, "error");
@@ -382,6 +435,7 @@ def render_miniapp_script() -> str:
     });
 
     window.addEventListener("unhandledrejection", function () {
+      notifyTelegramReady();
       showForm();
       setSubmitEnabled(false);
       showMessage(messages.openError, "error");
@@ -390,6 +444,7 @@ def render_miniapp_script() -> str:
 
     showForm();
     setSubmitEnabled(false);
+    notifyTelegramReady();
 
     if (!window.fetch) {
       showMessage(messages.openError, "error");
