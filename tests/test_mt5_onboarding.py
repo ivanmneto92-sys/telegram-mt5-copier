@@ -240,6 +240,34 @@ class MT5OnboardingTests(unittest.TestCase):
         finally:
             accounts.close()
 
+    def test_falha_de_conexao_pode_manter_conta_para_reteste_manual(self) -> None:
+        user = self.create_user()
+        failing_client = FailingLoginClient()
+        accounts = MT5AccountService(
+            self.database_path,
+            credential_service=self.credential_service,
+            terminal_manager=self.terminal_manager,
+            client_factory=lambda: failing_client,
+        )
+
+        try:
+            account = accounts.register_account(
+                user.id,
+                MT5AccountForm("Broker", "Broker-Demo", "445566", "mt5-secret-password", "Demo"),
+                keep_on_connection_failure=True,
+            )
+            accounts_for_user = accounts.list_accounts(user.id)
+
+            self.assertEqual(len(accounts_for_user), 1)
+            self.assertEqual(accounts_for_user[0].id, account.id)
+            self.assertEqual(account.connection_status, "failed")
+            self.assertIn("server not found", account.last_error or "")
+            self.assertNotIn("mt5-secret-password", account.last_error or "")
+            self.assertIsNotNone(account.terminal_path)
+            self.assertTrue(account.terminal_path.parent.is_dir())
+        finally:
+            accounts.close()
+
     def test_lock_de_worker(self) -> None:
         provisioned = self.terminal_manager.provision_account(55)
         first = AccountWorkerLock(provisioned.account_dir)

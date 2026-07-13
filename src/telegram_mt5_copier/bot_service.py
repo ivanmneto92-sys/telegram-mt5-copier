@@ -649,6 +649,7 @@ class BotService:
             return self._connect_mt5_screen()
 
         status_label, operations_label = status_labels(user.status)
+        error_lines = ["", f"Erro: {account.last_error}"] if account.last_error else []
         return BotResponse(
             "\n".join(
                 [
@@ -663,6 +664,7 @@ class BotService:
                     f"Conexão: {mt5_account_connection_label(account.connection_status)}",
                     f"Heartbeat: {account.worker_heartbeat_at or 'Aguardando worker'}",
                     f"Copiador: {status_label} / {operations_label}",
+                    *error_lines,
                 ]
             ),
             MT5_ACCOUNTS_MENU,

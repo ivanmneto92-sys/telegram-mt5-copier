@@ -43,6 +43,14 @@ class MT5AccountForm:
         )
 
 
+class MT5ConnectionTestError(ValueError):
+    pass
+
+
+class MT5UnsafeAccountError(ValueError):
+    pass
+
+
 class MT5AccountService:
     def __init__(
         self,
@@ -72,7 +80,13 @@ class MT5AccountService:
     def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
         self.close()
 
-    def register_account(self, user_id: int, form: MT5AccountForm) -> MT5Account:
+    def register_account(
+        self,
+        user_id: int,
+        form: MT5AccountForm,
+        *,
+        keep_on_connection_failure: bool = False,
+    ) -> MT5Account:
         self._require_credentials()
         broker_name = require_text(form.broker_name, "broker_name")
         server_name = require_text(form.server_name, "server_name")
@@ -131,7 +145,14 @@ class MT5AccountService:
             self.ensure_execution_profile(user_id, account_id)
             self.test_connection(user_id, account_id)
             self.record_audit(user_id, "mt5_account_registered", {"account_id": account_id})
-        except Exception:
+        except Exception as exc:
+            if keep_on_connection_failure and not isinstance(exc, MT5UnsafeAccountError):
+                self.record_audit(
+                    user_id,
+                    "mt5_account_registered_with_connection_failure",
+                    {"account_id": account_id},
+                )
+                return self.get_account(user_id, account_id)
             self.remove_account(user_id, account_id)
             raise
 
@@ -148,16 +169,18 @@ class MT5AccountService:
         try:
             password = self.credential_service.decrypt_password(account.encrypted_password)
             if not client.initialize(account.terminal_path, int(account.login), password, account.server_name):
-                raise ValueError(mt5_connection_error_message(client))
+                raise MT5ConnectionTestError(mt5_connection_error_message(client))
             info = client.account_info()
             if info is None:
-                raise ValueError(mt5_connection_error_message(client, "MT5 nao retornou informacoes da conta."))
+                raise MT5ConnectionTestError(
+                    mt5_connection_error_message(client, "MT5 nao retornou informacoes da conta.")
+                )
             if int(info.login) != int(account.login):
-                raise ValueError("Login retornado pelo MT5 nao corresponde a conta cadastrada.")
+                raise MT5ConnectionTestError("Login retornado pelo MT5 nao corresponde a conta cadastrada.")
             if not info.trade_allowed:
-                raise ValueError("Conta MT5 nao permite negociacao.")
+                raise MT5ConnectionTestError("Conta MT5 nao permite negociacao.")
             if info.account_type == ACCOUNT_TYPE_REAL and not self.allow_live_accounts:
-                raise ValueError("Contas reais estao bloqueadas nesta fase.")
+                raise MT5UnsafeAccountError("Contas reais estao bloqueadas nesta fase.")
 
             self.update_connection_status(
                 user_id,

@@ -200,7 +200,7 @@ class MT5OnboardingService:
             password=password,
             account_alias=account_alias,
         )
-        account = self.accounts.register_account(user.id, form)
+        account = self.accounts.register_account(user.id, form, keep_on_connection_failure=True)
         password = ""
         return OnboardingResult(
             account_id=account.id,
