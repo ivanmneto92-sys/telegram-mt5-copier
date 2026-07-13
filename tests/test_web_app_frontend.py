@@ -16,6 +16,7 @@ from telegram_mt5_copier.web_app import (
     VALIDATION_FAILED_MESSAGE,
     CSRFTokenService,
     build_signed_init_data,
+    render_miniapp_script,
     render_onboarding_form,
 )
 from telegram_mt5_copier.web_server import OnboardingHandler
@@ -26,7 +27,7 @@ class MiniAppFrontendTests(unittest.TestCase):
         html = render_onboarding_form()
 
         telegram_script_index = html.index('src="https://telegram.org/js/telegram-web-app.js"')
-        app_script_index = html.index("(function ()")
+        app_script_index = html.index('src="/miniapp.js"')
 
         self.assertLess(telegram_script_index, app_script_index)
 
@@ -43,9 +44,9 @@ class MiniAppFrontendTests(unittest.TestCase):
         self.assertIn(OUTSIDE_TELEGRAM_MESSAGE, html)
 
     def test_init_data_vazio_gera_mensagem(self) -> None:
-        html = render_onboarding_form()
+        script = render_miniapp_script()
 
-        self.assertIn(EMPTY_INIT_DATA_MESSAGE, html)
+        self.assertIn(EMPTY_INIT_DATA_MESSAGE, script)
 
     def test_init_data_invalido_gera_mensagem_generica(self) -> None:
         with mini_app_server() as base_url:
@@ -86,14 +87,17 @@ class MiniAppFrontendTests(unittest.TestCase):
 
     def test_fetch_nao_aponta_para_localhost(self) -> None:
         html = render_onboarding_form()
+        script = render_miniapp_script()
 
-        self.assertIn('fetch(path, {', html)
-        self.assertIn('postApi("/api/csrf"', html)
-        self.assertIn('postApi("/api/connect"', html)
-        self.assertIn('postApi("/api/log"', html)
+        self.assertIn('src="/miniapp.js"', html)
+        self.assertIn('fetch(path, {', script)
+        self.assertIn('postApi("/api/csrf"', script)
+        self.assertIn('postApi("/api/connect"', script)
+        self.assertIn('postApi("/api/log"', script)
         self.assertNotIn('fetch("http', html)
-        self.assertNotIn("localhost", html)
-        self.assertNotIn("127.0.0.1", html)
+        self.assertNotIn('fetch("http', script)
+        self.assertNotIn("localhost", html + script)
+        self.assertNotIn("127.0.0.1", html + script)
 
     def test_headers_html_sao_compativeis_com_telegram(self) -> None:
         with mini_app_server() as base_url:
@@ -185,17 +189,33 @@ class MiniAppFrontendTests(unittest.TestCase):
         self.assertEqual(favicon["status"], 204)
         self.assertEqual(favicon["body"], b"")
 
+    def test_miniapp_js_retorna_javascript(self) -> None:
+        with mini_app_server() as base_url:
+            with urlopen(f"{base_url}/miniapp.js?v=2", timeout=5) as response:
+                body = response.read().decode("utf-8")
+                headers = response.headers
+
+        self.assertEqual(response.status, 200)
+        self.assertIn("application/javascript", headers.get("Content-Type", ""))
+        self.assertEqual(headers.get("Cache-Control"), "no-store")
+        self.assertIn("tg.ready();", body)
+        self.assertIn('postApi("/api/csrf"', body)
+
     def test_navegador_comum_mostra_mensagem_clara(self) -> None:
         html = render_onboarding_form("test-nonce")
 
         self.assertIn(f'<div id="message" class="message error" role="alert">{OUTSIDE_TELEGRAM_MESSAGE}</div>', html)
+        self.assertIn('id="connect-form"', html)
+        self.assertIn("form { display: block; }", html)
 
     def test_telegram_valido_mostra_formulario(self) -> None:
         html = render_onboarding_form("test-nonce")
+        script = render_miniapp_script()
 
-        self.assertIn("var initData = tg.initData || \"\";", html)
-        self.assertIn("if (!initData)", html)
-        self.assertIn("hideMessage();\n      showForm();\n      postApi(\"/api/csrf\"", html)
+        self.assertIn("var initData = tg.initData || \"\";", script)
+        self.assertIn("if (!initData)", script)
+        self.assertIn('postApi("/api/csrf"', script)
+        self.assertIn("setSubmitEnabled(true);", script)
         self.assertIn('id="connect-form"', html)
 
 
@@ -254,7 +274,7 @@ def head(url: str) -> dict[str, object]:
 
 
 def extract_inline_script_nonce(html: str) -> str:
-    match = re.search(r"<script nonce=\"([^\"]+)\">\s*\(function \(\)", html)
+    match = re.search(r"<script nonce=\"([^\"]+)\">window\.__telegramMt5InlineNonceOk", html)
     if match is None:
         raise AssertionError("Nonce do script inline nao encontrado.")
     return match.group(1)

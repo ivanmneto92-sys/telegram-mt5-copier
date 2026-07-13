@@ -212,6 +212,7 @@ class MT5OnboardingService:
 OUTSIDE_TELEGRAM_MESSAGE = "Abra esta página pelo botão Conectar conta MT5 dentro do bot."
 EMPTY_INIT_DATA_MESSAGE = "Não foi possível identificar sua sessão. Feche esta tela e abra novamente pelo bot."
 VALIDATION_FAILED_MESSAGE = "Não foi possível validar sua sessão do Telegram."
+FRIENDLY_OPEN_ERROR_MESSAGE = "Não foi possível abrir a conexão segura. Feche esta tela e tente novamente pelo bot."
 
 
 def render_onboarding_form(script_nonce: str = "", csrf_token: str = "") -> str:
@@ -232,13 +233,15 @@ def render_onboarding_form(script_nonce: str = "", csrf_token: str = "") -> str:
     .message {{ display: block; margin: 14px 0; padding: 12px; border-radius: 8px; border: 1px solid #d6dae2; background: #ffffff; }}
     .message.error {{ border-color: #f0b8b8; background: #fff5f5; color: #8a1f1f; }}
     .message.ok {{ border-color: #b9dfc2; background: #f3fff5; color: #185c28; }}
-    form {{ display: none; }}
+    .message.notice {{ border-color: #b9cce8; background: #f4f8ff; color: #17406f; }}
+    form {{ display: block; }}
     label {{ display: block; margin-top: 14px; font-weight: 600; }}
     input {{ width: 100%; box-sizing: border-box; padding: 12px; border: 1px solid #c9ced6; border-radius: 8px; margin-top: 6px; }}
     button {{ margin-top: 20px; width: 100%; padding: 13px; border: 0; border-radius: 8px; background: #1473e6; color: white; font-weight: 700; }}
     button:disabled {{ opacity: .62; }}
   </style>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script{nonce_attribute}>window.__telegramMt5InlineNonceOk = true;</script>
 </head>
 <body>
   <main>
@@ -261,154 +264,220 @@ def render_onboarding_form(script_nonce: str = "", csrf_token: str = "") -> str:
     </noscript>
     </section>
   </main>
-  <script{nonce_attribute}>
-    (function () {{
-      const tg = window.Telegram && window.Telegram.WebApp
-        ? window.Telegram.WebApp
-        : null;
-      var form = document.getElementById("connect-form");
-      var message = document.getElementById("message");
-      var initDataInput = document.getElementById("init_data");
-      var submitButton = form.querySelector("button");
-
-      function showMessage(text, kind) {{
-        message.className = "message " + (kind || "error");
-        message.textContent = text;
-        message.style.display = "block";
-      }}
-
-      function hideMessage() {{
-        message.textContent = "";
-        message.style.display = "none";
-      }}
-
-      function showForm() {{
-        form.style.display = "block";
-      }}
-
-      function hideForm() {{
-        form.style.display = "none";
-      }}
-
-      function encodeForm(fields) {{
-        var pairs = [];
-        for (var key in fields) {{
-          if (Object.prototype.hasOwnProperty.call(fields, key)) {{
-            pairs.push(encodeURIComponent(key) + "=" + encodeURIComponent(fields[key] || ""));
-          }}
-        }}
-        return pairs.join("&");
-      }}
-
-      function postApi(path, fields) {{
-        return fetch(path, {{
-          method: "POST",
-          headers: {{ "Content-Type": "application/x-www-form-urlencoded" }},
-          body: encodeForm(fields)
-        }});
-      }}
-
-      function logFrontend(eventName, fields) {{
-        var payload = fields || {{}};
-        payload.event = eventName;
-        postApi("/api/log", payload).catch(function () {{}});
-      }}
-
-      function friendlyApiError() {{
-        showMessage("Não foi possível validar sua sessão do Telegram.", "error");
-      }}
-
-      window.addEventListener("error", function () {{
-        hideForm();
-        showMessage("Não foi possível abrir a conexão segura. Feche esta tela e tente novamente pelo bot.", "error");
-        logFrontend("frontend_error", {{ has_init_data: initDataInput.value ? "true" : "false" }});
-      }});
-
-      window.addEventListener("unhandledrejection", function () {{
-        hideForm();
-        showMessage("Não foi possível abrir a conexão segura. Feche esta tela e tente novamente pelo bot.", "error");
-        logFrontend("frontend_unhandledrejection", {{ has_init_data: initDataInput.value ? "true" : "false" }});
-      }});
-
-      if (tg) {{
-        tg.ready();
-        tg.expand();
-      }}
-
-      if (!tg) {{
-        hideForm();
-        showMessage("Abra esta página pelo botão Conectar conta MT5 dentro do bot.", "error");
-        logFrontend("telegram_webapp_missing", {{ has_init_data: "false" }});
-        return;
-      }}
-
-      var initData = tg.initData || "";
-      initDataInput.value = initData;
-      logFrontend("telegram_webapp_detected", {{ has_init_data: initData ? "true" : "false" }});
-
-      if (!initData) {{
-        hideForm();
-        showMessage("Não foi possível identificar sua sessão. Feche esta tela e abra novamente pelo bot.", "error");
-        return;
-      }}
-
-      hideMessage();
-      showForm();
-      postApi("/api/csrf", {{ init_data: initData }})
-        .then(function (response) {{
-          if (!response.ok) {{
-            throw new Error("csrf rejected");
-          }}
-          return response.json();
-        }})
-        .then(function (data) {{
-          if (!data || !data.csrf_token) {{
-            throw new Error("csrf missing");
-          }}
-          document.querySelector("input[name='csrf_token']").value = data.csrf_token;
-        }})
-        .catch(function () {{
-          hideForm();
-          friendlyApiError();
-          logFrontend("api_error", {{ endpoint: "csrf", has_init_data: "true" }});
-        }});
-
-      form.addEventListener("submit", function (event) {{
-        event.preventDefault();
-        submitButton.disabled = true;
-        var passwordInput = document.querySelector("input[name='password']");
-        var fields = {{
-          csrf_token: document.querySelector("input[name='csrf_token']").value,
-          init_data: initDataInput.value,
-          broker_name: document.querySelector("input[name='broker_name']").value,
-          server_name: document.querySelector("input[name='server_name']").value,
-          login: document.querySelector("input[name='login']").value,
-          password: passwordInput.value,
-          account_alias: document.querySelector("input[name='account_alias']").value
-        }};
-        postApi("/api/connect", fields)
-          .then(function (response) {{
-            if (!response.ok) {{
-              throw new Error("connect failed");
-            }}
-            return response.json();
-          }})
-          .then(function () {{
-            passwordInput.value = "";
-            hideForm();
-            showMessage("Conta MT5 cadastrada com segurança.", "ok");
-          }})
-          .catch(function () {{
-            passwordInput.value = "";
-            submitButton.disabled = false;
-            showMessage("Não foi possível validar sua sessão do Telegram.", "error");
-            logFrontend("api_error", {{ endpoint: "connect", has_init_data: initDataInput.value ? "true" : "false" }});
-          }});
-      }});
-    }}());
-  </script>
+  <script src="/miniapp.js"></script>
 </body>
 </html>"""
+
+
+def render_miniapp_script() -> str:
+    messages = json.dumps(
+        {
+            "outsideTelegram": OUTSIDE_TELEGRAM_MESSAGE,
+            "emptyInitData": EMPTY_INIT_DATA_MESSAGE,
+            "validationFailed": VALIDATION_FAILED_MESSAGE,
+            "openError": FRIENDLY_OPEN_ERROR_MESSAGE,
+            "validating": "Validando sessão segura do Telegram.",
+            "success": "Conta MT5 cadastrada com segurança.",
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return """
+(function () {
+  var messages = __MESSAGES__;
+  var tg = window.Telegram && window.Telegram.WebApp
+    ? window.Telegram.WebApp
+    : null;
+
+  if (tg) {
+    try {
+      tg.ready();
+      tg.expand();
+    } catch (_telegramError) {}
+  }
+
+  function onReady(callback) {
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", callback);
+      return;
+    }
+    callback();
+  }
+
+  function encodeForm(fields) {
+    var pairs = [];
+    for (var key in fields) {
+      if (Object.prototype.hasOwnProperty.call(fields, key)) {
+        pairs.push(encodeURIComponent(key) + "=" + encodeURIComponent(fields[key] || ""));
+      }
+    }
+    return pairs.join("&");
+  }
+
+  function postApi(path, fields) {
+    return fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: encodeForm(fields)
+    });
+  }
+
+  onReady(function () {
+    var form = document.getElementById("connect-form");
+    var message = document.getElementById("message");
+    var initDataInput = document.getElementById("init_data");
+    var csrfInput = document.querySelector("input[name='csrf_token']");
+    var passwordInput = document.querySelector("input[name='password']");
+    var submitButton = form ? form.querySelector("button") : null;
+
+    function showMessage(text, kind) {
+      if (!message) {
+        return;
+      }
+      message.className = "message " + (kind || "error");
+      message.textContent = text;
+      message.style.display = "block";
+    }
+
+    function hideMessage() {
+      if (!message) {
+        return;
+      }
+      message.textContent = "";
+      message.style.display = "none";
+    }
+
+    function showForm() {
+      if (form) {
+        form.style.display = "block";
+      }
+    }
+
+    function setSubmitEnabled(enabled) {
+      if (submitButton) {
+        submitButton.disabled = !enabled;
+      }
+    }
+
+    function logFrontend(eventName, fields) {
+      if (!window.fetch) {
+        return;
+      }
+      try {
+        var payload = fields || {};
+        payload.event = eventName;
+        postApi("/api/log", payload).catch(function () {});
+      } catch (_logError) {}
+    }
+
+    function hasInitData() {
+      return initDataInput && initDataInput.value ? "true" : "false";
+    }
+
+    window.addEventListener("error", function () {
+      showForm();
+      setSubmitEnabled(false);
+      showMessage(messages.openError, "error");
+      logFrontend("frontend_error", { has_init_data: hasInitData() });
+    });
+
+    window.addEventListener("unhandledrejection", function () {
+      showForm();
+      setSubmitEnabled(false);
+      showMessage(messages.openError, "error");
+      logFrontend("frontend_unhandledrejection", { has_init_data: hasInitData() });
+    });
+
+    showForm();
+    setSubmitEnabled(false);
+
+    if (!window.fetch) {
+      showMessage(messages.openError, "error");
+      return;
+    }
+
+    if (!tg) {
+      showMessage(messages.outsideTelegram, "error");
+      logFrontend("telegram_webapp_missing", { has_init_data: "false" });
+      return;
+    }
+
+    var initData = tg.initData || "";
+    if (initDataInput) {
+      initDataInput.value = initData;
+    }
+    logFrontend("telegram_webapp_detected", { has_init_data: initData ? "true" : "false" });
+
+    if (!initData) {
+      showMessage(messages.emptyInitData, "error");
+      return;
+    }
+
+    showMessage(messages.validating, "notice");
+    postApi("/api/csrf", { init_data: initData })
+      .then(function (response) {
+        if (!response.ok) {
+          throw new Error("csrf rejected");
+        }
+        return response.json();
+      })
+      .then(function (data) {
+        if (!data || !data.csrf_token) {
+          throw new Error("csrf missing");
+        }
+        if (csrfInput) {
+          csrfInput.value = data.csrf_token;
+        }
+        hideMessage();
+        setSubmitEnabled(true);
+      })
+      .catch(function () {
+        setSubmitEnabled(false);
+        showMessage(messages.validationFailed, "error");
+        logFrontend("api_error", { endpoint: "csrf", has_init_data: "true" });
+      });
+
+    if (!form) {
+      return;
+    }
+
+    form.addEventListener("submit", function (event) {
+      event.preventDefault();
+      setSubmitEnabled(false);
+      var fields = {
+        csrf_token: csrfInput ? csrfInput.value : "",
+        init_data: initDataInput ? initDataInput.value : "",
+        broker_name: document.querySelector("input[name='broker_name']").value,
+        server_name: document.querySelector("input[name='server_name']").value,
+        login: document.querySelector("input[name='login']").value,
+        password: passwordInput ? passwordInput.value : "",
+        account_alias: document.querySelector("input[name='account_alias']").value
+      };
+      postApi("/api/connect", fields)
+        .then(function (response) {
+          if (!response.ok) {
+            throw new Error("connect failed");
+          }
+          return response.json();
+        })
+        .then(function () {
+          if (passwordInput) {
+            passwordInput.value = "";
+          }
+          showMessage(messages.success, "ok");
+        })
+        .catch(function () {
+          if (passwordInput) {
+            passwordInput.value = "";
+          }
+          setSubmitEnabled(true);
+          showMessage(messages.validationFailed, "error");
+          logFrontend("api_error", { endpoint: "connect", has_init_data: hasInitData() });
+        });
+    });
+  });
+}());
+""".replace("__MESSAGES__", messages).lstrip()
 
 
 def build_signed_init_data(bot_token: str, payload: dict[str, str]) -> str:

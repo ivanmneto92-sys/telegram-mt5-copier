@@ -15,6 +15,7 @@ from .web_app import (
     CSRFTokenService,
     MT5OnboardingService,
     WebAppValidationError,
+    render_miniapp_script,
     render_onboarding_form,
     validate_telegram_web_app_init_data,
 )
@@ -40,6 +41,9 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         if path == "/favicon.ico":
             self.send_empty(status=204)
             return
+        if path == "/miniapp.js":
+            self.send_javascript(render_miniapp_script())
+            return
         if path != "/":
             self.send_error(404)
             return
@@ -55,6 +59,9 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             return
         if path == "/favicon.ico":
             self.send_empty(status=204)
+            return
+        if path == "/miniapp.js":
+            self.send_javascript(render_miniapp_script(), head_only=True)
             return
         if path != "/":
             self.send_error(404)
@@ -150,6 +157,17 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_common_security_headers()
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        if head_only:
+            return
+        self.wfile.write(encoded)
+
+    def send_javascript(self, body: str, status: int = 200, *, head_only: bool = False) -> None:
+        encoded = body.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/javascript; charset=utf-8")
         self.send_common_security_headers()
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
