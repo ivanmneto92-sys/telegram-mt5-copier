@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import secrets
 import sys
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 from .config import AppConfig
 from .credential_service import CredentialService
@@ -31,28 +32,50 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         super().log_message(format, *args)
 
     def do_GET(self) -> None:
-        if self.path == "/health":
+        path = self.route_path()
+        if path == "/health":
             safe_log("health_check")
             self.send_json({"status": "ok"})
             return
-        if self.path != "/":
+        if path == "/favicon.ico":
+            self.send_empty(status=204)
+            return
+        if path != "/":
             self.send_error(404)
             return
         safe_log("page_loaded")
-        self.send_html(render_onboarding_form())
+        script_nonce = generate_script_nonce()
+        self.send_html(render_onboarding_form(script_nonce), script_nonce=script_nonce)
+
+    def do_HEAD(self) -> None:
+        path = self.route_path()
+        if path == "/health":
+            safe_log("health_check")
+            self.send_json({"status": "ok"}, head_only=True)
+            return
+        if path == "/favicon.ico":
+            self.send_empty(status=204)
+            return
+        if path != "/":
+            self.send_error(404)
+            return
+        safe_log("page_loaded")
+        script_nonce = generate_script_nonce()
+        self.send_html(render_onboarding_form(script_nonce), script_nonce=script_nonce, head_only=True)
 
     def do_POST(self) -> None:
         try:
+            path = self.route_path()
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length).decode("utf-8")
             fields = {key: values[0] for key, values in parse_qs(body, keep_blank_values=True).items()}
-            if self.path == "/api/log":
+            if path == "/api/log":
                 self.handle_frontend_log(fields)
                 return
-            if self.path in {"/api/csrf", "/csrf"}:
+            if path in {"/api/csrf", "/csrf"}:
                 self.handle_csrf(fields)
                 return
-            if self.path in {"/api/connect", "/connect"}:
+            if path in {"/api/connect", "/connect"}:
                 self.handle_connect(fields)
                 return
             self.send_error(404)
@@ -102,27 +125,47 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         safe_log(event, init_data=has_init_data, endpoint=safe_endpoint(fields.get("endpoint", "")))
         self.send_json({"ok": True})
 
-    def send_html(self, body: str, status: int = 200) -> None:
+    def route_path(self) -> str:
+        return urlsplit(self.path).path
+
+    def send_html(
+        self,
+        body: str,
+        status: int = 200,
+        *,
+        script_nonce: str = "",
+        head_only: bool = False,
+    ) -> None:
         encoded = body.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_common_security_headers()
+        self.send_common_security_headers(script_nonce=script_nonce)
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
+        if head_only:
+            return
         self.wfile.write(encoded)
 
-    def send_json(self, payload: dict[str, object], status: int = 200) -> None:
+    def send_json(self, payload: dict[str, object], status: int = 200, *, head_only: bool = False) -> None:
         encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_common_security_headers()
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
+        if head_only:
+            return
         self.wfile.write(encoded)
 
-    def send_common_security_headers(self) -> None:
+    def send_empty(self, status: int = 204) -> None:
+        self.send_response(status)
+        self.send_common_security_headers()
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def send_common_security_headers(self, *, script_nonce: str = "") -> None:
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Security-Policy", content_security_policy())
+        self.send_header("Content-Security-Policy", content_security_policy(script_nonce))
 
 
 def main() -> int:
@@ -214,10 +257,15 @@ def safe_endpoint(value: str) -> str:
     return value if value in {"csrf", "connect"} else ""
 
 
-def content_security_policy() -> str:
+def generate_script_nonce() -> str:
+    return secrets.token_urlsafe(24)
+
+
+def content_security_policy(script_nonce: str = "") -> str:
+    nonce_directive = f" 'nonce-{script_nonce}'" if script_nonce else ""
     return (
         "default-src 'self'; "
-        "script-src 'self' https://telegram.org; "
+        f"script-src 'self' https://telegram.org{nonce_directive}; "
         "connect-src 'self'; "
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data:; "

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from http.server import ThreadingHTTPServer
 import json
+import re
 import threading
 import time
 from urllib.error import HTTPError
@@ -106,6 +107,97 @@ class MiniAppFrontendTests(unittest.TestCase):
         self.assertIn("https://telegram.org", headers.get("Content-Security-Policy", ""))
         self.assertIn("Conectar conta MT5", html)
 
+    def test_nonce_do_html_igual_ao_nonce_da_csp(self) -> None:
+        with mini_app_server() as base_url:
+            with urlopen(f"{base_url}/", timeout=5) as response:
+                csp = response.headers.get("Content-Security-Policy", "")
+                html = response.read().decode("utf-8")
+
+        html_nonce = extract_inline_script_nonce(html)
+        csp_nonce = extract_csp_nonce(csp)
+
+        self.assertTrue(html_nonce)
+        self.assertEqual(html_nonce, csp_nonce)
+
+    def test_nonces_diferentes_por_requisicao(self) -> None:
+        with mini_app_server() as base_url:
+            with urlopen(f"{base_url}/", timeout=5) as first_response:
+                first_nonce = extract_inline_script_nonce(first_response.read().decode("utf-8"))
+            with urlopen(f"{base_url}/", timeout=5) as second_response:
+                second_nonce = extract_inline_script_nonce(second_response.read().decode("utf-8"))
+
+        self.assertNotEqual(first_nonce, second_nonce)
+
+    def test_script_inline_autorizado_por_nonce(self) -> None:
+        with mini_app_server() as base_url:
+            with urlopen(f"{base_url}/", timeout=5) as response:
+                csp = response.headers.get("Content-Security-Policy", "")
+                html = response.read().decode("utf-8")
+
+        nonce = extract_inline_script_nonce(html)
+
+        self.assertIn(f"'nonce-{nonce}'", script_src_directive(csp))
+        self.assertNotIn("unsafe-inline", script_src_directive(csp))
+
+    def test_csp_sem_unsafe_inline_para_scripts(self) -> None:
+        with mini_app_server() as base_url:
+            with urlopen(f"{base_url}/", timeout=5) as response:
+                csp = response.headers.get("Content-Security-Policy", "")
+
+        self.assertNotIn("unsafe-inline", script_src_directive(csp))
+
+    def test_query_string_na_raiz_retorna_200(self) -> None:
+        with mini_app_server() as base_url:
+            with urlopen(f"{base_url}/?v=2", timeout=5) as response:
+                html = response.read().decode("utf-8")
+
+        self.assertEqual(response.status, 200)
+        self.assertIn(OUTSIDE_TELEGRAM_MESSAGE, html)
+
+    def test_query_string_no_health_retorna_200(self) -> None:
+        with mini_app_server() as base_url:
+            with urlopen(f"{base_url}/health?x=1", timeout=5) as response:
+                body = json.loads(response.read().decode("utf-8"))
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(body, {"status": "ok"})
+
+    def test_favicon_retorna_204(self) -> None:
+        with mini_app_server() as base_url:
+            with urlopen(f"{base_url}/favicon.ico", timeout=5) as response:
+                body = response.read()
+
+        self.assertEqual(response.status, 204)
+        self.assertEqual(body, b"")
+
+    def test_head_funciona_sem_corpo(self) -> None:
+        with mini_app_server() as base_url:
+            root = head(f"{base_url}/?v=2")
+            health = head(f"{base_url}/health?x=1")
+            favicon = head(f"{base_url}/favicon.ico")
+
+        self.assertEqual(root["status"], 200)
+        self.assertEqual(root["body"], b"")
+        self.assertIn("text/html", root["content_type"])
+        self.assertEqual(health["status"], 200)
+        self.assertEqual(health["body"], b"")
+        self.assertIn("application/json", health["content_type"])
+        self.assertEqual(favicon["status"], 204)
+        self.assertEqual(favicon["body"], b"")
+
+    def test_navegador_comum_mostra_mensagem_clara(self) -> None:
+        html = render_onboarding_form("test-nonce")
+
+        self.assertIn(f'<div id="message" class="message error" role="alert">{OUTSIDE_TELEGRAM_MESSAGE}</div>', html)
+
+    def test_telegram_valido_mostra_formulario(self) -> None:
+        html = render_onboarding_form("test-nonce")
+
+        self.assertIn("var initData = tg.initData || \"\";", html)
+        self.assertIn("if (!initData)", html)
+        self.assertIn("hideMessage();\n      showForm();\n      postApi(\"/api/csrf\"", html)
+        self.assertIn('id="connect-form"', html)
+
 
 class mini_app_server:
     def __init__(self, bot_token: str = "123456:bot-token") -> None:
@@ -149,6 +241,38 @@ def post_expect_error(url: str, fields: dict[str, str]) -> dict[str, object]:
             "status": exc.code,
             "body": json.loads(exc.read().decode("utf-8")),
         }
+
+
+def head(url: str) -> dict[str, object]:
+    request = Request(url, method="HEAD")
+    with urlopen(request, timeout=5) as response:
+        return {
+            "status": response.status,
+            "body": response.read(),
+            "content_type": response.headers.get("Content-Type", ""),
+        }
+
+
+def extract_inline_script_nonce(html: str) -> str:
+    match = re.search(r"<script nonce=\"([^\"]+)\">\s*\(function \(\)", html)
+    if match is None:
+        raise AssertionError("Nonce do script inline nao encontrado.")
+    return match.group(1)
+
+
+def extract_csp_nonce(csp: str) -> str:
+    match = re.search(r"'nonce-([^']+)'", csp)
+    if match is None:
+        raise AssertionError("Nonce da CSP nao encontrado.")
+    return match.group(1)
+
+
+def script_src_directive(csp: str) -> str:
+    for directive in csp.split(";"):
+        stripped = directive.strip()
+        if stripped.startswith("script-src "):
+            return stripped
+    raise AssertionError("Diretiva script-src nao encontrada.")
 
 
 if __name__ == "__main__":

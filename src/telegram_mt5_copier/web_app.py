@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import hmac
+from html import escape
 import json
 import time
 from typing import MutableSet
@@ -213,7 +214,8 @@ EMPTY_INIT_DATA_MESSAGE = "Não foi possível identificar sua sessão. Feche est
 VALIDATION_FAILED_MESSAGE = "Não foi possível validar sua sessão do Telegram."
 
 
-def render_onboarding_form(csrf_token: str = "") -> str:
+def render_onboarding_form(script_nonce: str = "", csrf_token: str = "") -> str:
+    nonce_attribute = f' nonce="{escape(script_nonce, quote=True)}"' if script_nonce else ""
     return f"""<!doctype html>
 <html lang="pt-BR">
 <head>
@@ -227,7 +229,7 @@ def render_onboarding_form(csrf_token: str = "") -> str:
     h1 {{ font-size: 24px; margin: 0 0 10px; }}
     p {{ line-height: 1.45; }}
     .panel {{ background: #ffffff; border: 1px solid #dde2ea; border-radius: 8px; padding: 18px; }}
-    .message {{ display: none; margin: 14px 0; padding: 12px; border-radius: 8px; border: 1px solid #d6dae2; background: #ffffff; }}
+    .message {{ display: block; margin: 14px 0; padding: 12px; border-radius: 8px; border: 1px solid #d6dae2; background: #ffffff; }}
     .message.error {{ border-color: #f0b8b8; background: #fff5f5; color: #8a1f1f; }}
     .message.ok {{ border-color: #b9dfc2; background: #f3fff5; color: #185c28; }}
     form {{ display: none; }}
@@ -243,7 +245,7 @@ def render_onboarding_form(csrf_token: str = "") -> str:
     <section class="panel">
       <h1>Conectar conta MT5</h1>
       <p id="intro">Preencha os dados da sua conta de demonstração pelo ambiente seguro do Telegram.</p>
-      <div id="message" class="message" role="alert"></div>
+      <div id="message" class="message error" role="alert">{OUTSIDE_TELEGRAM_MESSAGE}</div>
     <form id="connect-form" method="post" action="/api/connect" autocomplete="off">
       <input type="hidden" name="csrf_token" value="{csrf_token}">
       <input type="hidden" name="init_data" id="init_data">
@@ -259,7 +261,7 @@ def render_onboarding_form(csrf_token: str = "") -> str:
     </noscript>
     </section>
   </main>
-  <script>
+  <script{nonce_attribute}>
     (function () {{
       const tg = window.Telegram && window.Telegram.WebApp
         ? window.Telegram.WebApp
