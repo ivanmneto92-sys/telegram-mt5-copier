@@ -3,9 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
-import sqlite3
 
-from .database import initialize_database, utc_now
+from .database import connect_database, initialize_database, utc_now
 
 USER_STATUS_ACTIVE = "active"
 USER_STATUS_PAUSED = "paused"
@@ -23,7 +22,17 @@ class User:
 class UserRepository:
     def __init__(self, database_path: Path) -> None:
         self.database_path = database_path
+        self._closed = False
         initialize_database(database_path)
+
+    def close(self) -> None:
+        self._closed = True
+
+    def __enter__(self) -> "UserRepository":
+        return self
+
+    def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
+        self.close()
 
     def get_or_create_user(self, telegram_user_id: int, telegram_username: str | None) -> User:
         existing = self.get_by_telegram_user_id(telegram_user_id)
@@ -34,7 +43,7 @@ class UserRepository:
             return existing
 
         now = utc_now()
-        with self._connect() as connection:
+        with connect_database(self.database_path) as connection:
             cursor = connection.execute(
                 """
                 INSERT INTO users (
@@ -48,33 +57,44 @@ class UserRepository:
                 """,
                 (telegram_user_id, telegram_username, USER_STATUS_PAUSED, now, now),
             )
-            user_id = int(cursor.lastrowid)
+            try:
+                user_id = int(cursor.lastrowid)
+            finally:
+                cursor.close()
 
         return self.get_by_id(user_id)
 
     def get_by_telegram_user_id(self, telegram_user_id: int) -> User | None:
-        with self._connect() as connection:
-            row = connection.execute(
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
                 """
                 SELECT id, telegram_user_id, telegram_username, status
                 FROM users
                 WHERE telegram_user_id = ?
                 """,
                 (telegram_user_id,),
-            ).fetchone()
+            )
+            try:
+                row = cursor.fetchone()
+            finally:
+                cursor.close()
 
         return user_from_row(row) if row else None
 
     def get_by_id(self, user_id: int) -> User:
-        with self._connect() as connection:
-            row = connection.execute(
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
                 """
                 SELECT id, telegram_user_id, telegram_username, status
                 FROM users
                 WHERE id = ?
                 """,
                 (user_id,),
-            ).fetchone()
+            )
+            try:
+                row = cursor.fetchone()
+            finally:
+                cursor.close()
 
         if row is None:
             raise ValueError("Usuario nao encontrado.")
@@ -84,20 +104,22 @@ class UserRepository:
         if status not in VALID_USER_STATUSES:
             raise ValueError("Status de usuario invalido.")
 
-        with self._connect() as connection:
-            connection.execute(
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
                 "UPDATE users SET status = ?, updated_at = ? WHERE id = ?",
                 (status, utc_now(), user_id),
             )
+            cursor.close()
 
         return self.get_by_id(user_id)
 
     def update_username(self, user_id: int, telegram_username: str | None) -> None:
-        with self._connect() as connection:
-            connection.execute(
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
                 "UPDATE users SET telegram_username = ?, updated_at = ? WHERE id = ?",
                 (telegram_username, utc_now(), user_id),
             )
+            cursor.close()
 
     def log_admin_action(
         self,
@@ -107,8 +129,8 @@ class UserRepository:
         payload: dict[str, object],
         target_user_id: int | None = None,
     ) -> None:
-        with self._connect() as connection:
-            connection.execute(
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
                 """
                 INSERT INTO admin_actions (
                     admin_telegram_user_id,
@@ -127,10 +149,7 @@ class UserRepository:
                     utc_now(),
                 ),
             )
-
-    def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.database_path)
-
+            cursor.close()
 
 def user_from_row(row: tuple[int, int, str | None, str]) -> User:
     return User(

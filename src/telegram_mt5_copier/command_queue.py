@@ -3,10 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
-import sqlite3
 from typing import Any
 
-from .database import initialize_database, utc_now
+from .database import connect_database, initialize_database, utc_now
 
 COMMAND_STATUS_PENDING = "pending"
 
@@ -24,7 +23,17 @@ class Command:
 class CommandQueue:
     def __init__(self, database_path: Path) -> None:
         self.database_path = database_path
+        self._closed = False
         initialize_database(database_path)
+
+    def close(self) -> None:
+        self._closed = True
+
+    def __enter__(self) -> "CommandQueue":
+        return self
+
+    def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
+        self.close()
 
     def enqueue(self, user_id: int, command_type: str, payload: dict[str, Any]) -> Command:
         payload_text = encode_payload(payload)
@@ -32,7 +41,7 @@ class CommandQueue:
         if existing is not None:
             return existing
 
-        with self._connect() as connection:
+        with connect_database(self.database_path) as connection:
             cursor = connection.execute(
                 """
                 INSERT INTO commands (
@@ -46,7 +55,10 @@ class CommandQueue:
                 """,
                 (user_id, command_type, payload_text, COMMAND_STATUS_PENDING, utc_now()),
             )
-            command_id = int(cursor.lastrowid)
+            try:
+                command_id = int(cursor.lastrowid)
+            finally:
+                cursor.close()
 
         return Command(
             id=command_id,
@@ -58,8 +70,8 @@ class CommandQueue:
         )
 
     def find_pending_duplicate(self, user_id: int, command_type: str, payload_text: str) -> Command | None:
-        with self._connect() as connection:
-            row = connection.execute(
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
                 """
                 SELECT id, user_id, command_type, payload, status
                 FROM commands
@@ -71,7 +83,11 @@ class CommandQueue:
                 LIMIT 1
                 """,
                 (user_id, command_type, payload_text, COMMAND_STATUS_PENDING),
-            ).fetchone()
+            )
+            try:
+                row = cursor.fetchone()
+            finally:
+                cursor.close()
 
         if row is None:
             return None
@@ -84,12 +100,16 @@ class CommandQueue:
             query = f"{query} WHERE user_id = ?"
             params = (user_id,)
 
-        with self._connect() as connection:
-            return int(connection.execute(query, params).fetchone()[0])
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(query, params)
+            try:
+                return int(cursor.fetchone()[0])
+            finally:
+                cursor.close()
 
     def recent_for_user(self, user_id: int, limit: int = 10) -> list[dict[str, str]]:
-        with self._connect() as connection:
-            rows = connection.execute(
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
                 """
                 SELECT command_type, payload, status, created_at
                 FROM commands
@@ -98,7 +118,11 @@ class CommandQueue:
                 LIMIT ?
                 """,
                 (user_id, limit),
-            ).fetchall()
+            )
+            try:
+                rows = cursor.fetchall()
+            finally:
+                cursor.close()
 
         return [
             {
@@ -109,10 +133,6 @@ class CommandQueue:
             }
             for row in rows
         ]
-
-    def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.database_path)
-
 
 def encode_payload(payload: dict[str, Any]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))

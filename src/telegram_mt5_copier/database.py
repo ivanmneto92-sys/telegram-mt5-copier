@@ -1,33 +1,50 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sqlite3
+from typing import Iterator
 
 from .models import DecisionStatus, IncomingMessage, TradeSignal, decimal_to_text
+
+SQLITE_TIMEOUT_SECONDS = 30.0
 
 
 class SignalDatabase:
     def __init__(self, database_path: Path) -> None:
         self.database_path = database_path
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        self._closed = False
+
+    def close(self) -> None:
+        self._closed = True
+
+    def __enter__(self) -> "SignalDatabase":
+        return self
+
+    def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
+        self.close()
 
     def initialize(self) -> None:
         initialize_database(self.database_path)
 
     def has_duplicate(self, signature: str) -> bool:
-        with self._connect() as connection:
+        with connect_database(self.database_path) as connection:
             cursor = connection.execute(
                 "SELECT 1 FROM signals WHERE signature = ? LIMIT 1",
                 (signature,),
             )
-            return cursor.fetchone() is not None
+            try:
+                return cursor.fetchone() is not None
+            finally:
+                cursor.close()
 
     def record_accepted(self, signal: TradeSignal, formatted_message: str) -> None:
         now = utc_now()
-        with self._connect() as connection:
-            connection.execute(
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
                 """
                 INSERT INTO signals (
                     signature,
@@ -60,7 +77,8 @@ class SignalDatabase:
                     now,
                 ),
             )
-            connection.execute(
+            cursor.close()
+            cursor = connection.execute(
                 """
                 INSERT INTO signal_events (
                     status,
@@ -83,6 +101,7 @@ class SignalDatabase:
                     now,
                 ),
             )
+            cursor.close()
 
     def record_event(
         self,
@@ -93,8 +112,8 @@ class SignalDatabase:
         signal: TradeSignal | None = None,
         raw_text: str | None = None,
     ) -> None:
-        with self._connect() as connection:
-            connection.execute(
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
                 """
                 INSERT INTO signal_events (
                     status,
@@ -123,6 +142,7 @@ class SignalDatabase:
                     utc_now(),
                 ),
             )
+            cursor.close()
 
     def count_events(self, status: DecisionStatus | None = None, reason: str | None = None) -> int:
         query = "SELECT COUNT(*) FROM signal_events"
@@ -137,18 +157,18 @@ class SignalDatabase:
         if clauses:
             query = f"{query} WHERE {' AND '.join(clauses)}"
 
-        with self._connect() as connection:
+        with connect_database(self.database_path) as connection:
             cursor = connection.execute(query, params)
-            return int(cursor.fetchone()[0])
-
-    def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.database_path)
+            try:
+                return int(cursor.fetchone()[0])
+            finally:
+                cursor.close()
 
 
 def initialize_database(database_path: Path) -> None:
     database_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(database_path) as connection:
-        connection.executescript(
+    with connect_database(database_path) as connection:
+        cursor = connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -235,6 +255,28 @@ def initialize_database(database_path: Path) -> None:
                 ON admin_actions(admin_telegram_user_id);
             """
         )
+        cursor.close()
+
+
+@contextmanager
+def connect_database(database_path: Path) -> Iterator[sqlite3.Connection]:
+    connection: sqlite3.Connection | None = sqlite3.connect(
+        database_path,
+        timeout=SQLITE_TIMEOUT_SECONDS,
+    )
+    try:
+        cursor = connection.execute("PRAGMA foreign_keys = ON")
+        cursor.close()
+        yield connection
+        connection.commit()
+    except Exception:
+        if connection is not None:
+            connection.rollback()
+        raise
+    finally:
+        if connection is not None:
+            connection.close()
+            connection = None
 
 
 def utc_now() -> str:

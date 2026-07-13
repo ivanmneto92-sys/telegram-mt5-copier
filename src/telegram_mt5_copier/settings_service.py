@@ -3,9 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-import sqlite3
 
-from .database import initialize_database, utc_now
+from .database import connect_database, initialize_database, utc_now
 
 RISK_MODES = {"fixed_lot", "risk_percent"}
 TP_DISTRIBUTION_MODES = {"all", "split", "first"}
@@ -35,15 +34,25 @@ class UserSettings:
 class SettingsService:
     def __init__(self, database_path: Path) -> None:
         self.database_path = database_path
+        self._closed = False
         initialize_database(database_path)
+
+    def close(self) -> None:
+        self._closed = True
+
+    def __enter__(self) -> "SettingsService":
+        return self
+
+    def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
+        self.close()
 
     def ensure_defaults(self, user_id: int) -> UserSettings:
         existing = self.get_settings(user_id)
         if existing is not None:
             return existing
 
-        with self._connect() as connection:
-            connection.execute(
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
                 """
                 INSERT INTO user_settings (
                     user_id,
@@ -74,12 +83,13 @@ class SettingsService:
                     utc_now(),
                 ),
             )
+            cursor.close()
 
         return self.get_settings(user_id)
 
     def get_settings(self, user_id: int) -> UserSettings | None:
-        with self._connect() as connection:
-            row = connection.execute(
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
                 """
                 SELECT
                     user_id,
@@ -96,7 +106,11 @@ class SettingsService:
                 WHERE user_id = ?
                 """,
                 (user_id,),
-            ).fetchone()
+            )
+            try:
+                row = cursor.fetchone()
+            finally:
+                cursor.close()
 
         return settings_from_row(row) if row else None
 
@@ -157,16 +171,14 @@ class SettingsService:
             raise ValueError("Campo de configuracao invalido.")
 
         self.ensure_defaults(user_id)
-        with self._connect() as connection:
-            connection.execute(
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
                 f"UPDATE user_settings SET {field_name} = ?, updated_at = ? WHERE user_id = ?",
                 (value, utc_now(), user_id),
             )
+            cursor.close()
 
         return self.get_settings(user_id)
-
-    def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.database_path)
 
 
 def settings_from_row(row: tuple[object, ...]) -> UserSettings:

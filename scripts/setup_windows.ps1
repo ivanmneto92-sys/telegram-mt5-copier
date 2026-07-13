@@ -3,19 +3,77 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $ProjectRoot
 
-function Test-Python312 {
+function Get-PythonVersion {
     param(
         [string]$Command,
         [string[]]$Arguments
     )
 
     try {
-        & $Command @Arguments -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)" | Out-Null
-        return $LASTEXITCODE -eq 0
+        $VersionText = & $Command @Arguments -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')" 2>$null
+        if ($LASTEXITCODE -ne 0 -or -not $VersionText) {
+            return $null
+        }
+
+        $Version = [version]$VersionText.Trim()
+        if ($Version.Major -gt 3 -or ($Version.Major -eq 3 -and $Version.Minor -ge 12)) {
+            return $Version
+        }
+
+        return $null
     }
     catch {
-        return $false
+        return $null
     }
+}
+
+function Add-PythonCandidate {
+    param(
+        [System.Collections.ArrayList]$Candidates,
+        [string]$Command,
+        [string[]]$Arguments,
+        [string]$Label
+    )
+
+    $Version = Get-PythonVersion -Command $Command -Arguments $Arguments
+    if ($null -ne $Version) {
+        [void]$Candidates.Add([PSCustomObject]@{
+            Command = $Command
+            Arguments = $Arguments
+            Version = $Version
+            Label = $Label
+        })
+    }
+}
+
+function Get-PythonCandidates {
+    $Candidates = [System.Collections.ArrayList]::new()
+
+    if (Get-Command "py" -ErrorAction SilentlyContinue) {
+        try {
+            $PyList = & py -0p 2>$null
+            foreach ($Line in $PyList) {
+                if ($Line -match "(?<Path>[A-Za-z]:\\.*python(?:\.exe)?)\s*$") {
+                    $PythonPath = $Matches.Path.Trim()
+                    if (Test-Path $PythonPath) {
+                        Add-PythonCandidate -Candidates $Candidates -Command $PythonPath -Arguments @() -Label $PythonPath
+                    }
+                }
+            }
+        }
+        catch {
+            # Fallback candidates below still cover common installations.
+        }
+
+        Add-PythonCandidate -Candidates $Candidates -Command "py" -Arguments @("-3") -Label "py -3"
+        Add-PythonCandidate -Candidates $Candidates -Command "py" -Arguments @("-3.13") -Label "py -3.13"
+        Add-PythonCandidate -Candidates $Candidates -Command "py" -Arguments @("-3.12") -Label "py -3.12"
+    }
+
+    Add-PythonCandidate -Candidates $Candidates -Command "python" -Arguments @() -Label "python"
+    Add-PythonCandidate -Candidates $Candidates -Command "python3" -Arguments @() -Label "python3"
+
+    return $Candidates
 }
 
 function Get-DotEnvValue {
@@ -62,26 +120,17 @@ function Convert-ToProjectPath {
     return Join-Path $ProjectRoot $Value
 }
 
-$PythonCommand = $null
-$PythonArguments = @()
+$PythonCandidates = Get-PythonCandidates
+$SelectedPython = $PythonCandidates | Sort-Object -Property Version -Descending | Select-Object -First 1
 
-if (Test-Python312 -Command "py" -Arguments @("-3.12")) {
-    $PythonCommand = "py"
-    $PythonArguments = @("-3.12")
-}
-elseif (Test-Python312 -Command "python" -Arguments @()) {
-    $PythonCommand = "python"
-}
-elseif (Test-Python312 -Command "python3" -Arguments @()) {
-    $PythonCommand = "python3"
-}
-else {
+if ($null -eq $SelectedPython) {
     Write-Host "Python 3.12 ou superior nao foi encontrado." -ForegroundColor Red
-    Write-Host "Instale o Python 3.12 no Windows Server e execute este script novamente."
+    Write-Host "Instale o Python 3.12, 3.13 ou superior no Windows Server e execute este script novamente."
     exit 1
 }
 
-& $PythonCommand @PythonArguments -m venv ".venv"
+Write-Host "Python selecionado: $($SelectedPython.Label) ($($SelectedPython.Version))"
+& $SelectedPython.Command @($SelectedPython.Arguments) -m venv ".venv"
 
 $VenvPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path $VenvPython)) {
@@ -92,6 +141,7 @@ if (-not (Test-Path $VenvPython)) {
 & $VenvPython -m pip install --upgrade pip
 & $VenvPython -m pip install -r "requirements.txt"
 & $VenvPython -m pip install -e "."
+& $VenvPython -m pytest -v
 
 $DataDir = Convert-ToProjectPath (Get-DotEnvValue -Name "DATA_DIR" -DefaultValue "./data")
 $SessionDir = Convert-ToProjectPath (Get-DotEnvValue -Name "SESSION_DIR" -DefaultValue "./sessions")

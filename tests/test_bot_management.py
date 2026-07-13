@@ -21,6 +21,9 @@ class BotManagementTests(unittest.TestCase):
         self.commands = CommandQueue(self.database_path)
 
     def tearDown(self) -> None:
+        for service in (self.service, self.users, self.settings, self.commands):
+            if hasattr(service, "close"):
+                service.close()
         self.temp_dir.cleanup()
 
     def test_cadastro_do_usuario_no_start(self) -> None:
@@ -251,7 +254,10 @@ class BotManagementTests(unittest.TestCase):
         self.service.handle_callback(101, "alice", "set:fixed_lot:0.30")
 
         new_settings_service = SettingsService(self.database_path)
-        settings = new_settings_service.get_settings(user.id)
+        try:
+            settings = new_settings_service.get_settings(user.id)
+        finally:
+            new_settings_service.close()
 
         self.assertEqual(settings.fixed_lot, Decimal("0.3"))
 

@@ -80,6 +80,20 @@ class BotService:
         self.account_service = account_service or AccountService()
         self.admin_ids = set(admin_ids)
         self.rate_limiter = rate_limiter or RateLimiter()
+        self._closed = False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        for service in (self.users, self.settings, self.commands):
+            service.close()
+        self._closed = True
+
+    def __enter__(self) -> "BotService":
+        return self
+
+    def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
+        self.close()
 
     def start(
         self,

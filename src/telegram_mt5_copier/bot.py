@@ -36,7 +36,10 @@ def main() -> int:
     application.add_handler(CallbackQueryHandler(functools.partial(callback_handler, service=service)))
 
     print("Bot de gestao iniciado.")
-    application.run_polling()
+    try:
+        application.run_polling()
+    finally:
+        service.close()
     return 0
 
 

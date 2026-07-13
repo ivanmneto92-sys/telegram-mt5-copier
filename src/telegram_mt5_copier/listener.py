@@ -26,6 +26,19 @@ class SignalProcessor:
         self.database = database
         self.publisher = publisher
         self.logger = logger
+        self._closed = False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self.database.close()
+        self._closed = True
+
+    def __enter__(self) -> "SignalProcessor":
+        return self
+
+    def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
+        self.close()
 
     async def process(self, incoming: IncomingMessage, client: Any | None = None) -> ProcessingDecision:
         text_decision = text_for_analysis(incoming)
@@ -131,6 +144,7 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
         await client.run_until_disconnected()
         return 0
     finally:
+        processor.close()
         await client.disconnect()
 
 

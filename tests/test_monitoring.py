@@ -76,6 +76,10 @@ class MonitorPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.processor = SignalProcessor(self.database, self.publisher, logger=NullLogger())
 
     async def asyncTearDown(self) -> None:
+        if hasattr(self.processor, "close"):
+            self.processor.close()
+        if hasattr(self.database, "close"):
+            self.database.close()
         self.temp_dir.cleanup()
 
     async def process_text(self, text: str) -> DecisionStatus:
