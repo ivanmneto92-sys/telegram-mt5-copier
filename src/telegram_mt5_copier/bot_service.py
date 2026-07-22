@@ -453,6 +453,10 @@ class BotService:
     def _main_panel(self, user: User, first_name: str | None = None) -> BotResponse:
         name = first_name or user.telegram_username or "trader"
         status_label, operations_label = status_labels(user.status)
+        mt5_account = self.mt5_accounts.first_account(user.id)
+        mt5_status = "⚪ Não conectado"
+        if mt5_account is not None:
+            mt5_status = mt5_account_connection_label(mt5_account.connection_status)
         return BotResponse(
             "\n".join(
                 [
@@ -461,7 +465,7 @@ class BotService:
                     f"Olá, {name}! 👋",
                     "",
                     f"Status do copiador: {status_label}",
-                    "MetaTrader 5: ⚪ Não conectado",
+                    f"MetaTrader 5: {mt5_status}",
                     f"Novas operações: {operations_label}",
                     "",
                     "Gerencie sua conta utilizando o menu abaixo.",
@@ -474,20 +478,29 @@ class BotService:
 
     def _account_screen(self, user: User) -> BotResponse:
         status_label, _operations_label = status_labels(user.status)
-        summary = self.account_service.get_account_summary(user.id)
+        account = self.mt5_accounts.first_account(user.id)
+        connection_status = "⚪ Não conectado"
+        balance = "Aguardando conexão"
+        equity = "Aguardando conexão"
+        integration_message = "As informações financeiras serão exibidas após a integração com o MetaTrader 5."
+        if account is not None:
+            connection_status = mt5_account_connection_label(account.connection_status)
+            balance = money_label(account.balance)
+            equity = money_label(account.equity)
+            integration_message = "Informações atualizadas pela conexão com o MetaTrader 5."
         return BotResponse(
             "\n".join(
                 [
                     "💼 MINHA CONTA",
                     "",
                     f"Status do copiador: {status_label}",
-                    f"MetaTrader 5: {connection_label(summary.connection_status)}",
+                    f"MetaTrader 5: {connection_status}",
                     "",
-                    f"Saldo: {financial_value(summary.balance)}",
-                    f"Equity: {financial_value(summary.equity)}",
-                    f"Resultado do dia: {financial_value(summary.daily_result)}",
+                    f"Saldo: {balance}",
+                    f"Equity: {equity}",
+                    "Resultado do dia: Aguardando cálculo",
                     "",
-                    "As informações financeiras serão exibidas após a integração com o MetaTrader 5.",
+                    integration_message,
                 ]
             ),
             ACCOUNT_MENU,
@@ -636,7 +649,7 @@ class BotService:
                     "",
                     "Nenhuma conta conectada.",
                     "",
-                    "Cadastre primeiro uma conta de demonstração para validar a conexão.",
+                    "Cadastre uma conta MT5 para validar a conexão.",
                 ]
             ),
             mt5_connect_menu(self.mt5_onboarding_url),
@@ -742,7 +755,7 @@ def account_mode_label(account: MT5Account) -> str:
 def money_label(value: Decimal | None) -> str:
     if value is None:
         return "Indisponível"
-    return str(value)
+    return format(value, ".2f")
 
 
 def entry_execution_label(value: str) -> str:

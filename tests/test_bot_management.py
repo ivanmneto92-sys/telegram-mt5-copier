@@ -205,7 +205,35 @@ class BotManagementTests(unittest.TestCase):
         response = self.service.handle_callback(101, "alice", "v1:mt5:accounts")
 
         self.assertEqual(response.screen, "mt5_connect")
-        self.assertIn("Cadastre primeiro uma conta de demonstração", response.text)
+        self.assertIn("Cadastre uma conta MT5", response.text)
+
+    def test_tela_principal_e_minha_conta_exibem_mt5_conectado(self) -> None:
+        accounts = MT5AccountService(
+            self.database_path,
+            credential_service=CredentialService(CredentialService.generate_key()),
+            terminal_manager=TerminalManager(Path(self.temp_dir.name) / "mt5"),
+            client_factory=lambda: SimulatedMT5Client(),
+        )
+        service = BotService(self.database_path, mt5_account_service=accounts)
+        try:
+            service.start(101, "alice")
+            user = self.users.get_by_telegram_user_id(101)
+            accounts.register_account(
+                user.id,
+                MT5AccountForm("Broker", "Broker-Demo", "12345678", "secret", "Demo"),
+            )
+
+            main = service.menu(101, "alice", "Alice")
+            account = service.handle_callback(101, "alice", "v1:a")
+
+            self.assertIn("MetaTrader 5: 🟢 Conectada", main.text)
+            self.assertIn("MetaTrader 5: 🟢 Conectada", account.text)
+            self.assertIn("Saldo: 10000.00", account.text)
+            self.assertIn("Equity: 10000.00", account.text)
+            self.assertIn("Informações atualizadas pela conexão", account.text)
+        finally:
+            service.close()
+            accounts.close()
 
     def test_tela_minha_conta_sem_mt5(self) -> None:
         self.service.start(101, "alice")
