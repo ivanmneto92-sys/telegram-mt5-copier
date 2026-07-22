@@ -8,6 +8,11 @@ import unittest
 from telegram_mt5_copier.bot_service import BotService
 from telegram_mt5_copier.command_queue import CommandQueue
 from telegram_mt5_copier.credential_service import CredentialService
+from telegram_mt5_copier.database import (
+    SIGNAL_MONITOR_SERVICE_NAME,
+    connect_database,
+    update_service_heartbeat,
+)
 from telegram_mt5_copier.mt5.account_service import MT5AccountForm, MT5AccountService
 from telegram_mt5_copier.mt5.client import SimulatedMT5Client
 from telegram_mt5_copier.mt5.models import ENTRY_PRICE_MIDDLE
@@ -355,7 +360,7 @@ class BotManagementTests(unittest.TestCase):
 
         self.assertIn("📡 STATUS DA CONEXÃO", response.text)
         self.assertIn("Bot de gestão:\n🟢 Online", response.text)
-        self.assertIn("Monitor de sinais:\n⚪ Aguardando integração", response.text)
+        self.assertIn("Monitor de sinais:\n⚪ Aguardando inicialização", response.text)
         self.assertIn("MetaTrader 5:\n⚪ Não conectado", response.text)
 
     def test_atualizacao_de_telas(self) -> None:
@@ -393,8 +398,33 @@ class BotManagementTests(unittest.TestCase):
 
         response = self.service.handle_callback(101, "alice", "v1:c")
 
-        self.assertIn("Monitor de sinais:\n⚪ Aguardando integração", response.text)
+        self.assertIn("Monitor de sinais:\n⚪ Aguardando inicialização", response.text)
         self.assertNotIn("Monitor de sinais:\n🟢 Online", response.text)
+
+    def test_monitor_online_com_heartbeat_recente(self) -> None:
+        self.service.start(101, "alice")
+        update_service_heartbeat(
+            self.database_path,
+            SIGNAL_MONITOR_SERVICE_NAME,
+            details="telegram_authorized",
+        )
+
+        response = self.service.handle_callback(101, "alice", "v1:c")
+
+        self.assertIn("Monitor de sinais:\n🟢 Online", response.text)
+
+    def test_monitor_offline_com_heartbeat_vencido(self) -> None:
+        self.service.start(101, "alice")
+        update_service_heartbeat(self.database_path, SIGNAL_MONITOR_SERVICE_NAME)
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                "UPDATE service_heartbeats SET heartbeat_at = ? WHERE service_name = ?",
+                ("2020-01-01T00:00:00+00:00", SIGNAL_MONITOR_SERVICE_NAME),
+            ).close()
+
+        response = self.service.handle_callback(101, "alice", "v1:c")
+
+        self.assertIn("Monitor de sinais:\n🔴 Offline", response.text)
 
     def test_nenhum_token_ou_credencial_exposto(self) -> None:
         self.service.start(101, "alice")

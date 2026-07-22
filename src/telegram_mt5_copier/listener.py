@@ -8,7 +8,12 @@ from typing import Any, Awaitable, Callable
 from urllib import parse, request
 
 from .config import AppConfig
-from .database import SignalDatabase, connect_database
+from .database import (
+    SIGNAL_MONITOR_SERVICE_NAME,
+    SignalDatabase,
+    connect_database,
+    update_service_heartbeat,
+)
 from .models import DecisionStatus, IncomingMessage, ProcessingDecision
 from .parser import parse_signal_text
 from .publisher import TelegramPublisher, format_signal
@@ -22,6 +27,7 @@ from .mt5.pending_order_executor import PendingExecutionResult
 
 SUPPORTED_TEXT_MEDIA = {"text", "photo"}
 IGNORED_MEDIA = {"video", "audio", "voice", "sticker", "document", "media"}
+SIGNAL_MONITOR_HEARTBEAT_SECONDS = 15
 
 
 class SignalProcessor:
@@ -224,12 +230,41 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
                 return
             await processor.process(incoming, client=client)
 
+        heartbeat_task = asyncio.create_task(
+            run_signal_monitor_heartbeat(config.database_path, logger)
+        )
         logger.info("Monitoramento Telegram iniciado. DRY_RUN=%s", str(config.dry_run).lower())
-        await client.run_until_disconnected()
-        return 0
+        try:
+            await client.run_until_disconnected()
+            return 0
+        finally:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
     finally:
         processor.close()
         await client.disconnect()
+
+
+async def run_signal_monitor_heartbeat(
+    database_path: Path,
+    logger: logging.Logger,
+    *,
+    interval_seconds: int = SIGNAL_MONITOR_HEARTBEAT_SECONDS,
+) -> None:
+    while True:
+        try:
+            await asyncio.to_thread(
+                update_service_heartbeat,
+                database_path,
+                SIGNAL_MONITOR_SERVICE_NAME,
+                details="telegram_authorized",
+            )
+        except Exception as exc:
+            logger.error("Falha ao registrar heartbeat do monitor de sinais: %s", exc)
+        await asyncio.sleep(interval_seconds)
 
 
 def incoming_from_telethon_event(event: Any) -> IncomingMessage:

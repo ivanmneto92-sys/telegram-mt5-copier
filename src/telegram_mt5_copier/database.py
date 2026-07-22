@@ -11,6 +11,7 @@ from .models import DecisionStatus, IncomingMessage, TradeSignal, decimal_to_tex
 
 SQLITE_TIMEOUT_SECONDS = 30.0
 DUPLICATE_WINDOW_MINUTES = 240
+SIGNAL_MONITOR_SERVICE_NAME = "telegram_signal_monitor"
 
 
 class SignalDatabase:
@@ -425,6 +426,12 @@ def initialize_database(database_path: Path) -> None:
                 FOREIGN KEY (user_id) REFERENCES users(id)
             );
 
+            CREATE TABLE IF NOT EXISTS service_heartbeats (
+                service_name TEXT PRIMARY KEY,
+                heartbeat_at TEXT NOT NULL,
+                details TEXT
+            );
+
             CREATE INDEX IF NOT EXISTS idx_signal_events_status
                 ON signal_events(status);
 
@@ -495,6 +502,41 @@ def connect_database(database_path: Path) -> Iterator[sqlite3.Connection]:
 
 def utc_now() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
+
+
+def update_service_heartbeat(
+    database_path: Path,
+    service_name: str,
+    *,
+    details: str | None = None,
+) -> str:
+    heartbeat_at = utc_now()
+    with connect_database(database_path) as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO service_heartbeats (service_name, heartbeat_at, details)
+            VALUES (?, ?, ?)
+            ON CONFLICT(service_name) DO UPDATE SET
+                heartbeat_at = excluded.heartbeat_at,
+                details = excluded.details
+            """,
+            (service_name, heartbeat_at, details),
+        )
+        cursor.close()
+    return heartbeat_at
+
+
+def get_service_heartbeat(database_path: Path, service_name: str) -> str | None:
+    with connect_database(database_path) as connection:
+        cursor = connection.execute(
+            "SELECT heartbeat_at FROM service_heartbeats WHERE service_name = ?",
+            (service_name,),
+        )
+        try:
+            row = cursor.fetchone()
+        finally:
+            cursor.close()
+    return str(row[0]) if row is not None else None
 
 
 def as_text(value: int | str | None) -> str | None:

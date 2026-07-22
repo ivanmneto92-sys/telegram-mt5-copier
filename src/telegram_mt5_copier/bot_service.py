@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 import time
@@ -75,7 +76,7 @@ from .bot_keyboards import (
     normalize_callback_data,
 )
 from .command_queue import CommandQueue
-from .database import connect_database
+from .database import SIGNAL_MONITOR_SERVICE_NAME, connect_database, get_service_heartbeat
 from .mt5.account_service import MT5AccountService
 from .mt5.models import (
     CONNECTION_STATUS_CONNECTED,
@@ -131,6 +132,7 @@ class BotService:
         self.commands = CommandQueue(database_path)
         self.account_service = account_service or AccountService()
         self.mt5_accounts = mt5_account_service or MT5AccountService(database_path)
+        self.database_path = database_path
         self.mt5_onboarding_url = mt5_onboarding_url
         self.admin_ids = set(admin_ids)
         self.rate_limiter = rate_limiter or RateLimiter()
@@ -743,6 +745,9 @@ class BotService:
         mt5_status = "⚪ Não conectado"
         if account is not None:
             mt5_status = mt5_account_connection_label(account.connection_status)
+        monitor_status = signal_monitor_connection_label(
+            get_service_heartbeat(self.database_path, SIGNAL_MONITOR_SERVICE_NAME)
+        )
         return BotResponse(
             "\n".join(
                 [
@@ -752,7 +757,7 @@ class BotService:
                     "🟢 Online",
                     "",
                     "Monitor de sinais:",
-                    "⚪ Aguardando integração",
+                    monitor_status,
                     "",
                     "MetaTrader 5:",
                     mt5_status,
@@ -862,6 +867,27 @@ def mt5_account_connection_label(status: str) -> str:
     if status == CONNECTION_STATUS_CONNECTED:
         return "🟢 Conectada"
     return "🔴 Desconectada"
+
+
+def signal_monitor_connection_label(
+    heartbeat_at: str | None,
+    *,
+    now: datetime | None = None,
+    stale_after_seconds: int = 45,
+) -> str:
+    if not heartbeat_at:
+        return "⚪ Aguardando inicialização"
+    try:
+        heartbeat = datetime.fromisoformat(heartbeat_at)
+        if heartbeat.tzinfo is None:
+            heartbeat = heartbeat.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return "🔴 Offline"
+
+    current_time = now or datetime.now(tz=timezone.utc)
+    if current_time - heartbeat <= timedelta(seconds=stale_after_seconds):
+        return "🟢 Online"
+    return "🔴 Offline"
 
 
 def account_type_label(account: MT5Account) -> str:
