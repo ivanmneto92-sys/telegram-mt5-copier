@@ -38,8 +38,7 @@ def clean_signal_text(text: str) -> str | None:
                 stop_loss_value = sl_match.group("value")
                 continue
 
-        tp_match = TP_LINE_RE.search(line)
-        if tp_match:
+        for tp_match in TP_LINE_RE.finditer(line):
             take_profit_values.append(tp_match.group("value"))
 
     if entry_value is None or stop_loss_value is None or not take_profit_values:

@@ -235,6 +235,40 @@ class BotManagementTests(unittest.TestCase):
             service.close()
             accounts.close()
 
+    def test_gestao_de_risco_atualiza_perfil_usado_pelo_mt5(self) -> None:
+        accounts = MT5AccountService(
+            self.database_path,
+            credential_service=CredentialService(CredentialService.generate_key()),
+            terminal_manager=TerminalManager(Path(self.temp_dir.name) / "mt5-risk"),
+            client_factory=lambda: SimulatedMT5Client(),
+        )
+        service = BotService(self.database_path, mt5_account_service=accounts)
+        try:
+            service.start(101, "alice")
+            user = self.users.get_by_telegram_user_id(101)
+            account = accounts.register_account(
+                user.id,
+                MT5AccountForm("Broker", "Broker-Demo", "12345678", "secret", "Demo"),
+            )
+
+            service.handle_callback(101, "alice", "v1:r:lot:0.10")
+            service.handle_callback(101, "alice", "v1:r:mode:risk_percent")
+            service.handle_callback(101, "alice", "v1:r:risk:0.50")
+            service.handle_callback(101, "alice", "v1:r:loss:50")
+            service.handle_callback(101, "alice", "v1:r:spread:100")
+            service.handle_callback(101, "alice", "v1:r:slippage:20")
+            profile = accounts.get_execution_profile(user.id, account.id)
+
+            self.assertEqual(profile.fixed_lot, Decimal("0.10"))
+            self.assertEqual(profile.risk_mode, "risk_percent")
+            self.assertEqual(profile.risk_percent, Decimal("0.50"))
+            self.assertEqual(profile.daily_loss_limit, Decimal("50"))
+            self.assertEqual(profile.max_spread_points, 100)
+            self.assertEqual(profile.max_slippage_points, 20)
+        finally:
+            service.close()
+            accounts.close()
+
     def test_tela_minha_conta_sem_mt5(self) -> None:
         self.service.start(101, "alice")
 
@@ -251,8 +285,8 @@ class BotManagementTests(unittest.TestCase):
         response = self.service.handle_callback(101, "alice", "v1:o")
 
         self.assertIn("📈 OPERAÇÕES", response.text)
-        self.assertIn("Ainda não é possível consultar operações abertas.", response.text)
-        self.assertIn("• Stop Loss", response.text)
+        self.assertIn("Nenhuma operação do copiador registrada como ativa.", response.text)
+        self.assertIn("MetaTrader 5: ⚪ Não conectado", response.text)
 
     def test_confirmacao_de_ativacao_visual(self) -> None:
         self.service.start(101, "alice")
@@ -312,7 +346,7 @@ class BotManagementTests(unittest.TestCase):
         response = self.service.handle_callback(101, "alice", "v1:h")
 
         self.assertIn("📋 HISTÓRICO", response.text)
-        self.assertIn("set_user_status", response.text)
+        self.assertIn("Nenhuma execução registrada", response.text)
 
     def test_status_da_conexao(self) -> None:
         self.service.start(101, "alice")

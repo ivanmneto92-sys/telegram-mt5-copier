@@ -37,6 +37,8 @@ ORDER_STATUS_FAILED = "failed"
 
 
 class PendingOrderType(StrEnum):
+    BUY = "BUY"
+    SELL = "SELL"
     BUY_LIMIT = "BUY_LIMIT"
     BUY_STOP = "BUY_STOP"
     SELL_LIMIT = "SELL_LIMIT"
@@ -82,6 +84,8 @@ class AccountConnectionInfo:
 class TerminalInfo:
     path: Path | None
     connected: bool
+    trade_allowed: bool = True
+    tradeapi_disabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -91,6 +95,9 @@ class SymbolInfo:
     volume_max: Decimal = Decimal("100")
     volume_step: Decimal = Decimal("0.01")
     trade_tick_size: Decimal = Decimal("0.01")
+    trade_tick_value: Decimal = Decimal("0")
+    trade_tick_value_loss: Decimal = Decimal("0")
+    point: Decimal = Decimal("0.01")
     digits: int = 2
     stops_level_points: int = 0
     filling_mode: int | None = None

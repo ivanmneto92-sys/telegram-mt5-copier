@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import sqlite3
@@ -10,6 +10,7 @@ from typing import Iterator
 from .models import DecisionStatus, IncomingMessage, TradeSignal, decimal_to_text
 
 SQLITE_TIMEOUT_SECONDS = 30.0
+DUPLICATE_WINDOW_MINUTES = 240
 
 
 class SignalDatabase:
@@ -30,11 +31,33 @@ class SignalDatabase:
     def initialize(self) -> None:
         initialize_database(self.database_path)
 
-    def has_duplicate(self, signature: str) -> bool:
+    def has_duplicate(self, content_signature: str) -> bool:
+        cutoff = (datetime.now(tz=timezone.utc) - timedelta(minutes=DUPLICATE_WINDOW_MINUTES)).isoformat()
         with connect_database(self.database_path) as connection:
             cursor = connection.execute(
-                "SELECT 1 FROM signals WHERE signature = ? LIMIT 1",
-                (signature,),
+                "SELECT 1 FROM signals WHERE content_signature = ? AND created_at >= ? LIMIT 1",
+                (content_signature, cutoff),
+            )
+            try:
+                return cursor.fetchone() is not None
+            finally:
+                cursor.close()
+
+    def has_accepted_source_message(
+        self,
+        source_chat_id: int | str | None,
+        source_message_id: int | str | None,
+    ) -> bool:
+        if source_chat_id is None or source_message_id is None:
+            return False
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                """
+                SELECT 1 FROM signals
+                WHERE source_chat_id = ? AND source_message_id = ?
+                LIMIT 1
+                """,
+                (str(source_chat_id), str(source_message_id)),
             )
             try:
                 return cursor.fetchone() is not None
@@ -48,6 +71,7 @@ class SignalDatabase:
                 """
                 INSERT INTO signals (
                     signature,
+                    content_signature,
                     symbol,
                     direction,
                     entry_low,
@@ -60,10 +84,11 @@ class SignalDatabase:
                     formatted_message,
                     created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     signal.signature,
+                    signal.content_signature,
                     signal.symbol,
                     signal.direction.value,
                     decimal_to_text(signal.entry_low),
@@ -173,6 +198,7 @@ def initialize_database(database_path: Path) -> None:
             CREATE TABLE IF NOT EXISTS signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 signature TEXT NOT NULL UNIQUE,
+                content_signature TEXT,
                 symbol TEXT NOT NULL,
                 direction TEXT NOT NULL,
                 entry_low TEXT NOT NULL,
@@ -481,6 +507,11 @@ def run_schema_migrations(connection: sqlite3.Connection) -> None:
     ensure_column(connection, "mt5_accounts", "account_mode", "TEXT NOT NULL DEFAULT 'hedging'")
     ensure_column(connection, "mt5_accounts", "balance", "TEXT")
     ensure_column(connection, "mt5_accounts", "equity", "TEXT")
+    ensure_column(connection, "signals", "content_signature", "TEXT")
+    cursor = connection.execute(
+        "UPDATE signals SET content_signature = signature WHERE content_signature IS NULL"
+    )
+    cursor.close()
     ensure_column(connection, "mt5_accounts", "worker_heartbeat_at", "TEXT")
     ensure_column(
         connection,

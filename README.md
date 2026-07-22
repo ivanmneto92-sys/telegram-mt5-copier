@@ -198,7 +198,7 @@ O script `scripts/setup_windows.ps1` instala o pacote `MetaTrader5` somente no W
 
 Cada conta cadastrada recebe uma pasta isolada em `MT5_BASE_DIR\<mt5_account_id>\`, com `terminal64.exe`, `data\`, `logs\`, `worker.lock` e `heartbeat.txt`. A chamada ao MetaTrader usa modo portable, mantendo os dados junto da cópia isolada do terminal e evitando alternar contas dentro de um mesmo terminal.
 
-Para validar uma conta demo na VPS:
+Para validar uma conta na VPS:
 
 1. Inicie `telegram-mt5-onboarding` atrás de HTTPS.
 2. Inicie `telegram-management-bot`.
@@ -206,10 +206,12 @@ Para validar uma conta demo na VPS:
 4. Cadastre corretora, servidor, login, senha e alias pela Mini App. A senha é enviada por POST, criptografada e nunca é exibida novamente.
 5. Use `🖥️ Minhas contas` e `🔄 Testar conexão` para confirmar login, servidor, tipo Demo/Real, modo Hedging/Netting, saldo e equity.
 6. Inicie `telegram-mt5-worker` para manter heartbeat e reconexão por conta.
-7. Mantenha `MT5_EXECUTION_MODE=simulation` até validar tudo.
-8. Para teste real em conta demo, ajuste `MT5_EXECUTION_MODE=demo_execution` e `GLOBAL_EXECUTION_KILL_SWITCH=false`.
+7. Para envio em conta real, configure `MT5_EXECUTION_MODE=live_execution` e `ALLOW_LIVE_ACCOUNTS=true`.
+8. O envio só é liberado quando `GLOBAL_EXECUTION_KILL_SWITCH=false`, a conta está conectada, o usuário está ativo e o perfil operacional está habilitado.
 
-Mantenha `ALLOW_LIVE_ACCOUNTS=false`. Contas reais e `live_execution` permanecem bloqueados.
+O modo real aplica antes do envio: lote fixo ou risco percentual, spread máximo, limite/meta diária, máximo de sinais, volume mínimo/step, distância mínima de stops e `order_check`. Ordens de múltiplos TPs são verificadas antes do primeiro envio; se uma submissão intermediária falhar, o serviço tenta remover as pendentes já criadas. Breakeven e trailing são administrados pelo `telegram-mt5-worker` após o preço avançar 1R.
+
+`DRY_RUN` controla a republicação no Telegram e não substitui as travas específicas do MT5.
 
 Serviços sugeridos no Agendador de Tarefas ou serviço Windows dedicado:
 

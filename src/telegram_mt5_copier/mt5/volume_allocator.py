@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from decimal import Decimal, ROUND_CEILING
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 
 from .models import SymbolInfo
 
@@ -45,6 +45,43 @@ def validate_volume(volume: Decimal, symbol_info: SymbolInfo) -> None:
     if volume < symbol_info.volume_min or volume > symbol_info.volume_max:
         raise VolumeAllocationError("Lote fora dos limites do simbolo.")
     validate_step(volume, symbol_info.volume_step)
+
+
+def volume_for_risk(
+    *,
+    equity: Decimal | None,
+    risk_percent: Decimal,
+    entry_price: Decimal,
+    stop_loss: Decimal,
+    symbol_info: SymbolInfo,
+) -> Decimal:
+    if equity is None or equity <= 0:
+        raise VolumeAllocationError("Equity indisponivel para calcular risco percentual.")
+    if risk_percent <= 0 or risk_percent > Decimal("100"):
+        raise VolumeAllocationError("Percentual de risco invalido.")
+    tick_value = (
+        symbol_info.trade_tick_value_loss
+        if symbol_info.trade_tick_value_loss > 0
+        else symbol_info.trade_tick_value
+    )
+    if symbol_info.trade_tick_size <= 0 or tick_value <= 0:
+        raise VolumeAllocationError("Tick size/tick value indisponivel para calcular o lote.")
+
+    price_risk = abs(entry_price - stop_loss)
+    if price_risk <= 0:
+        raise VolumeAllocationError("Distancia ate o Stop Loss invalida.")
+    loss_per_lot = (price_risk / symbol_info.trade_tick_size) * tick_value
+    allowed_loss = equity * risk_percent / Decimal("100")
+    raw_volume = allowed_loss / loss_per_lot
+    units = (raw_volume / symbol_info.volume_step).to_integral_value(rounding=ROUND_FLOOR)
+    volume = units * symbol_info.volume_step
+    if volume > symbol_info.volume_max:
+        max_units = (symbol_info.volume_max / symbol_info.volume_step).to_integral_value(rounding=ROUND_FLOOR)
+        volume = max_units * symbol_info.volume_step
+    if volume < symbol_info.volume_min:
+        raise VolumeAllocationError("Risco calculado gera lote abaixo do minimo do simbolo.")
+    validate_volume(volume, symbol_info)
+    return volume
 
 
 def validate_step(volume: Decimal, step: Decimal) -> None:

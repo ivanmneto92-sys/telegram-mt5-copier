@@ -41,7 +41,7 @@ class TradeSignal:
     clean_message: str | None = None
 
     @property
-    def signature(self) -> str:
+    def content_signature(self) -> str:
         payload = {
             "symbol": self.symbol,
             "direction": self.direction.value,
@@ -51,6 +51,15 @@ class TradeSignal:
             "take_profits": [decimal_to_text(value) for value in self.take_profits],
         }
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return sha256(encoded).hexdigest()
+
+    @property
+    def signature(self) -> str:
+        if self.source_chat_id is None or self.source_message_id is None:
+            return self.content_signature
+        encoded = (
+            f"{self.content_signature}:{self.source_chat_id}:{self.source_message_id}"
+        ).encode("utf-8")
         return sha256(encoded).hexdigest()
 
 

@@ -261,6 +261,30 @@ class ParserTests(unittest.TestCase):
             (Decimal("4110"), Decimal("4115"), Decimal("4120"), Decimal("4140")),
         )
 
+    def test_multiplos_tps_na_mesma_linha(self) -> None:
+        decision = parse_signal_text(
+            "XAUUSD BUY\nENTRY 4103-4105\nSL 4090\nTP1 4110 TP2 4115 TP3 4120"
+        )
+
+        self.assertEqual(
+            decision.signal.take_profits,
+            (Decimal("4110"), Decimal("4115"), Decimal("4120")),
+        )
+
+    def test_mesmos_precos_em_mensagens_diferentes_nao_sao_duplicados(self) -> None:
+        first = parse_signal_text(
+            "XAUUSD BUY\nENTRY 4103-4105\nSL 4090\nTP 4110",
+            source_chat_id=-1001,
+            source_message_id=10,
+        )
+        second = parse_signal_text(
+            "XAUUSD BUY\nENTRY 4103-4105\nSL 4090\nTP 4110",
+            source_chat_id=-1001,
+            source_message_id=11,
+        )
+
+        self.assertNotEqual(first.signal.signature, second.signal.signature)
+
     def test_validacao_buy_valido(self) -> None:
         parsed = parse_signal_text(BUY_VALID)
         validated = validate_signal(parsed.signal)

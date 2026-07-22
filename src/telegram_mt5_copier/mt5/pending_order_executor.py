@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -11,6 +11,7 @@ from .account_service import MT5AccountService
 from .client import SimulatedMT5Client
 from .execution_group_service import ExecutionGroupResult, ExecutionGroupService, build_latency_metrics
 from .execution_repository import ExecutionRepository
+from .ipc_lock import MT5OperationLock
 from .models import (
     ACCOUNT_MODE_NETTING,
     ACCOUNT_TYPE_DEMO,
@@ -49,6 +50,7 @@ class PendingOrderExecutor:
         *,
         execution_mode: str = "simulation",
         global_kill_switch: bool = True,
+        allow_live_accounts: bool = False,
         client_factory: Callable[[], object] | None = None,
         planner: PendingOrderPlanner | None = None,
         repository: ExecutionRepository | None = None,
@@ -57,6 +59,7 @@ class PendingOrderExecutor:
         self.accounts = accounts
         self.execution_mode = execution_mode
         self.global_kill_switch = global_kill_switch
+        self.allow_live_accounts = allow_live_accounts
         self.client_factory = client_factory or SimulatedMT5Client
         self.planner = planner or PendingOrderPlanner()
         self.repository = repository or ExecutionRepository(database_path)
@@ -79,7 +82,12 @@ class PendingOrderExecutor:
 
     def execute_for_signal(self, signal: TradeSignal) -> list[PendingExecutionResult]:
         results: list[PendingExecutionResult] = []
-        for account, profile in self.accounts.connected_demo_accounts_for_active_users():
+        candidates = (
+            self.accounts.accounts_for_active_users()
+            if self.execution_mode == "live_execution"
+            else self.accounts.connected_demo_accounts_for_active_users()
+        )
+        for account, profile in candidates:
             results.append(self.execute_for_account(signal, account, profile))
         return results
 
@@ -100,15 +108,40 @@ class PendingOrderExecutor:
 
         client = self.client_factory()
         initialized_client = False
+        operation_lock: MT5OperationLock | None = None
 
         def shutdown_if_needed() -> None:
-            if initialized_client and self.execution_mode == "demo_execution":
+            if initialized_client and self.execution_mode in {"demo_execution", "live_execution"}:
                 client.shutdown()
+            if operation_lock is not None:
+                operation_lock.close()
 
         try:
-            if self.execution_mode == "demo_execution":
-                self._initialize_demo_client(client, account)
+            if self.execution_mode in {"demo_execution", "live_execution"}:
+                if account.terminal_path is None:
+                    raise ValueError("terminal_not_provisioned")
+                operation_lock = MT5OperationLock(account.terminal_path.parent)
+                operation_lock.acquire()
+                self._initialize_client(client, account)
                 initialized_client = True
+
+                terminal = client.terminal_info()
+                if terminal is None or not terminal.connected:
+                    raise ValueError("terminal_disconnected")
+                if not terminal.trade_allowed or terminal.tradeapi_disabled:
+                    raise ValueError("terminal_trading_not_allowed")
+                current_account = client.account_info()
+                if current_account is None or not current_account.trade_allowed:
+                    raise ValueError("account_trading_not_allowed")
+                if int(current_account.login) != int(account.login):
+                    raise ValueError("mt5_login_mismatch")
+                account = replace(
+                    account,
+                    equity=current_account.equity,
+                    balance=current_account.balance,
+                    account_type=current_account.account_type,
+                    account_mode=current_account.account_mode,
+                )
 
             symbol = SymbolResolver(client).resolve(signal.symbol)
             if hasattr(client, "symbol_select") and not client.symbol_select(symbol, True):
@@ -117,6 +150,7 @@ class PendingOrderExecutor:
             tick = client.symbol_info_tick(symbol)
             if symbol_info is None or tick is None:
                 raise ValueError("Informacoes do simbolo indisponiveis.")
+            validate_operational_limits(client, account, profile, symbol_info, tick)
 
             planned_at = datetime.now(tz=timezone.utc)
             plan = self.planner.plan(
@@ -142,7 +176,7 @@ class PendingOrderExecutor:
                 group_result=ExecutionGroupResult(group=None, orders=(), rejected_reason=exc.reason),
                 message=format_rejection_message(exc.reason, account),
             )
-        except ValueError as exc:
+        except Exception as exc:
             shutdown_if_needed()
             return PendingExecutionResult(
                 account=account,
@@ -160,6 +194,7 @@ class PendingOrderExecutor:
                 tick=tick,
                 execution_mode=self.execution_mode,
                 global_kill_switch=self.global_kill_switch,
+                allow_live_accounts=self.allow_live_accounts,
             )
         except OrderValidationError as exc:
             shutdown_if_needed()
@@ -191,7 +226,7 @@ class PendingOrderExecutor:
             message = "" if group_result.duplicate else format_pending_simulation_message(plan, account)
             return PendingExecutionResult(account=account, group_result=group_result, message=message)
 
-        if self.execution_mode == "demo_execution":
+        if self.execution_mode in {"demo_execution", "live_execution"}:
             try:
                 return self._execute_demo_plan(
                     plan=plan,
@@ -213,7 +248,9 @@ class PendingOrderExecutor:
 
     def _validate_execution_mode(self, account: MT5Account, plan: PendingOrderPlan) -> None:
         if self.execution_mode == "live_execution":
-            raise OrderValidationError("live_execution_blocked")
+            if not self.allow_live_accounts:
+                raise OrderValidationError("live_accounts_not_allowed")
+            return
         if account.account_type == ACCOUNT_TYPE_REAL:
             raise OrderValidationError("real_account_blocked")
         if (
@@ -225,7 +262,15 @@ class PendingOrderExecutor:
 
     def _preflight_rejection_reason(self, account: MT5Account) -> str | None:
         if self.execution_mode == "live_execution":
-            return "live_execution_blocked"
+            if not self.allow_live_accounts:
+                return "live_accounts_not_allowed"
+            if account.terminal_path is None:
+                return "terminal_not_provisioned"
+            if account.connection_status != CONNECTION_STATUS_CONNECTED:
+                return "account_disconnected"
+            if self.global_kill_switch:
+                return "kill_switch_enabled"
+            return None
         if self.global_kill_switch and self.execution_mode != "simulation":
             return "kill_switch_enabled"
         if account.connection_status != CONNECTION_STATUS_CONNECTED:
@@ -238,7 +283,7 @@ class PendingOrderExecutor:
             return "terminal_not_provisioned"
         return None
 
-    def _initialize_demo_client(self, client: object, account: MT5Account) -> None:
+    def _initialize_client(self, client: object, account: MT5Account) -> None:
         if account.terminal_path is None:
             raise ValueError("terminal_not_provisioned")
         password: str | None = None
@@ -277,7 +322,18 @@ class PendingOrderExecutor:
             )
             for order in plan.orders
         ]
-        check_results = [client.order_check(request) for request in requests]
+        check_results = []
+        for request in requests:
+            try:
+                check_results.append(client.order_check(request))
+            except Exception as exc:
+                reason = f"order_check_exception:{type(exc).__name__}"
+                group_result = self.groups.reject_group(plan, reason)
+                return PendingExecutionResult(
+                    account=account,
+                    group_result=group_result,
+                    message=format_rejection_message(reason, account),
+                )
         for check_result in check_results:
             if not is_successful_mt5_result(client, check_result, check=True):
                 reason = f"order_check_failed:{result_message(check_result)}"
@@ -295,20 +351,47 @@ class PendingOrderExecutor:
             metrics=metrics,
         )
         send_results = []
+        submitted_tickets: list[str] = []
         for database_order, request in zip(orders, requests):
-            send_result = client.order_send(request)
+            try:
+                send_result = client.order_send(request)
+            except Exception as exc:
+                send_result = None
+                send_exception = type(exc).__name__
+            else:
+                send_exception = None
             send_results.append(send_result)
             if not is_successful_mt5_result(client, send_result, check=False):
-                reason = f"order_send_failed:{result_message(send_result)}"
+                reason = (
+                    f"order_send_exception:{send_exception}"
+                    if send_exception
+                    else f"order_send_failed:{result_message(send_result)}"
+                )
+                rollback_failures = cancel_submitted_pending_orders(client, submitted_tickets)
+                if rollback_failures:
+                    reason = f"{reason};rollback_failed:{','.join(rollback_failures)}"
                 self.repository.mark_group_failed(group.id, reason)
                 return PendingExecutionResult(
                     account=account,
                     group_result=ExecutionGroupResult(group=group, orders=orders, rejected_reason=reason),
                     message=format_rejection_message(reason, account),
                 )
+            ticket = result_ticket(send_result)
+            if not ticket:
+                reason = "order_send_failed:missing_ticket"
+                rollback_failures = cancel_submitted_pending_orders(client, submitted_tickets)
+                if rollback_failures:
+                    reason = f"{reason};rollback_failed:{','.join(rollback_failures)}"
+                self.repository.mark_group_failed(group.id, reason)
+                return PendingExecutionResult(
+                    account=account,
+                    group_result=ExecutionGroupResult(group=group, orders=orders, rejected_reason=reason),
+                    message=format_rejection_message(reason, account),
+                )
+            submitted_tickets.append(ticket)
             self.repository.mark_order_submitted(
                 database_order.id,
-                ticket=result_ticket(send_result),
+                ticket=ticket,
                 broker_retcode=str(result_retcode(send_result)),
                 broker_message=result_message(send_result),
                 status=ORDER_STATUS_PENDING_ACTIVE,
@@ -318,8 +401,50 @@ class PendingOrderExecutor:
         return PendingExecutionResult(
             account=account,
             group_result=ExecutionGroupResult(group=group, orders=orders),
-            message=format_demo_execution_message(plan, account, send_results),
+            message=format_execution_message(plan, account, send_results, self.execution_mode),
         )
+
+
+def validate_operational_limits(
+    client: object,
+    account: MT5Account,
+    profile: ExecutionProfile,
+    symbol_info: SymbolInfo,
+    tick: TickInfo,
+) -> None:
+    if symbol_info.point <= 0:
+        raise OrderValidationError("symbol_point_invalid")
+    spread_points = (tick.ask - tick.bid) / symbol_info.point
+    if spread_points < 0:
+        raise OrderValidationError("negative_spread")
+    if profile.max_spread_points > 0 and spread_points > profile.max_spread_points:
+        raise OrderValidationError("max_spread_exceeded")
+
+    active_signal_keys: set[str] = set()
+    for item in (*client.positions_get(), *client.orders_get()):
+        if int(result_value(item, "magic", 0) or 0) != MT5_MAGIC_NUMBER:
+            continue
+        comment = str(result_value(item, "comment", ""))
+        parts = comment.split()
+        key = parts[1] if len(parts) >= 2 and parts[0] == "tgcp" else f"ticket:{result_value(item, 'ticket', result_value(item, 'order', id(item)))}"
+        active_signal_keys.add(key)
+    if profile.max_open_signals > 0 and len(active_signal_keys) >= profile.max_open_signals:
+        raise OrderValidationError("max_open_signals_reached")
+
+    if profile.daily_profit_target <= 0 and profile.daily_loss_limit <= 0:
+        return
+    now = datetime.now(tz=timezone.utc)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    daily_result = Decimal("0")
+    for deal in client.history_deals_get(day_start, now):
+        if int(result_value(deal, "magic", 0) or 0) != MT5_MAGIC_NUMBER:
+            continue
+        for field_name in ("profit", "commission", "swap", "fee"):
+            daily_result += Decimal(str(result_value(deal, field_name, 0) or 0))
+    if profile.daily_profit_target > 0 and daily_result >= profile.daily_profit_target:
+        raise OrderValidationError("daily_profit_target_reached")
+    if profile.daily_loss_limit > 0 and daily_result <= -profile.daily_loss_limit:
+        raise OrderValidationError("daily_loss_limit_reached")
 
 
 def format_pending_simulation_message(plan: PendingOrderPlan, account: MT5Account) -> str:
@@ -381,8 +506,9 @@ def build_pending_order_request(
     profile: ExecutionProfile,
     symbol_info: SymbolInfo,
 ) -> dict[str, object]:
+    is_market = order.order_type.value in {"BUY", "SELL"}
     request = {
-        "action": mt5_constant(client, "TRADE_ACTION_PENDING", 5),
+        "action": mt5_constant(client, "TRADE_ACTION_DEAL", 1) if is_market else mt5_constant(client, "TRADE_ACTION_PENDING", 5),
         "symbol": plan.symbol,
         "volume": decimal_to_float(order.normalized_volume),
         "type": pending_order_type_constant(client, order.order_type.value),
@@ -391,19 +517,22 @@ def build_pending_order_request(
         "tp": decimal_to_float(order.take_profit),
         "deviation": int(profile.max_slippage_points),
         "magic": MT5_MAGIC_NUMBER,
-        "comment": f"telegram-mt5-copier TP{order.tp_index}",
-        "type_time": mt5_constant(client, "ORDER_TIME_SPECIFIED", 2),
-        "expiration": datetime.fromisoformat(plan.expiration_at),
+        "comment": f"tgcp {plan.signal_id[:8]} TP{order.tp_index}",
     }
-    if symbol_info.filling_mode is not None:
-        request["type_filling"] = symbol_info.filling_mode
+    if is_market:
+        request["type_time"] = mt5_constant(client, "ORDER_TIME_GTC", 0)
+        request["type_filling"] = market_filling_constant(client, symbol_info)
     else:
+        request["type_time"] = mt5_constant(client, "ORDER_TIME_SPECIFIED", 2)
+        request["expiration"] = datetime.fromisoformat(plan.expiration_at)
         request["type_filling"] = mt5_constant(client, "ORDER_FILLING_RETURN", 2)
     return request
 
 
 def pending_order_type_constant(client: object, order_type: str) -> int:
     constants = {
+        "BUY": ("ORDER_TYPE_BUY", 0),
+        "SELL": ("ORDER_TYPE_SELL", 1),
         "BUY_LIMIT": ("ORDER_TYPE_BUY_LIMIT", 2),
         "SELL_LIMIT": ("ORDER_TYPE_SELL_LIMIT", 3),
         "BUY_STOP": ("ORDER_TYPE_BUY_STOP", 4),
@@ -411,6 +540,35 @@ def pending_order_type_constant(client: object, order_type: str) -> int:
     }
     constant_name, default = constants[order_type]
     return mt5_constant(client, constant_name, default)
+
+
+def market_filling_constant(client: object, symbol_info: SymbolInfo) -> int:
+    filling_flags = int(symbol_info.filling_mode or 0)
+    if filling_flags & 1:
+        return mt5_constant(client, "ORDER_FILLING_FOK", 0)
+    if filling_flags & 2:
+        return mt5_constant(client, "ORDER_FILLING_IOC", 1)
+    return mt5_constant(client, "ORDER_FILLING_RETURN", 2)
+
+
+def cancel_submitted_pending_orders(client: object, tickets: list[str]) -> list[str]:
+    failures: list[str] = []
+    for ticket in tickets:
+        try:
+            result = client.order_send(
+                {
+                    "action": mt5_constant(client, "TRADE_ACTION_REMOVE", 8),
+                    "order": int(ticket),
+                    "magic": MT5_MAGIC_NUMBER,
+                    "comment": "telegram-mt5-copier rollback",
+                }
+            )
+        except Exception:
+            failures.append(ticket)
+            continue
+        if not is_successful_mt5_result(client, result, check=False):
+            failures.append(ticket)
+    return failures
 
 
 def mt5_constant(client: object, name: str, default: int) -> int:
@@ -447,7 +605,7 @@ def result_retcode(result: object | None) -> int:
 
 def result_ticket(result: object | None) -> str:
     value = result_value(result, "order", None)
-    if value is None:
+    if not value:
         value = result_value(result, "deal", "")
     return str(value or "")
 
@@ -472,13 +630,17 @@ def result_value(result: object | None, key: str, default: object) -> object:
     return default
 
 
-def format_demo_execution_message(
+def format_execution_message(
     plan: PendingOrderPlan,
     account: MT5Account,
     send_results: list[object],
+    execution_mode: str,
 ) -> str:
+    account_label = "CONTA REAL" if execution_mode == "live_execution" else "CONTA DEMO"
+    is_market = plan.order_type.value in {"BUY", "SELL"}
+    execution_label = "ORDENS A MERCADO" if is_market else "ORDENS PENDENTES"
     lines = [
-        "✅ ORDENS PENDENTES ENVIADAS EM CONTA DEMO",
+        f"✅ {execution_label} ENVIADAS EM {account_label}",
         "",
         f"{plan.symbol} — {order_type_label(plan.order_type.value)}",
         "",
@@ -486,10 +648,10 @@ def format_demo_execution_message(
         f"Entrada selecionada: {decimal_to_text(plan.selected_entry_price)}",
         f"Faixa: {decimal_to_text(plan.entry_low)} até {decimal_to_text(plan.entry_high)}",
         f"Stop Loss: {decimal_to_text(plan.stop_loss)}",
-        f"Validade: {expiration_label(plan)}",
-        "",
-        "Tickets:",
     ]
+    if not is_market:
+        lines.append(f"Validade: {expiration_label(plan)}")
+    lines.extend(["", "Tickets:"])
     for order, send_result in zip(plan.orders, send_results):
         lines.append(
             f"TP{order.tp_index}: ticket {result_ticket(send_result)} | "

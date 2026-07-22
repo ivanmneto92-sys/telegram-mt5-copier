@@ -48,6 +48,9 @@ from .bot_keyboards import (
     CONFIRM_PAUSE,
     CONFIRM_REMOVE_MT5,
     CONNECTION_MENU,
+    DAILY_LOSS_MENU,
+    DAILY_TARGET_MENU,
+    FIXED_LOT_MENU,
     HISTORY_MENU,
     MAIN_MENU,
     MT5_ACCOUNTS_MENU,
@@ -55,17 +58,24 @@ from .bot_keyboards import (
     PAUSED_MENU,
     PROTECTIONS_MENU,
     RISK_MENU,
+    RISK_MODE_MENU,
+    RISK_PERCENT_MENU,
+    MAX_OPEN_MENU,
+    SPREAD_MENU,
+    SLIPPAGE_MENU,
     ENTRY_MODE_MENU,
     ENTRY_PRICE_MENU,
     EXPIRATION_MENU,
     SIGNAL_EXECUTION_MENU,
     extract_fixed_lot,
+    extract_risk_value,
     extract_refresh_screen,
     is_valid_callback_data,
     mt5_connect_menu,
     normalize_callback_data,
 )
 from .command_queue import CommandQueue
+from .database import connect_database
 from .mt5.account_service import MT5AccountService
 from .mt5.models import (
     CONNECTION_STATUS_CONNECTED,
@@ -347,7 +357,6 @@ class BotService:
             account = self.mt5_accounts.first_account(user.id)
             if account is not None:
                 self.mt5_accounts.remove_account(user.id, account.id)
-                self.commands.enqueue(user.id, "remove_mt5_account", {"account_id": account.id})
             return BotResponse(
                 "Conta MT5 removida com segurança.",
                 mt5_connect_menu(self.mt5_onboarding_url),
@@ -355,8 +364,9 @@ class BotService:
             )
         if callback == CB_CONFIRM_ACTIVATE:
             self.users.set_status(user.id, USER_STATUS_ACTIVE)
-            self.commands.enqueue(user.id, "set_user_status", {"status": USER_STATUS_ACTIVE})
             self._log_admin_if_needed(telegram_user_id, user.id, "activate")
+            account = self.mt5_accounts.first_account(user.id)
+            mt5_status = mt5_account_connection_label(account.connection_status) if account else "⚪ Não conectado"
             return BotResponse(
                 "\n".join(
                     [
@@ -366,9 +376,9 @@ class BotService:
                         "",
                         "Novos sinais estão liberados.",
                         "",
-                        "MetaTrader 5: ⚪ Não conectado",
+                        f"MetaTrader 5: {mt5_status}",
                         "",
-                        "A configuração foi salva. A execução automática ficará disponível após a integração com o MT5.",
+                        "A configuração foi salva. Novos sinais seguirão o perfil operacional configurado.",
                     ]
                 ),
                 ACTIVATED_MENU,
@@ -376,7 +386,6 @@ class BotService:
             )
         if callback == CB_CONFIRM_PAUSE:
             self.users.set_status(user.id, USER_STATUS_PAUSED)
-            self.commands.enqueue(user.id, "set_user_status", {"status": USER_STATUS_PAUSED})
             self._log_admin_if_needed(telegram_user_id, user.id, "pause")
             return BotResponse(
                 "\n".join(
@@ -392,24 +401,95 @@ class BotService:
                 screen="paused",
             )
 
+        if callback == "v1:r:mode":
+            return BotResponse("📦 MODO DE LOTE", RISK_MODE_MENU, screen="risk")
+        if callback == "v1:r:lot":
+            return BotResponse("✏️ LOTE FIXO\n\nSelecione o lote total por sinal.", FIXED_LOT_MENU, screen="risk")
+        if callback == "v1:r:risk":
+            return BotResponse("📊 RISCO PERCENTUAL\n\nSelecione o risco máximo por sinal.", RISK_PERCENT_MENU, screen="risk")
+        if callback == "v1:r:target":
+            return BotResponse("🎯 META DIÁRIA\n\nSelecione o lucro diário em moeda da conta.", DAILY_TARGET_MENU, screen="risk")
+        if callback == "v1:r:loss":
+            return BotResponse("🛑 LIMITE DE PERDA\n\nSelecione a perda diária em moeda da conta.", DAILY_LOSS_MENU, screen="risk")
+        if callback == "v1:r:max":
+            return BotResponse("🔢 MÁXIMO DE OPERAÇÕES\n\nSelecione o máximo de grupos ativos.", MAX_OPEN_MENU, screen="risk")
+        if callback == "v1:r:spread":
+            return BotResponse("📏 SPREAD MÁXIMO\n\nSelecione o limite em pontos do símbolo.", SPREAD_MENU, screen="risk")
+        if callback == "v1:r:slippage":
+            return BotResponse("🎚️ SLIPPAGE\n\nSelecione o desvio máximo em pontos.", SLIPPAGE_MENU, screen="risk")
+        if callback in {"v1:r:mode:fixed_lot", "v1:r:mode:risk_percent"}:
+            account = self.mt5_accounts.first_account(user.id)
+            if account is None:
+                return self._connect_mt5_screen()
+            risk_mode = callback.rsplit(":", 1)[-1]
+            self.mt5_accounts.update_execution_profile_field(user.id, account.id, "risk_mode", risk_mode)
+            self.settings.update_risk_mode(user.id, risk_mode)
+            return self._risk_screen(user)
+
         fixed_lot = extract_fixed_lot(callback)
         if fixed_lot is not None:
             try:
                 settings = self.settings.update_fixed_lot(user.id, fixed_lot)
+                account = self.mt5_accounts.first_account(user.id)
+                if account is not None:
+                    self.mt5_accounts.update_execution_profile_fixed_lot(user.id, account.id, settings.fixed_lot)
             except ValueError as exc:
                 return BotResponse(str(exc), RISK_MENU, screen="risk")
-            self.commands.enqueue(user.id, "update_fixed_lot", {"fixed_lot": str(settings.fixed_lot)})
             return BotResponse(f"Lote fixo atualizado para {settings.fixed_lot}.", RISK_MENU, screen="risk")
+
+        risk_value = extract_risk_value(callback)
+        if risk_value is not None:
+            account = self.mt5_accounts.first_account(user.id)
+            if account is None:
+                return self._connect_mt5_screen()
+            field, raw_value = risk_value
+            profile_field = {
+                "risk": "risk_percent",
+                "target": "daily_profit_target",
+                "loss": "daily_loss_limit",
+                "max": "max_open_signals",
+                "spread": "max_spread_points",
+                "slippage": "max_slippage_points",
+            }[field]
+            try:
+                self.mt5_accounts.update_execution_profile_risk_value(
+                    user.id, account.id, profile_field, raw_value
+                )
+                if field == "risk":
+                    self.settings.update_risk_percent(user.id, raw_value)
+                elif field == "target":
+                    self.settings.update_daily_profit_target(user.id, raw_value)
+                elif field == "loss":
+                    self.settings.update_daily_loss_limit(user.id, raw_value)
+                elif field == "max":
+                    self.settings.update_max_open_trades(user.id, int(Decimal(raw_value)))
+            except ValueError as exc:
+                return BotResponse(str(exc), RISK_MENU, screen="risk")
+            return self._risk_screen(user)
 
         if callback == "v1:p:be":
             settings = self.settings.ensure_defaults(user.id)
-            updated = self.settings.update_breakeven_enabled(user.id, not settings.breakeven_enabled)
-            self.commands.enqueue(user.id, "update_breakeven", {"enabled": updated.breakeven_enabled})
+            account = self.mt5_accounts.first_account(user.id)
+            current = settings.breakeven_enabled
+            if account is not None:
+                current = self.mt5_accounts.ensure_execution_profile(user.id, account.id).breakeven_enabled
+            updated = self.settings.update_breakeven_enabled(user.id, not current)
+            if account is not None:
+                self.mt5_accounts.update_execution_profile_field(
+                    user.id, account.id, "breakeven_enabled", int(updated.breakeven_enabled)
+                )
             return self._protections_screen(user)
         if callback == "v1:p:tr":
             settings = self.settings.ensure_defaults(user.id)
-            updated = self.settings.update_trailing_enabled(user.id, not settings.trailing_enabled)
-            self.commands.enqueue(user.id, "update_trailing", {"enabled": updated.trailing_enabled})
+            account = self.mt5_accounts.first_account(user.id)
+            current = settings.trailing_enabled
+            if account is not None:
+                current = self.mt5_accounts.ensure_execution_profile(user.id, account.id).trailing_enabled
+            updated = self.settings.update_trailing_enabled(user.id, not current)
+            if account is not None:
+                self.mt5_accounts.update_execution_profile_field(
+                    user.id, account.id, "trailing_enabled", int(updated.trailing_enabled)
+                )
             return self._protections_screen(user)
         if callback == "v1:p:loss":
             return BotResponse(
@@ -417,13 +497,6 @@ class BotService:
                 PROTECTIONS_MENU,
                 screen="protections",
             )
-        if callback.startswith("v1:r:"):
-            return BotResponse(
-                "Configuração disponível no banco. A edição detalhada será conectada na próxima etapa.",
-                RISK_MENU,
-                screen="risk",
-            )
-
         return BotResponse("Ação invalida ou expirada.", MAIN_MENU)
 
     def _ensure_user(self, telegram_user_id: int, telegram_username: str | None) -> User:
@@ -508,25 +581,42 @@ class BotService:
         )
 
     def _operations_screen(self, user: User) -> BotResponse:
-        _positions = self.account_service.get_open_positions(user.id)
+        account = self.mt5_accounts.first_account(user.id)
+        connection = mt5_account_connection_label(account.connection_status) if account else "⚪ Não conectado"
+        with connect_database(self.mt5_accounts.database_path) as database:
+            cursor = database.execute(
+                """
+                SELECT g.symbol, g.direction, g.total_volume, g.selected_entry_price,
+                       g.stop_loss, g.status, COUNT(o.id)
+                FROM execution_groups g
+                LEFT JOIN execution_orders o ON o.execution_group_id = g.id
+                WHERE g.user_id = ?
+                  AND g.status IN ('pending_submission', 'pending_active')
+                GROUP BY g.id
+                ORDER BY g.id DESC LIMIT 10
+                """,
+                (user.id,),
+            )
+            try:
+                rows = cursor.fetchall()
+            finally:
+                cursor.close()
+        operation_lines = ["Nenhuma operação do copiador registrada como ativa."]
+        if rows:
+            operation_lines = [
+                f"• {row[0]} {row[1]} | lote {row[2]} | entrada {row[3]} | SL {row[4]} | {row[6]} TP(s) | {row[5]}"
+                for row in rows
+            ]
         return BotResponse(
             "\n".join(
                 [
                     "📈 OPERAÇÕES",
                     "",
-                    "MetaTrader 5: ⚪ Não conectado",
+                    f"MetaTrader 5: {connection}",
                     "",
-                    "Ainda não é possível consultar operações abertas.",
+                    *operation_lines,
                     "",
-                    "Após a integração com o MT5, esta área exibirá:",
-                    "",
-                    "• Ativo",
-                    "• Compra ou venda",
-                    "• Lote",
-                    "• Preço de entrada",
-                    "• Stop Loss",
-                    "• Take Profits",
-                    "• Resultado atual",
+                    "A tela mostra operações registradas pelo copiador; a reconciliação de lucro flutuante é feita separadamente.",
                 ]
             ),
             OPERATIONS_MENU,
@@ -535,28 +625,41 @@ class BotService:
 
     def _risk_screen(self, user: User) -> BotResponse:
         settings = self.settings.ensure_defaults(user.id)
+        account = self.mt5_accounts.first_account(user.id)
+        profile = self.mt5_accounts.ensure_execution_profile(user.id, account.id) if account else None
+        risk_mode = profile.risk_mode if profile else settings.risk_mode
+        fixed_lot = profile.fixed_lot if profile else settings.fixed_lot
+        risk_percent = profile.risk_percent if profile else settings.risk_percent
+        daily_profit_target = profile.daily_profit_target if profile else settings.daily_profit_target
+        daily_loss_limit = profile.daily_loss_limit if profile else settings.daily_loss_limit
+        max_open_trades = profile.max_open_signals if profile else settings.max_open_trades
+        max_spread_points = profile.max_spread_points if profile else None
+        max_slippage_points = profile.max_slippage_points if profile else None
         return BotResponse(
             "\n".join(
                 [
                     "⚙️ GESTÃO DE RISCO",
                     "",
                     "Modo de gestão:",
-                    risk_mode_label(settings.risk_mode),
+                    risk_mode_label(risk_mode),
                     "",
                     "Lote fixo:",
-                    setting_value(settings.fixed_lot),
+                    setting_value(fixed_lot),
                     "",
                     "Risco por operação:",
-                    percent_value(settings.risk_percent),
+                    percent_value(risk_percent),
                     "",
                     "Meta diária:",
-                    money_value(settings.daily_profit_target),
+                    money_value(daily_profit_target),
                     "",
                     "Limite de perda diária:",
-                    money_value(settings.daily_loss_limit),
+                    money_value(daily_loss_limit),
                     "",
                     "Máximo de operações:",
-                    str(settings.max_open_trades) if settings.max_open_trades else "Não configurado",
+                    str(max_open_trades) if max_open_trades else "Não configurado",
+                    "",
+                    f"Spread máximo: {max_spread_points if max_spread_points is not None else 'Não configurado'} pontos",
+                    f"Slippage máximo: {max_slippage_points if max_slippage_points is not None else 'Não configurado'} pontos",
                     "",
                     "Selecione uma configuração:",
                 ]
@@ -567,21 +670,26 @@ class BotService:
 
     def _protections_screen(self, user: User) -> BotResponse:
         settings = self.settings.ensure_defaults(user.id)
+        account = self.mt5_accounts.first_account(user.id)
+        profile = self.mt5_accounts.ensure_execution_profile(user.id, account.id) if account else None
+        breakeven_enabled = profile.breakeven_enabled if profile else settings.breakeven_enabled
+        trailing_enabled = profile.trailing_enabled if profile else settings.trailing_enabled
+        daily_loss_limit = profile.daily_loss_limit if profile else settings.daily_loss_limit
         return BotResponse(
             "\n".join(
                 [
                     "🛡️ PROTEÇÕES",
                     "",
                     "Breakeven:",
-                    enabled_label(settings.breakeven_enabled),
+                    enabled_label(breakeven_enabled),
                     "",
                     "Trailing Stop:",
-                    enabled_label(settings.trailing_enabled),
+                    enabled_label(trailing_enabled),
                     "",
                     "Limite diário:",
-                    configured_label(settings.daily_loss_limit > 0),
+                    configured_label(daily_loss_limit > 0),
                     "",
-                    "As proteções serão aplicadas automaticamente após a integração com o MetaTrader 5.",
+                    "Breakeven e trailing são avaliados após o preço avançar 1R. O trailing mantém distância de 1R e nunca afasta o stop.",
                 ]
             ),
             PROTECTIONS_MENU,
@@ -589,23 +697,39 @@ class BotService:
         )
 
     def _history_screen(self, user: User) -> BotResponse:
-        recent_commands = self.commands.recent_for_user(user.id, limit=10)
-        if recent_commands:
+        with connect_database(self.mt5_accounts.database_path) as database:
+            cursor = database.execute(
+                """
+                SELECT created_at, symbol, direction, total_volume, status,
+                       COALESCE(error_message, '')
+                FROM execution_groups WHERE user_id = ?
+                ORDER BY id DESC LIMIT 10
+                """,
+                (user.id,),
+            )
+            try:
+                rows = cursor.fetchall()
+            finally:
+                cursor.close()
+        lines = ["Nenhuma execução registrada até agora."]
+        if rows:
             lines = [
-                f"• {item['created_at']} - {item['command_type']} - {item['status']}"
-                for item in recent_commands
+                f"• {row[0]} | {row[1]} {row[2]} | lote {row[3]} | {row[4]}"
+                + (f" | {row[5]}" if row[5] else "")
+                for row in rows
             ]
         else:
-            lines = ["Nenhum comando criado até agora."]
+            recent_commands = self.commands.recent_for_user(user.id, limit=10)
+            if recent_commands:
+                lines = [
+                    f"• {item['created_at']} | {item['command_type']} | {item['status']}"
+                    for item in recent_commands
+                ]
 
         return BotResponse(
             "\n".join(
                 [
                     "📋 HISTÓRICO",
-                    "",
-                    "Nenhuma operação sincronizada com o MT5.",
-                    "",
-                    "Enquanto o MT5 não estiver conectado, este painel mostra alterações de status, gestão e comandos criados.",
                     "",
                     *lines,
                 ]

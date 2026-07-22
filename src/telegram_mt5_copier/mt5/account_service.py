@@ -21,6 +21,7 @@ from .models import (
     ExecutionProfile,
     MT5Account,
 )
+from .ipc_lock import MT5OperationLock
 from .terminal_manager import TerminalManager
 
 
@@ -165,11 +166,18 @@ class MT5AccountService:
             raise ValueError("Terminal MT5 ainda nao provisionado.")
 
         client = self.client_factory()
+        operation_lock = MT5OperationLock(account.terminal_path.parent)
         password: str | None = None
         try:
+            operation_lock.acquire()
             password = self.credential_service.decrypt_password(account.encrypted_password)
             if not client.initialize(account.terminal_path, int(account.login), password, account.server_name):
                 raise MT5ConnectionTestError(mt5_connection_error_message(client))
+            terminal = client.terminal_info()
+            if terminal is None or not terminal.connected:
+                raise MT5ConnectionTestError("Terminal MT5 desconectado.")
+            if not terminal.trade_allowed or terminal.tradeapi_disabled:
+                raise MT5ConnectionTestError("Negociacao automatica/API Python desativada no terminal MT5.")
             info = client.account_info()
             if info is None:
                 raise MT5ConnectionTestError(
@@ -210,6 +218,7 @@ class MT5AccountService:
         finally:
             password = None
             client.shutdown()
+            operation_lock.close()
 
     def update_terminal_path(self, user_id: int, account_id: int, terminal_path: Path) -> None:
         with connect_database(self.database_path) as connection:
@@ -351,6 +360,26 @@ class MT5AccountService:
             return existing
 
         with connect_database(self.database_path) as connection:
+            settings_cursor = connection.execute(
+                """
+                SELECT risk_mode, fixed_lot, risk_percent, daily_profit_target,
+                       daily_loss_limit, max_open_trades, breakeven_enabled, trailing_enabled
+                FROM user_settings WHERE user_id = ?
+                """,
+                (user_id,),
+            )
+            try:
+                legacy = settings_cursor.fetchone()
+            finally:
+                settings_cursor.close()
+            risk_mode = str(legacy[0]) if legacy else "fixed_lot"
+            fixed_lot = str(legacy[1]) if legacy else "0.01"
+            risk_percent = str(legacy[2]) if legacy else "1"
+            daily_profit_target = str(legacy[3]) if legacy else "0"
+            daily_loss_limit = str(legacy[4]) if legacy else "0"
+            max_open_signals = int(legacy[5]) if legacy else 1
+            breakeven_enabled = int(legacy[6]) if legacy else 0
+            trailing_enabled = int(legacy[7]) if legacy else 0
             cursor = connection.execute(
                 """
                 INSERT INTO execution_profiles (
@@ -366,17 +395,17 @@ class MT5AccountService:
                     user_id,
                     account_id,
                     1,
-                    "fixed_lot",
-                    "0.01",
-                    "1",
+                    risk_mode,
+                    fixed_lot,
+                    risk_percent,
                     300,
                     30,
-                    "0",
-                    "0",
+                    daily_profit_target,
+                    daily_loss_limit,
+                    max_open_signals,
                     1,
-                    1,
-                    0,
-                    0,
+                    breakeven_enabled,
+                    trailing_enabled,
                     ENTRY_EXECUTION_PENDING_ORDER,
                     ENTRY_PRICE_FIRST_TOUCH,
                     120,
@@ -414,6 +443,8 @@ class MT5AccountService:
     ) -> ExecutionProfile:
         self.ensure_execution_profile(user_id, account_id)
         value = Decimal(str(fixed_lot))
+        if value <= 0:
+            raise ValueError("Lote fixo deve ser maior que zero.")
         with connect_database(self.database_path) as connection:
             cursor = connection.execute(
                 """
@@ -441,6 +472,15 @@ class MT5AccountService:
             "entry_price_mode",
             "pending_expiration_minutes",
             "split_tps",
+            "risk_mode",
+            "risk_percent",
+            "max_spread_points",
+            "max_slippage_points",
+            "daily_profit_target",
+            "daily_loss_limit",
+            "max_open_signals",
+            "breakeven_enabled",
+            "trailing_enabled",
         }
         if field_name not in allowed_fields:
             raise ValueError("Campo de execucao invalido.")
@@ -455,6 +495,30 @@ class MT5AccountService:
         if profile is None:
             raise ValueError("Perfil de execucao nao encontrado.")
         return profile
+
+    def update_execution_profile_risk_value(
+        self,
+        user_id: int,
+        account_id: int,
+        field_name: str,
+        value: Decimal | str | int,
+    ) -> ExecutionProfile:
+        decimal_fields = {"risk_percent", "daily_profit_target", "daily_loss_limit"}
+        integer_fields = {"max_spread_points", "max_slippage_points", "max_open_signals"}
+        if field_name in decimal_fields:
+            normalized: str | int = str(Decimal(str(value)))
+            number = Decimal(normalized)
+            if field_name == "risk_percent" and (number <= 0 or number > Decimal("100")):
+                raise ValueError("Risco percentual deve estar entre 0 e 100.")
+            if field_name != "risk_percent" and number < 0:
+                raise ValueError("Valor financeiro nao pode ser negativo.")
+        elif field_name in integer_fields:
+            normalized = int(value)
+            if normalized < 1:
+                raise ValueError("O valor deve ser maior que zero.")
+        else:
+            raise ValueError("Campo de risco invalido.")
+        return self.update_execution_profile_field(user_id, account_id, field_name, normalized)
 
     def connected_demo_accounts_for_active_users(self) -> list[tuple[MT5Account, ExecutionProfile]]:
         with connect_database(self.database_path) as connection:

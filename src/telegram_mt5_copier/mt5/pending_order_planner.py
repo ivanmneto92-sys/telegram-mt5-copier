@@ -18,7 +18,7 @@ from .models import (
     TickInfo,
 )
 from .order_type_resolver import resolve_order_type
-from .volume_allocator import VolumeAllocationError, allocate_volume, validate_volume
+from .volume_allocator import VolumeAllocationError, allocate_volume, validate_volume, volume_for_risk
 
 
 class PendingOrderPlanningError(ValueError):
@@ -43,14 +43,22 @@ class PendingOrderPlanner:
         planned_at = now or datetime.now(tz=timezone.utc)
         current_price = price_for_direction(signal.direction, tick)
         take_profits = signal.take_profits if profile.split_tps else (signal.take_profits[-1],)
-        entry_prices = select_entry_prices(
-            direction=signal.direction,
-            entry_low=signal.entry_low,
-            entry_high=signal.entry_high,
-            current_price=current_price,
-            mode=profile.entry_price_mode,
-            count=len(take_profits),
-            symbol_info=symbol_info,
+        market_in_zone = (
+            signal.entry_low <= current_price <= signal.entry_high
+            and profile.entry_execution_mode == "market_on_zone"
+        )
+        entry_prices = (
+            tuple(normalize_price(current_price, symbol_info) for _ in take_profits)
+            if market_in_zone
+            else select_entry_prices(
+                direction=signal.direction,
+                entry_low=signal.entry_low,
+                entry_high=signal.entry_high,
+                current_price=current_price,
+                mode=profile.entry_price_mode,
+                count=len(take_profits),
+                symbol_info=symbol_info,
+            )
         )
         order_types: list[PendingOrderType] = []
         for entry_price in entry_prices:
@@ -63,19 +71,37 @@ class PendingOrderPlanner:
                 entry_execution_mode=profile.entry_execution_mode,
             )
             if resolution.market_required:
-                raise PendingOrderPlanningError("Execucao a mercado dentro da zona ainda nao implementada.")
+                order_types.append(
+                    PendingOrderType.BUY if signal.direction == Direction.BUY else PendingOrderType.SELL
+                )
+                continue
             if resolution.order_type is None:
                 raise PendingOrderPlanningError("Tipo de ordem pendente nao resolvido.")
             order_types.append(resolution.order_type)
 
+        total_volume = profile.fixed_lot
         try:
+            if profile.risk_mode == "risk_percent":
+                risk_entry_price = max(
+                    entry_prices,
+                    key=lambda price: abs(price - signal.stop_loss),
+                )
+                total_volume = volume_for_risk(
+                    equity=account.equity,
+                    risk_percent=profile.risk_percent,
+                    entry_price=risk_entry_price,
+                    stop_loss=signal.stop_loss,
+                    symbol_info=symbol_info,
+                )
+            elif profile.risk_mode != "fixed_lot":
+                raise VolumeAllocationError("Modo de risco invalido.")
             volumes = (
-                allocate_volume(profile.fixed_lot, len(take_profits), symbol_info)
+                allocate_volume(total_volume, len(take_profits), symbol_info)
                 if profile.split_tps
-                else (profile.fixed_lot,)
+                else (total_volume,)
             )
             if not profile.split_tps:
-                validate_volume(profile.fixed_lot, symbol_info)
+                validate_volume(total_volume, symbol_info)
         except VolumeAllocationError as exc:
             raise PendingOrderPlanningError(
                 str(exc),
@@ -88,7 +114,7 @@ class PendingOrderPlanner:
                     expiration_minutes=profile.pending_expiration_minutes,
                     selected_entry_price=entry_prices[0],
                     order_type=order_types[0],
-                    total_volume=profile.fixed_lot,
+                    total_volume=total_volume,
                     orders=(),
                 ),
             ) from exc

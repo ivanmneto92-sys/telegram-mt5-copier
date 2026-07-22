@@ -98,7 +98,57 @@ RISK_MENU: tuple[tuple[Button, ...], ...] = (
     (Button("🎯 Meta diária", "v1:r:target"),),
     (Button("🛑 Limite de perda", "v1:r:loss"),),
     (Button("🔢 Máximo de operações", "v1:r:max"),),
+    (Button("📏 Spread máximo", "v1:r:spread"), Button("🎚️ Slippage", "v1:r:slippage")),
     (Button("⬅️ Voltar ao menu", CB_MAIN),),
+)
+
+RISK_MODE_MENU: tuple[tuple[Button, ...], ...] = (
+    (Button("Lote fixo", "v1:r:mode:fixed_lot"),),
+    (Button("Risco percentual", "v1:r:mode:risk_percent"),),
+    (Button("⬅️ Voltar", CB_RISK),),
+)
+
+FIXED_LOT_MENU: tuple[tuple[Button, ...], ...] = (
+    (Button("0.01", "v1:r:lot:0.01"), Button("0.02", "v1:r:lot:0.02")),
+    (Button("0.03", "v1:r:lot:0.03"), Button("0.04", "v1:r:lot:0.04")),
+    (Button("0.05", "v1:r:lot:0.05"), Button("0.10", "v1:r:lot:0.10")),
+    (Button("⬅️ Voltar", CB_RISK),),
+)
+
+RISK_PERCENT_MENU: tuple[tuple[Button, ...], ...] = (
+    (Button("0.25%", "v1:r:risk:0.25"), Button("0.50%", "v1:r:risk:0.50")),
+    (Button("1%", "v1:r:risk:1"), Button("2%", "v1:r:risk:2")),
+    (Button("⬅️ Voltar", CB_RISK),),
+)
+
+DAILY_TARGET_MENU: tuple[tuple[Button, ...], ...] = (
+    (Button("Desativar", "v1:r:target:0"), Button("50", "v1:r:target:50")),
+    (Button("100", "v1:r:target:100"), Button("200", "v1:r:target:200")),
+    (Button("⬅️ Voltar", CB_RISK),),
+)
+
+DAILY_LOSS_MENU: tuple[tuple[Button, ...], ...] = (
+    (Button("Desativar", "v1:r:loss:0"), Button("25", "v1:r:loss:25")),
+    (Button("50", "v1:r:loss:50"), Button("100", "v1:r:loss:100")),
+    (Button("⬅️ Voltar", CB_RISK),),
+)
+
+MAX_OPEN_MENU: tuple[tuple[Button, ...], ...] = (
+    (Button("1", "v1:r:max:1"), Button("2", "v1:r:max:2"), Button("3", "v1:r:max:3")),
+    (Button("5", "v1:r:max:5"), Button("10", "v1:r:max:10")),
+    (Button("⬅️ Voltar", CB_RISK),),
+)
+
+SPREAD_MENU: tuple[tuple[Button, ...], ...] = (
+    (Button("50 pts", "v1:r:spread:50"), Button("100 pts", "v1:r:spread:100")),
+    (Button("200 pts", "v1:r:spread:200"), Button("300 pts", "v1:r:spread:300")),
+    (Button("⬅️ Voltar", CB_RISK),),
+)
+
+SLIPPAGE_MENU: tuple[tuple[Button, ...], ...] = (
+    (Button("10 pts", "v1:r:slippage:10"), Button("20 pts", "v1:r:slippage:20")),
+    (Button("30 pts", "v1:r:slippage:30"), Button("50 pts", "v1:r:slippage:50")),
+    (Button("⬅️ Voltar", CB_RISK),),
 )
 
 PROTECTIONS_MENU: tuple[tuple[Button, ...], ...] = (
@@ -203,6 +253,14 @@ STATIC_CALLBACKS = {
         ACCOUNT_MENU,
         OPERATIONS_MENU,
         RISK_MENU,
+        RISK_MODE_MENU,
+        FIXED_LOT_MENU,
+        RISK_PERCENT_MENU,
+        DAILY_TARGET_MENU,
+        DAILY_LOSS_MENU,
+        MAX_OPEN_MENU,
+        SPREAD_MENU,
+        SLIPPAGE_MENU,
         PROTECTIONS_MENU,
         HISTORY_MENU,
         CONNECTION_MENU,
@@ -239,6 +297,9 @@ LEGACY_CALLBACK_ALIASES = {
 }
 
 FIXED_LOT_CALLBACK_RE = re.compile(r"^(?:v1:r:lot:|set:fixed_lot:)(?P<value>\d+(?:[\.,]\d{1,2})?)$")
+RISK_VALUE_CALLBACK_RE = re.compile(
+    r"^v1:r:(?P<field>risk|target|loss|max|spread|slippage):(?P<value>\d+(?:[\.,]\d{1,2})?)$"
+)
 REFRESH_CALLBACK_RE = re.compile(
     r"^v1:ref:(?P<screen>main|account|operations|risk|protections|history|connection|mt5_accounts)$"
 )
@@ -253,6 +314,7 @@ def is_valid_callback_data(callback_data: str) -> bool:
     return (
         normalized in STATIC_CALLBACKS
         or bool(FIXED_LOT_CALLBACK_RE.fullmatch(normalized))
+        or bool(RISK_VALUE_CALLBACK_RE.fullmatch(normalized))
         or bool(REFRESH_CALLBACK_RE.fullmatch(normalized))
     )
 
@@ -269,6 +331,13 @@ def extract_refresh_screen(callback_data: str) -> str | None:
     if not match:
         return None
     return match.group("screen")
+
+
+def extract_risk_value(callback_data: str) -> tuple[str, str] | None:
+    match = RISK_VALUE_CALLBACK_RE.fullmatch(normalize_callback_data(callback_data))
+    if not match:
+        return None
+    return match.group("field"), match.group("value")
 
 
 def build_inline_keyboard(rows: tuple[tuple[Button, ...], ...]):

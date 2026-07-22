@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -95,6 +96,8 @@ class MT5Client:
         return TerminalInfo(
             path=Path(str(getattr(info, "path", ""))) if getattr(info, "path", None) else None,
             connected=bool(getattr(info, "connected", False)),
+            trade_allowed=bool(getattr(info, "trade_allowed", False)),
+            tradeapi_disabled=bool(getattr(info, "tradeapi_disabled", False)),
         )
 
     def symbol_info(self, symbol: str) -> SymbolInfo | None:
@@ -107,6 +110,9 @@ class MT5Client:
             volume_max=Decimal(str(getattr(info, "volume_max", "100"))),
             volume_step=Decimal(str(getattr(info, "volume_step", "0.01"))),
             trade_tick_size=Decimal(str(getattr(info, "trade_tick_size", "0.01"))),
+            trade_tick_value=Decimal(str(getattr(info, "trade_tick_value", "0"))),
+            trade_tick_value_loss=Decimal(str(getattr(info, "trade_tick_value_loss", "0"))),
+            point=Decimal(str(getattr(info, "point", "0.01"))),
             digits=int(getattr(info, "digits", 2)),
             stops_level_points=int(getattr(info, "trade_stops_level", 0)),
             filling_mode=int(getattr(info, "filling_mode")) if hasattr(info, "filling_mode") else None,
@@ -129,6 +135,10 @@ class MT5Client:
     def orders_get(self) -> tuple[object, ...]:
         orders = self._mt5.orders_get() if self._mt5 is not None else None
         return tuple(orders or ())
+
+    def history_deals_get(self, date_from: datetime, date_to: datetime) -> tuple[object, ...]:
+        deals = self._mt5.history_deals_get(date_from, date_to) if self._mt5 is not None else None
+        return tuple(deals or ())
 
     def symbol_select(self, symbol: str, enable: bool = True) -> bool:
         if self._mt5 is None:
@@ -166,6 +176,9 @@ class SimulatedMT5Client:
         tick: TickInfo | None = None,
         order_check_results: list[object] | None = None,
         order_send_results: list[object] | None = None,
+        positions: tuple[object, ...] = (),
+        orders: tuple[object, ...] = (),
+        history_deals: tuple[object, ...] = (),
     ) -> None:
         self.account_type = account_type
         self.account_mode = account_mode
@@ -179,6 +192,9 @@ class SimulatedMT5Client:
         self.order_send_requests: list[dict[str, object]] = []
         self.order_check_results = list(order_check_results or [])
         self.order_send_results = list(order_send_results or [])
+        self._positions = positions
+        self._orders = orders
+        self._history_deals = history_deals
         self._login: int | None = None
         self._server = ""
         self._last_error: object | None = None
@@ -233,10 +249,15 @@ class SimulatedMT5Client:
         return self._tick
 
     def positions_get(self) -> tuple[object, ...]:
-        return ()
+        return self._positions
 
     def orders_get(self) -> tuple[object, ...]:
-        return ()
+        return self._orders
+
+    def history_deals_get(self, date_from: datetime, date_to: datetime) -> tuple[object, ...]:
+        _ = date_from
+        _ = date_to
+        return self._history_deals
 
     def symbol_select(self, symbol: str, enable: bool = True) -> bool:
         _ = enable

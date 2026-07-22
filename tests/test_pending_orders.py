@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 import tempfile
@@ -25,6 +26,7 @@ from telegram_mt5_copier.mt5.models import (
 from telegram_mt5_copier.mt5.order_type_resolver import resolve_order_type
 from telegram_mt5_copier.mt5.pending_order_executor import PendingOrderExecutor
 from telegram_mt5_copier.mt5.pending_order_monitor import PendingOrderMonitor
+from telegram_mt5_copier.mt5.position_manager import PositionManager
 from telegram_mt5_copier.mt5.pending_order_planner import PendingOrderPlanner
 from telegram_mt5_copier.mt5.terminal_manager import TerminalManager
 from telegram_mt5_copier.mt5.volume_allocator import VolumeAllocationError, allocate_volume
@@ -142,6 +144,26 @@ class PendingOrderTests(unittest.TestCase):
 
         self.assertEqual(plan.order_type, PendingOrderType.SELL_STOP)
 
+    def test_entrada_a_mercado_dentro_da_zona_com_um_tp(self) -> None:
+        signal = parse_signal_text(BUY_SIGNAL).signal
+        profile = replace(
+            self.profile(),
+            entry_execution_mode="market_on_zone",
+            split_tps=False,
+        )
+        plan = PendingOrderPlanner().plan(
+            signal=signal,
+            account=self.account,
+            profile=profile,
+            symbol_info=SymbolInfo(name="XAUUSD"),
+            tick=TickInfo(bid=Decimal("4060"), ask=Decimal("4060")),
+            execution_mode="live_execution",
+        )
+
+        self.assertEqual(plan.order_type, PendingOrderType.BUY)
+        self.assertEqual(plan.selected_entry_price, Decimal("4060.00"))
+        self.assertEqual(len(plan.orders), 1)
+
     def test_preco_first_touch_middle_e_distributed(self) -> None:
         first_touch = self.plan_buy(TickInfo(bid=Decimal("4062"), ask=Decimal("4062")))
         self.accounts.update_execution_profile_field(self.user.id, self.account.id, "entry_price_mode", ENTRY_PRICE_MIDDLE)
@@ -164,6 +186,48 @@ class PendingOrderTests(unittest.TestCase):
         volumes = allocate_volume(Decimal("0.04"), 4, SymbolInfo(name="XAUUSD"))
 
         self.assertEqual(volumes, (Decimal("0.01"), Decimal("0.01"), Decimal("0.01"), Decimal("0.01")))
+
+    def test_risco_percentual_calcula_lote_total_pelo_stop(self) -> None:
+        signal = parse_signal_text(BUY_SIGNAL).signal
+        profile = replace(self.profile(), risk_mode="risk_percent", risk_percent=Decimal("1"))
+        plan = PendingOrderPlanner().plan(
+            signal=signal,
+            account=replace(self.account, equity=Decimal("10000")),
+            profile=profile,
+            symbol_info=SymbolInfo(
+                name="XAUUSD",
+                trade_tick_size=Decimal("0.01"),
+                trade_tick_value=Decimal("1"),
+            ),
+            tick=TickInfo(bid=Decimal("4062"), ask=Decimal("4062")),
+            execution_mode="live_execution",
+        )
+
+        self.assertEqual(plan.total_volume, Decimal("0.05"))
+        self.assertEqual(sum(order.normalized_volume for order in plan.orders), Decimal("0.05"))
+
+    def test_spread_e_limite_diario_bloqueiam_antes_do_order_send(self) -> None:
+        wide_spread_client = SimulatedMT5Client(
+            tick=TickInfo(bid=Decimal("4050"), ask=Decimal("4060")),
+            symbol_info=SymbolInfo(name="XAUUSD", point=Decimal("0.01")),
+        )
+        spread_result = self.executor(
+            client=wide_spread_client,
+            execution_mode="demo_execution",
+            global_kill_switch=False,
+        ).execute_for_account(parse_signal_text(BUY_SIGNAL).signal, self.account, self.profile())
+        self.assertEqual(spread_result.group_result.rejected_reason, "max_spread_exceeded")
+        self.assertFalse(wide_spread_client.order_send_called)
+
+        loss_profile = replace(self.profile(), daily_loss_limit=Decimal("50"))
+        loss_client = SimulatedMT5Client(history_deals=({"magic": 27071301, "profit": -60},))
+        loss_result = self.executor(
+            client=loss_client,
+            execution_mode="demo_execution",
+            global_kill_switch=False,
+        ).execute_for_account(parse_signal_text(BUY_SIGNAL).signal, self.account, loss_profile)
+        self.assertEqual(loss_result.group_result.rejected_reason, "daily_loss_limit_reached")
+        self.assertFalse(loss_client.order_send_called)
 
     def test_rejeicao_003_para_quatro_tps_quando_minimo_001(self) -> None:
         with self.assertRaises(VolumeAllocationError):
@@ -293,7 +357,11 @@ class PendingOrderTests(unittest.TestCase):
         signal = parse_signal_text(BUY_SIGNAL).signal
         hedging_result = self.executor().execute_for_account(signal, self.account, self.profile())
         netting = replace(self.create_extra_account("334455"), account_mode=ACCOUNT_MODE_NETTING)
-        netting_result = self.executor(execution_mode="demo_execution", global_kill_switch=False).execute_for_account(
+        netting_result = self.executor(
+            client=SimulatedMT5Client(account_mode=ACCOUNT_MODE_NETTING),
+            execution_mode="demo_execution",
+            global_kill_switch=False,
+        ).execute_for_account(
             signal,
             netting,
             self.accounts.get_execution_profile(self.user.id, netting.id),
@@ -365,7 +433,26 @@ class PendingOrderTests(unittest.TestCase):
         self.assertEqual(result.group_result.rejected_reason, "order_check_failed:invalid stops")
         self.assertEqual(count_execution_orders(self.database_path), 0)
 
-    def test_live_execution_permanece_bloqueado_sem_order_send(self) -> None:
+    def test_falha_parcial_tenta_cancelar_ordens_ja_enviadas(self) -> None:
+        client = SimulatedMT5Client(
+            order_send_results=[
+                {"retcode": 10008, "order": 501, "comment": "placed"},
+                {"retcode": 10030, "comment": "rejected"},
+                {"retcode": 10009, "order": 501, "comment": "removed"},
+            ]
+        )
+
+        result = self.executor(
+            client=client,
+            execution_mode="demo_execution",
+            global_kill_switch=False,
+        ).execute_for_account(parse_signal_text(BUY_SIGNAL).signal, self.account, self.profile())
+
+        self.assertIn("order_send_failed", result.group_result.rejected_reason)
+        self.assertEqual(client.order_send_requests[-1]["action"], 8)
+        self.assertEqual(client.order_send_requests[-1]["order"], 501)
+
+    def test_live_execution_exige_autorizacao_explicita(self) -> None:
         client = SimulatedMT5Client()
 
         result = self.executor(
@@ -374,8 +461,43 @@ class PendingOrderTests(unittest.TestCase):
             global_kill_switch=False,
         ).execute_for_account(parse_signal_text(BUY_SIGNAL).signal, self.account, self.profile())
 
-        self.assertEqual(result.group_result.rejected_reason, "live_execution_blocked")
+        self.assertEqual(result.group_result.rejected_reason, "live_accounts_not_allowed")
         self.assertEqual(len(client.order_send_requests), 0)
+
+    def test_live_execution_envia_para_conta_real_quando_autorizada(self) -> None:
+        client = SimulatedMT5Client(account_type="real")
+        real_account = replace(self.account, account_type="real")
+
+        result = self.executor(
+            client=client,
+            execution_mode="live_execution",
+            global_kill_switch=False,
+            allow_live_accounts=True,
+        ).execute_for_account(parse_signal_text(BUY_SIGNAL).signal, real_account, self.profile())
+
+        self.assertIsNone(result.group_result.rejected_reason)
+        self.assertEqual(len(client.order_send_requests), 4)
+
+    def test_live_execution_seleciona_conta_real_ativa_do_banco(self) -> None:
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                "UPDATE mt5_accounts SET account_type = 'real' WHERE id = ?",
+                (self.account.id,),
+            )
+            cursor.close()
+        client = SimulatedMT5Client(account_type="real")
+        executor = self.executor(
+            client=client,
+            execution_mode="live_execution",
+            global_kill_switch=False,
+            allow_live_accounts=True,
+        )
+
+        results = executor.execute_for_signal(parse_signal_text(BUY_SIGNAL).signal)
+
+        self.assertEqual(len(results), 1)
+        self.assertIsNone(results[0].group_result.rejected_reason)
+        self.assertEqual(len(client.order_send_requests), 4)
 
     def test_duplicidade_de_sinal_expiracao_120_e_metricas(self) -> None:
         signal = parse_signal_text(BUY_SIGNAL).signal
@@ -433,6 +555,63 @@ class PendingOrderTests(unittest.TestCase):
         self.assertEqual(expired, 1)
         self.assertEqual(group_status(self.database_path, result.group_result.group.id), "expired")
 
+    def test_worker_aplica_breakeven_e_trailing_em_posicao_identificada(self) -> None:
+        signal = parse_signal_text(BUY_SIGNAL).signal
+        self.executor().execute_for_account(signal, self.account, self.profile())
+        profile = self.accounts.update_execution_profile_field(
+            self.user.id, self.account.id, "trailing_enabled", 1
+        )
+        client = SimulatedMT5Client(
+            tick=TickInfo(bid=Decimal("4080"), ask=Decimal("4080")),
+            positions=(
+                {
+                    "magic": 27071301,
+                    "comment": f"tgcp {signal.signature[:8]} TP1",
+                    "ticket": 9001,
+                    "symbol": "XAUUSD",
+                    "price_open": 4061,
+                    "sl": 4044,
+                    "tp": 4066,
+                },
+            ),
+        )
+        manager = PositionManager(self.database_path, self.accounts, lambda: client)
+
+        changed = manager.manage_account(self.account, profile)
+
+        self.assertEqual(changed, 1)
+        self.assertEqual(client.order_send_requests[-1]["action"], 6)
+        self.assertEqual(client.order_send_requests[-1]["position"], 9001)
+        self.assertEqual(client.order_send_requests[-1]["sl"], 4063.0)
+
+    def test_worker_remove_pendente_invalidada_no_broker(self) -> None:
+        signal = parse_signal_text(BUY_SIGNAL).signal
+        result = self.executor().execute_for_account(signal, self.account, self.profile())
+        client = SimulatedMT5Client(
+            tick=TickInfo(bid=Decimal("4067"), ask=Decimal("4067")),
+            orders=(
+                {
+                    "magic": 27071301,
+                    "comment": f"tgcp {signal.signature[:8]} TP1",
+                    "ticket": 7001,
+                    "symbol": "XAUUSD",
+                },
+            ),
+        )
+        manager = PositionManager(self.database_path, self.accounts, lambda: client)
+
+        changed = manager.manage_account(self.account, self.profile())
+
+        self.assertEqual(changed, 1)
+        self.assertEqual(client.order_send_requests[-1]["action"], 8)
+        self.assertEqual(client.order_send_requests[-1]["order"], 7001)
+        with connect_database(self.database_path) as connection:
+            status = connection.execute(
+                "SELECT status FROM execution_orders WHERE execution_group_id = ? AND tp_index = 1",
+                (result.group_result.group.id,),
+            ).fetchone()[0]
+        self.assertEqual(status, "cancelled")
+
     def executor(
         self,
         *,
@@ -440,6 +619,7 @@ class PendingOrderTests(unittest.TestCase):
         client: SimulatedMT5Client | None = None,
         execution_mode: str = "simulation",
         global_kill_switch: bool = False,
+        allow_live_accounts: bool = False,
     ) -> PendingOrderExecutor:
         selected_client = client or SimulatedMT5Client(tick=tick or TickInfo(bid=Decimal("4062"), ask=Decimal("4062")))
         return PendingOrderExecutor(
@@ -447,6 +627,7 @@ class PendingOrderTests(unittest.TestCase):
             self.accounts,
             execution_mode=execution_mode,
             global_kill_switch=global_kill_switch,
+            allow_live_accounts=allow_live_accounts,
             client_factory=lambda: selected_client,
         )
 
