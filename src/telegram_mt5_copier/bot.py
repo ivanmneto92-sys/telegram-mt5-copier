@@ -3,7 +3,14 @@ from __future__ import annotations
 import functools
 import sys
 
-from .bot_handlers import callback_handler, menu_handler, start_handler, status_handler, text_handler
+from .bot_handlers import (
+    callback_handler,
+    error_handler,
+    menu_handler,
+    start_handler,
+    status_handler,
+    text_handler,
+)
 from .bot_service import BotService
 from .config import AppConfig
 from .credential_service import CredentialService
@@ -57,10 +64,11 @@ def main() -> int:
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, functools.partial(text_handler, service=service))
     )
+    application.add_error_handler(error_handler)
 
     print("Bot de gestao iniciado.")
     try:
-        application.run_polling()
+        application.run_polling(drop_pending_updates=True)
     finally:
         service.close()
     return 0
