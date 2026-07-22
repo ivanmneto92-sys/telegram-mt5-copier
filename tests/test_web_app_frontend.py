@@ -19,10 +19,26 @@ from telegram_mt5_copier.web_app import (
     render_miniapp_script,
     render_onboarding_form,
 )
-from telegram_mt5_copier.web_server import OnboardingHandler
+from telegram_mt5_copier.web_server import OnboardingHandler, safe_reason
 
 
 class MiniAppFrontendTests(unittest.TestCase):
+    def test_motivo_de_rejeicao_do_init_data_e_diagnosticavel_sem_expor_dados(self) -> None:
+        cases = {
+            "initData ja utilizado.": "init_data_replayed",
+            "Sessao do Web App expirada.": "init_data_expired",
+            "auth_date invalido.": "init_data_clock",
+            "Hash do initData ausente.": "init_data_signature",
+            "initData invalido.": "init_data_signature",
+            "Usuario do Web App invalido.": "init_data_user",
+            "Token do bot indisponivel para validacao.": "bot_token",
+            "initData ausente.": "init_data_missing",
+        }
+
+        for error, expected in cases.items():
+            with self.subTest(error=error):
+                self.assertEqual(safe_reason(error), expected)
+
     def test_carrega_script_oficial_antes_do_javascript_da_aplicacao(self) -> None:
         html = render_onboarding_form()
 

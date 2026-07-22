@@ -251,6 +251,20 @@ def safe_value(value: object) -> str:
 
 def safe_reason(value: str) -> str:
     lowered = value.lower()
+    if "ja utilizado" in lowered:
+        return "init_data_replayed"
+    if "expirada" in lowered:
+        return "init_data_expired"
+    if "auth_date" in lowered:
+        return "init_data_clock"
+    if "hash" in lowered or "initdata invalido" in lowered:
+        return "init_data_signature"
+    if "usuario do web app" in lowered:
+        return "init_data_user"
+    if "token do bot" in lowered:
+        return "bot_token"
+    if "initdata ausente" in lowered:
+        return "init_data_missing"
     if "initdata" in lowered:
         return "init_data"
     if "csrf" in lowered:
