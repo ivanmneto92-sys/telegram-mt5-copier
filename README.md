@@ -211,6 +211,8 @@ Para validar uma conta na VPS:
 
 O modo real aplica antes do envio: lote fixo ou risco percentual, spread máximo, limite/meta diária, máximo de sinais, volume mínimo/step, distância mínima de stops e `order_check`. Ordens de múltiplos TPs são verificadas antes do primeiro envio; se uma submissão intermediária falhar, o serviço tenta remover as pendentes já criadas. Breakeven e trailing são administrados pelo `telegram-mt5-worker` após o preço avançar 1R.
 
+No bot de gestão, cada campo de risco possui valores rápidos e a opção `✍️ Personalizado`. Após tocar nessa opção, envie o número como mensagem: lote (`0,07`), risco (`0,75%`), meta/limite (`$ 150`) ou valores inteiros para operações, spread e slippage. Saldo, equity, meta e limite são exibidos com `$`; entrada, SL e TP permanecem sem símbolo monetário porque representam cotações do ativo.
+
 `DRY_RUN` controla a republicação no Telegram e não substitui as travas específicas do MT5.
 
 Serviços sugeridos no Agendador de Tarefas ou serviço Windows dedicado:

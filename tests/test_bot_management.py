@@ -233,8 +233,8 @@ class BotManagementTests(unittest.TestCase):
 
             self.assertIn("MetaTrader 5: 🟢 Conectada", main.text)
             self.assertIn("MetaTrader 5: 🟢 Conectada", account.text)
-            self.assertIn("Saldo: 10000.00", account.text)
-            self.assertIn("Equity: 10000.00", account.text)
+            self.assertIn("Saldo: $ 10000.00", account.text)
+            self.assertIn("Equity: $ 10000.00", account.text)
             self.assertIn("Informações atualizadas pela conexão", account.text)
         finally:
             service.close()
@@ -270,6 +270,68 @@ class BotManagementTests(unittest.TestCase):
             self.assertEqual(profile.daily_loss_limit, Decimal("50"))
             self.assertEqual(profile.max_spread_points, 100)
             self.assertEqual(profile.max_slippage_points, 20)
+        finally:
+            service.close()
+            accounts.close()
+
+    def test_valores_personalizados_atualizam_perfil_mt5(self) -> None:
+        accounts = MT5AccountService(
+            self.database_path,
+            credential_service=CredentialService(CredentialService.generate_key()),
+            terminal_manager=TerminalManager(Path(self.temp_dir.name) / "mt5-custom-risk"),
+            client_factory=lambda: SimulatedMT5Client(),
+        )
+        service = BotService(self.database_path, mt5_account_service=accounts)
+        try:
+            service.start(101, "alice")
+            user = self.users.get_by_telegram_user_id(101)
+            account = accounts.register_account(
+                user.id,
+                MT5AccountForm("Broker", "Broker-Demo", "12345678", "secret", "Demo"),
+            )
+
+            prompt = service.handle_callback(101, "alice", "v1:r:custom:lot")
+            lot_response = service.handle_text(101, "alice", "0,07")
+            service.handle_callback(101, "alice", "v1:r:custom:risk")
+            service.handle_text(101, "alice", "0,75%")
+            service.handle_callback(101, "alice", "v1:r:custom:target")
+            target_response = service.handle_text(101, "alice", "$ 1.500,50")
+            profile = accounts.get_execution_profile(user.id, account.id)
+
+            self.assertIn("Envie o lote", prompt.text)
+            self.assertIn("Configuração atualizada: Lote fixo = 0.07", lot_response.text)
+            self.assertIn("Configuração atualizada: Meta diária = $ 1500.5", target_response.text)
+            self.assertEqual(profile.fixed_lot, Decimal("0.07"))
+            self.assertEqual(profile.risk_percent, Decimal("0.75"))
+            self.assertEqual(profile.daily_profit_target, Decimal("1500.5"))
+        finally:
+            service.close()
+            accounts.close()
+
+    def test_valor_personalizado_invalido_pode_ser_corrigido(self) -> None:
+        accounts = MT5AccountService(
+            self.database_path,
+            credential_service=CredentialService(CredentialService.generate_key()),
+            terminal_manager=TerminalManager(Path(self.temp_dir.name) / "mt5-custom-invalid"),
+            client_factory=lambda: SimulatedMT5Client(),
+        )
+        service = BotService(self.database_path, mt5_account_service=accounts)
+        try:
+            service.start(101, "alice")
+            user = self.users.get_by_telegram_user_id(101)
+            account = accounts.register_account(
+                user.id,
+                MT5AccountForm("Broker", "Broker-Demo", "12345678", "secret", "Demo"),
+            )
+
+            service.handle_callback(101, "alice", "v1:r:custom:max")
+            invalid = service.handle_text(101, "alice", "2,5")
+            valid = service.handle_text(101, "alice", "4")
+            profile = accounts.get_execution_profile(user.id, account.id)
+
+            self.assertIn("somente números inteiros", invalid.text)
+            self.assertIn("Configuração atualizada: Máximo de operações = 4", valid.text)
+            self.assertEqual(profile.max_open_signals, 4)
         finally:
             service.close()
             accounts.close()

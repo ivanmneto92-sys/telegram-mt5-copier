@@ -201,6 +201,8 @@ def parse_decimal(value: str | Decimal) -> Decimal:
         decimal_value = value if isinstance(value, Decimal) else Decimal(str(value).replace(",", "."))
     except InvalidOperation as exc:
         raise ValueError("Valor numerico invalido.") from exc
+    if not decimal_value.is_finite():
+        raise ValueError("Valor numerico invalido.")
     return decimal_value
 
 

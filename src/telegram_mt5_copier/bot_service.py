@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import time
 
@@ -49,6 +49,7 @@ from .bot_keyboards import (
     CONFIRM_PAUSE,
     CONFIRM_REMOVE_MT5,
     CONNECTION_MENU,
+    CUSTOM_VALUE_MENU,
     DAILY_LOSS_MENU,
     DAILY_TARGET_MENU,
     FIXED_LOT_MENU,
@@ -69,6 +70,7 @@ from .bot_keyboards import (
     EXPIRATION_MENU,
     SIGNAL_EXECUTION_MENU,
     extract_fixed_lot,
+    extract_custom_value_field,
     extract_risk_value,
     extract_refresh_screen,
     is_valid_callback_data,
@@ -136,6 +138,7 @@ class BotService:
         self.mt5_onboarding_url = mt5_onboarding_url
         self.admin_ids = set(admin_ids)
         self.rate_limiter = rate_limiter or RateLimiter()
+        self._pending_custom_values: dict[int, str] = {}
         self._closed = False
 
     def close(self) -> None:
@@ -157,6 +160,7 @@ class BotService:
         telegram_username: str | None,
         first_name: str | None = None,
     ) -> BotResponse:
+        self._pending_custom_values.pop(telegram_user_id, None)
         user = self._ensure_user(telegram_user_id, telegram_username)
         return self._main_panel(user, first_name=first_name)
 
@@ -166,6 +170,7 @@ class BotService:
         telegram_username: str | None,
         first_name: str | None = None,
     ) -> BotResponse:
+        self._pending_custom_values.pop(telegram_user_id, None)
         user = self._ensure_user(telegram_user_id, telegram_username)
         return self._main_panel(user, first_name=first_name)
 
@@ -175,8 +180,41 @@ class BotService:
         telegram_username: str | None,
         first_name: str | None = None,
     ) -> BotResponse:
+        self._pending_custom_values.pop(telegram_user_id, None)
         user = self._ensure_user(telegram_user_id, telegram_username)
         return self._connection_screen(user)
+
+    def handle_text(
+        self,
+        telegram_user_id: int,
+        telegram_username: str | None,
+        text: str,
+        first_name: str | None = None,
+    ) -> BotResponse:
+        user = self._ensure_user(telegram_user_id, telegram_username)
+        field = self._pending_custom_values.get(telegram_user_id)
+        if field is None:
+            return BotResponse(
+                "Use os botões do menu para escolher o que deseja configurar.",
+                MAIN_MENU,
+            )
+        try:
+            normalized_value = normalize_custom_numeric_value(text, integer=field in {"max", "spread", "slippage"})
+            self._apply_risk_value(user, field, normalized_value)
+        except ValueError as exc:
+            return BotResponse(
+                f"Valor inválido: {exc}\n\nEnvie outro valor ou toque em Cancelar.",
+                CUSTOM_VALUE_MENU,
+                screen="custom_value",
+            )
+
+        self._pending_custom_values.pop(telegram_user_id, None)
+        updated_screen = self._risk_screen(user)
+        return BotResponse(
+            f"✅ Configuração atualizada: {custom_field_label(field)} = {custom_value_label(field, normalized_value)}.\n\n{updated_screen.text}",
+            updated_screen.keyboard,
+            screen="risk",
+        )
 
     def handle_callback(
         self,
@@ -193,6 +231,19 @@ class BotService:
 
         callback = normalize_callback_data(callback_data)
         user = self._ensure_user(telegram_user_id, telegram_username)
+
+        custom_field = extract_custom_value_field(callback)
+        if custom_field is not None:
+            self._pending_custom_values.pop(telegram_user_id, None)
+            if self.mt5_accounts.first_account(user.id) is None:
+                return self._connect_mt5_screen()
+            self._pending_custom_values[telegram_user_id] = custom_field
+            return BotResponse(
+                custom_value_prompt(custom_field),
+                CUSTOM_VALUE_MENU,
+                screen="custom_value",
+            )
+        self._pending_custom_values.pop(telegram_user_id, None)
 
         refresh_screen = extract_refresh_screen(callback)
         if refresh_screen is not None:
@@ -431,40 +482,16 @@ class BotService:
         fixed_lot = extract_fixed_lot(callback)
         if fixed_lot is not None:
             try:
-                settings = self.settings.update_fixed_lot(user.id, fixed_lot)
-                account = self.mt5_accounts.first_account(user.id)
-                if account is not None:
-                    self.mt5_accounts.update_execution_profile_fixed_lot(user.id, account.id, settings.fixed_lot)
+                self._apply_risk_value(user, "lot", fixed_lot)
             except ValueError as exc:
                 return BotResponse(str(exc), RISK_MENU, screen="risk")
-            return BotResponse(f"Lote fixo atualizado para {settings.fixed_lot}.", RISK_MENU, screen="risk")
+            return BotResponse(f"Lote fixo atualizado para {fixed_lot}.", RISK_MENU, screen="risk")
 
         risk_value = extract_risk_value(callback)
         if risk_value is not None:
-            account = self.mt5_accounts.first_account(user.id)
-            if account is None:
-                return self._connect_mt5_screen()
             field, raw_value = risk_value
-            profile_field = {
-                "risk": "risk_percent",
-                "target": "daily_profit_target",
-                "loss": "daily_loss_limit",
-                "max": "max_open_signals",
-                "spread": "max_spread_points",
-                "slippage": "max_slippage_points",
-            }[field]
             try:
-                self.mt5_accounts.update_execution_profile_risk_value(
-                    user.id, account.id, profile_field, raw_value
-                )
-                if field == "risk":
-                    self.settings.update_risk_percent(user.id, raw_value)
-                elif field == "target":
-                    self.settings.update_daily_profit_target(user.id, raw_value)
-                elif field == "loss":
-                    self.settings.update_daily_loss_limit(user.id, raw_value)
-                elif field == "max":
-                    self.settings.update_max_open_trades(user.id, int(Decimal(raw_value)))
+                self._apply_risk_value(user, field, raw_value)
             except ValueError as exc:
                 return BotResponse(str(exc), RISK_MENU, screen="risk")
             return self._risk_screen(user)
@@ -500,6 +527,45 @@ class BotService:
                 screen="protections",
             )
         return BotResponse("Ação invalida ou expirada.", MAIN_MENU)
+
+    def _apply_risk_value(self, user: User, field: str, raw_value: str) -> None:
+        account = self.mt5_accounts.first_account(user.id)
+        if field == "lot":
+            settings = self.settings.update_fixed_lot(user.id, raw_value)
+            if account is not None:
+                self.mt5_accounts.update_execution_profile_fixed_lot(
+                    user.id, account.id, settings.fixed_lot
+                )
+            return
+
+        if account is None:
+            raise ValueError("Conecte uma conta MT5 antes de alterar esta configuração.")
+
+        profile_field = {
+            "risk": "risk_percent",
+            "target": "daily_profit_target",
+            "loss": "daily_loss_limit",
+            "max": "max_open_signals",
+            "spread": "max_spread_points",
+            "slippage": "max_slippage_points",
+        }.get(field)
+        if profile_field is None:
+            raise ValueError("Campo de configuração inválido.")
+
+        if field == "risk":
+            self.settings.update_risk_percent(user.id, raw_value)
+        elif field == "target":
+            self.settings.update_daily_profit_target(user.id, raw_value)
+        elif field == "loss":
+            self.settings.update_daily_loss_limit(user.id, raw_value)
+        elif field == "max":
+            self.settings.update_max_open_trades(user.id, int(Decimal(raw_value)))
+        elif Decimal(raw_value) > Decimal("100000"):
+            raise ValueError("O limite máximo permitido é 100000 pontos.")
+
+        self.mt5_accounts.update_execution_profile_risk_value(
+            user.id, account.id, profile_field, raw_value
+        )
 
     def _ensure_user(self, telegram_user_id: int, telegram_username: str | None) -> User:
         user = self.users.get_or_create_user(telegram_user_id, telegram_username)
@@ -905,7 +971,7 @@ def account_mode_label(account: MT5Account) -> str:
 def money_label(value: Decimal | None) -> str:
     if value is None:
         return "Indisponível"
-    return format(value, ".2f")
+    return f"$ {format(value, '.2f')}"
 
 
 def entry_execution_label(value: str) -> str:
@@ -938,7 +1004,7 @@ def expiration_minutes_label(value: int) -> str:
 
 
 def financial_value(value: str | None) -> str:
-    return value if value else "Aguardando conexão"
+    return f"$ {value}" if value else "Aguardando conexão"
 
 
 def setting_value(value: Decimal | str | None) -> str:
@@ -956,7 +1022,64 @@ def percent_value(value: Decimal | None) -> str:
 def money_value(value: Decimal | None) -> str:
     if value is None or value == 0:
         return "Não configurado"
-    return decimal_to_storage(value)
+    return f"$ {decimal_to_storage(value)}"
+
+
+def normalize_custom_numeric_value(raw_value: str, *, integer: bool = False) -> str:
+    value = raw_value.strip().replace("$", "").replace("%", "").replace(" ", "")
+    if not value:
+        raise ValueError("envie um número.")
+    if "," in value and "." in value:
+        if value.rfind(",") > value.rfind("."):
+            value = value.replace(".", "").replace(",", ".")
+        else:
+            value = value.replace(",", "")
+    else:
+        value = value.replace(",", ".")
+    try:
+        number = Decimal(value)
+    except InvalidOperation as exc:
+        raise ValueError("use apenas números, vírgula ou ponto decimal.") from exc
+    if not number.is_finite():
+        raise ValueError("o número precisa ser finito.")
+    if integer and number != number.to_integral_value():
+        raise ValueError("este campo aceita somente números inteiros.")
+    return decimal_to_storage(number)
+
+
+def custom_value_prompt(field: str) -> str:
+    instructions = {
+        "lot": "Envie o lote entre 0,01 e 100. Exemplo: 0,07",
+        "risk": "Envie o risco percentual entre 0,1% e 10%. Exemplo: 0,75",
+        "target": "Envie a meta diária em dólar, ou 0 para desativar. Exemplo: $ 150",
+        "loss": "Envie o limite diário em dólar, ou 0 para desativar. Exemplo: $ 75",
+        "max": "Envie um número inteiro entre 1 e 100.",
+        "spread": "Envie o spread máximo em pontos, usando um número inteiro.",
+        "slippage": "Envie o slippage máximo em pontos, usando um número inteiro.",
+    }
+    return f"✍️ VALOR PERSONALIZADO\n\n{instructions[field]}\n\nEnvie somente o valor na próxima mensagem."
+
+
+def custom_field_label(field: str) -> str:
+    return {
+        "lot": "Lote fixo",
+        "risk": "Risco percentual",
+        "target": "Meta diária",
+        "loss": "Limite de perda diária",
+        "max": "Máximo de operações",
+        "spread": "Spread máximo",
+        "slippage": "Slippage máximo",
+    }[field]
+
+
+def custom_value_label(field: str, value: str) -> str:
+    if field in {"target", "loss"}:
+        return f"$ {value}"
+    if field == "risk":
+        return f"{value}%"
+    if field in {"spread", "slippage"}:
+        return f"{value} pontos"
+    return value
 
 
 def risk_mode_label(value: str) -> str:

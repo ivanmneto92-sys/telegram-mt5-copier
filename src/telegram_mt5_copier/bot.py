@@ -3,7 +3,7 @@ from __future__ import annotations
 import functools
 import sys
 
-from .bot_handlers import callback_handler, menu_handler, start_handler, status_handler
+from .bot_handlers import callback_handler, menu_handler, start_handler, status_handler, text_handler
 from .bot_service import BotService
 from .config import AppConfig
 from .credential_service import CredentialService
@@ -27,7 +27,7 @@ def main() -> int:
         return 2
 
     try:
-        from telegram.ext import Application, CallbackQueryHandler, CommandHandler
+        from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
     except ImportError:
         print("python-telegram-bot nao instalado. Execute o setup do ambiente primeiro.", file=sys.stderr)
         return 2
@@ -54,6 +54,9 @@ def main() -> int:
     application.add_handler(CommandHandler("menu", functools.partial(menu_handler, service=service)))
     application.add_handler(CommandHandler("status", functools.partial(status_handler, service=service)))
     application.add_handler(CallbackQueryHandler(functools.partial(callback_handler, service=service)))
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, functools.partial(text_handler, service=service))
+    )
 
     print("Bot de gestao iniciado.")
     try:

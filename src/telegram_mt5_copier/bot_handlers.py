@@ -34,6 +34,17 @@ async def status_handler(update: Any, _context: Any, service: BotService) -> Non
     await send_response(update.message, response)
 
 
+async def text_handler(update: Any, _context: Any, service: BotService) -> None:
+    telegram_user_id, username, first_name = telegram_user_from_update(update)
+    response = service.handle_text(
+        telegram_user_id,
+        username,
+        update.message.text or "",
+        first_name,
+    )
+    await send_response(update.message, response)
+
+
 async def callback_handler(update: Any, _context: Any, service: BotService) -> None:
     query = update.callback_query
     await query.answer()
