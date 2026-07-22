@@ -6,7 +6,11 @@ import tempfile
 import unittest
 
 from telegram_mt5_copier.database import SignalDatabase
-from telegram_mt5_copier.listener import SignalProcessor
+from telegram_mt5_copier.listener import (
+    SignalProcessor,
+    log_incoming_message,
+    resolve_source_chat,
+)
 from telegram_mt5_copier.models import DecisionStatus, IncomingMessage
 from telegram_mt5_copier.parser import parse_signal_text
 from telegram_mt5_copier.signal_formatter import clean_signal_text
@@ -65,6 +69,68 @@ class FakePublisher:
 
     async def publish(self, signal, formatted_message: str, client=None) -> None:
         self.messages.append(formatted_message)
+
+
+class FakeSourceEntity:
+    id = 1234567890
+    title = "Canal VIP"
+    broadcast = True
+    megagroup = False
+    noforwards = True
+
+
+class FakeTelegramClient:
+    async def get_entity(self, chat_id: int):
+        if chat_id != -1001234567890:
+            raise ValueError("unknown channel")
+        return FakeSourceEntity()
+
+    async def get_messages(self, _entity, *, limit: int):
+        self.requested_limit = limit
+        return [type("Message", (), {"id": 987})()]
+
+
+class CaptureLogger:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    def info(self, message: str, *args: object, **_kwargs: object) -> None:
+        self.messages.append(message % args if args else message)
+
+    def error(self, message: str, *args: object, **_kwargs: object) -> None:
+        self.messages.append(message % args if args else message)
+
+
+class SourceChannelValidationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_resolve_canal_protegido_e_confirma_historico(self) -> None:
+        client = FakeTelegramClient()
+        logger = CaptureLogger()
+
+        entity = await resolve_source_chat(client, "-1001234567890", logger)
+
+        self.assertIsInstance(entity, FakeSourceEntity)
+        self.assertEqual(client.requested_limit, 1)
+        self.assertIn("nome=Canal VIP", logger.messages[0])
+        self.assertIn("conteudo_protegido=sim", logger.messages[0])
+        self.assertIn("ultima_mensagem_id=987", logger.messages[0])
+
+    async def test_source_chat_id_precisa_ser_numerico(self) -> None:
+        with self.assertRaisesRegex(ValueError, "ID numérico"):
+            await resolve_source_chat(FakeTelegramClient(), "canal-vip", CaptureLogger())
+
+    def test_log_de_mensagem_nao_expoe_conteudo(self) -> None:
+        logger = CaptureLogger()
+        incoming = IncomingMessage(
+            source_chat_id=-1001234567890,
+            source_message_id=55,
+            text="XAUUSD BUY segredo",
+        )
+
+        log_incoming_message(logger, incoming, edited=False)
+
+        self.assertIn("mensagem_id=55", logger.messages[0])
+        self.assertIn("texto_presente=sim", logger.messages[0])
+        self.assertNotIn("segredo", logger.messages[0])
 
 
 class MonitorPipelineTests(unittest.IsolatedAsyncioTestCase):

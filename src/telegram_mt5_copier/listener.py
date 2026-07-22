@@ -210,14 +210,18 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
             logger.error("Sessao Telegram nao autenticada. Execute telegram-login uma vez antes do monitoramento.")
             return 2
 
-        @client.on(events.NewMessage(chats=int(config.source_chat_id)))
+        source_entity = await resolve_source_chat(client, config.source_chat_id, logger)
+
+        @client.on(events.NewMessage(chats=source_entity))
         async def handle_new_message(event: Any) -> None:
             incoming = incoming_from_telethon_event(event)
+            log_incoming_message(logger, incoming, edited=False)
             await processor.process(incoming, client=client)
 
-        @client.on(events.MessageEdited(chats=int(config.source_chat_id)))
+        @client.on(events.MessageEdited(chats=source_entity))
         async def handle_edited_message(event: Any) -> None:
             incoming = incoming_from_telethon_event(event)
+            log_incoming_message(logger, incoming, edited=True)
             if database.has_accepted_source_message(
                 incoming.source_chat_id,
                 incoming.source_message_id,
@@ -246,6 +250,74 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
     finally:
         processor.close()
         await client.disconnect()
+
+
+async def resolve_source_chat(client: Any, source_chat_id: str, logger: logging.Logger) -> Any:
+    try:
+        numeric_chat_id = int(source_chat_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("SOURCE_CHAT_ID deve ser um ID numérico, como -1001234567890.") from exc
+
+    try:
+        entity = await client.get_entity(numeric_chat_id)
+    except Exception as exc:
+        raise RuntimeError(
+            "Não foi possível acessar o canal configurado em SOURCE_CHAT_ID. "
+            "Confirme o ID e se a conta da sessão participa do canal."
+        ) from exc
+
+    latest_message_id: int | str = "nenhuma"
+    history_access = "sim"
+    try:
+        messages = await client.get_messages(entity, limit=1)
+        if messages:
+            latest_message_id = getattr(messages[0], "id", "desconhecida")
+    except Exception:
+        history_access = "não"
+
+    logger.info(
+        "Canal de origem validado. nome=%s id=%s tipo=%s conteudo_protegido=%s "
+        "historico_acessivel=%s ultima_mensagem_id=%s",
+        telegram_entity_title(entity),
+        numeric_chat_id,
+        telegram_entity_kind(entity),
+        "sim" if bool(getattr(entity, "noforwards", False)) else "não",
+        history_access,
+        latest_message_id,
+    )
+    return entity
+
+
+def telegram_entity_title(entity: Any) -> str:
+    return str(
+        getattr(entity, "title", None)
+        or getattr(entity, "username", None)
+        or getattr(entity, "id", "sem_nome")
+    )
+
+
+def telegram_entity_kind(entity: Any) -> str:
+    if bool(getattr(entity, "megagroup", False)):
+        return "supergrupo"
+    if bool(getattr(entity, "broadcast", False)):
+        return "canal"
+    return "grupo_ou_chat"
+
+
+def log_incoming_message(
+    logger: logging.Logger,
+    incoming: IncomingMessage,
+    *,
+    edited: bool,
+) -> None:
+    logger.info(
+        "Mensagem Telegram recebida. origem=%s mensagem_id=%s tipo=%s editada=%s texto_presente=%s",
+        incoming.source_chat_id,
+        incoming.source_message_id,
+        incoming.media_type or "text",
+        "sim" if edited else "não",
+        "sim" if bool((incoming.text or incoming.caption or "").strip()) else "não",
+    )
 
 
 async def run_signal_monitor_heartbeat(
