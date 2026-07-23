@@ -4,10 +4,23 @@ import re
 
 from .models import TradeSignal, decimal_to_text
 
-HEADER_RE = re.compile(r"\bXAUUSD\s+(BUY|SELL)\b", re.IGNORECASE)
+PRICE_VALUE_PATTERN = r"\d+(?:[\.,]\d+)?(?:\s*[-–—]\s*\d+(?:[\.,]\d+)?)?"
+HEADER_RE = re.compile(r"\b(?:XAUUSD|GOLD)\s+(BUY|SELL)(?:[ \t]+NOW)?\b", re.IGNORECASE)
+HEADER_ENTRY_RE = re.compile(
+    rf"\b(?:XAUUSD|GOLD)\s+(BUY|SELL)(?:[ \t]+NOW)?"
+    rf"[ \t]*[:\-]?[ \t]*(?P<value>{PRICE_VALUE_PATTERN})",
+    re.IGNORECASE,
+)
 ENTRY_LINE_RE = re.compile(r"\bENTRY\b\s*[:\-]?\s*(?P<value>\d+(?:[\.,]\d+)?(?:\s*[-–—]\s*\d+(?:[\.,]\d+)?)?)", re.IGNORECASE)
-SL_LINE_RE = re.compile(r"\bSL\b\s*[:\-]?\s*(?P<value>\d+(?:[\.,]\d+)?)", re.IGNORECASE)
-TP_LINE_RE = re.compile(r"\bTP\d*\b\s*[:\-]?\s*(?P<value>\d+(?:[\.,]\d+)?)", re.IGNORECASE)
+SL_LINE_RE = re.compile(
+    r"\b(?:SL|STOP[ \t]+LOSS)\b\s*[:\-]?\s*(?P<value>\d+(?:[\.,]\d+)?)",
+    re.IGNORECASE,
+)
+TP_LINE_RE = re.compile(
+    r"\b(?:TP\d*|TAKE[ \t]+PROFIT\d*|TARGET\d*)\b"
+    r"\s*[:\-]?\s*(?P<value>\d+(?:[\.,]\d+)?)",
+    re.IGNORECASE,
+)
 
 
 def clean_signal_text(text: str) -> str | None:
@@ -19,7 +32,12 @@ def clean_signal_text(text: str) -> str | None:
     body = text[header_match.end() :]
     lines = [strip_noise(line) for line in body.splitlines()]
 
-    entry_value: str | None = None
+    header_entry_match = HEADER_ENTRY_RE.search(text)
+    entry_value = (
+        normalize_range_spacing(header_entry_match.group("value"))
+        if header_entry_match
+        else None
+    )
     stop_loss_value: str | None = None
     take_profit_values: list[str] = []
 

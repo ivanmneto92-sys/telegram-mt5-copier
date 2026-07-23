@@ -15,7 +15,7 @@ from telegram_mt5_copier.listener import (
     telegram_client_options,
     telegram_event_is_stale,
 )
-from telegram_mt5_copier.models import DecisionStatus, IncomingMessage
+from telegram_mt5_copier.models import DecisionStatus, Direction, IncomingMessage
 from telegram_mt5_copier.parser import parse_signal_text
 from telegram_mt5_copier.signal_formatter import clean_signal_text
 from telegram_mt5_copier.validator import validate_signal
@@ -65,6 +65,22 @@ TP 4066
 TP 4071
 TP 4076
 TP 4096"""
+
+GOLD_BUY_NOW = """Gold Buy Now:4120 - 4115
+
+TAKE PROFIT:4125
+TAKE PROFIT:4130
+
+STOP LOSS:4110"""
+
+GOLD_BUY_NOW_CLEAN = """XAUUSD BUY
+
+ENTRY 4120-4115
+
+SL 4110
+
+TP 4125
+TP 4130"""
 
 
 class FakePublisher:
@@ -339,7 +355,7 @@ class MonitorPipelineTests(unittest.IsolatedAsyncioTestCase):
             IncomingMessage(
                 source_chat_id="source",
                 source_message_id=1,
-                text="GOLD BUY\nENTRY 4103-4105\nSL 4090\nTP 4110",
+                text="EURUSD BUY\nENTRY 1.1500-1.1510\nSL 1.1450\nTP 1.1600",
             )
         )
 
@@ -366,6 +382,21 @@ class MonitorPipelineTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ParserTests(unittest.TestCase):
+    def test_gold_buy_now_com_entrada_no_cabecalho(self) -> None:
+        decision = parse_signal_text(GOLD_BUY_NOW)
+
+        self.assertEqual(decision.status, DecisionStatus.ACCEPTED)
+        self.assertEqual(decision.signal.symbol, "XAUUSD")
+        self.assertEqual(decision.signal.direction, Direction.BUY)
+        self.assertEqual(decision.signal.entry_low, Decimal("4115"))
+        self.assertEqual(decision.signal.entry_high, Decimal("4120"))
+        self.assertEqual(decision.signal.stop_loss, Decimal("4110"))
+        self.assertEqual(
+            decision.signal.take_profits,
+            (Decimal("4125"), Decimal("4130")),
+        )
+        self.assertEqual(decision.signal.clean_message, GOLD_BUY_NOW_CLEAN)
+
     def test_faixa_abreviada_4105_03(self) -> None:
         decision = parse_signal_text(BUY_VALID)
 

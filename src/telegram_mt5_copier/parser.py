@@ -10,7 +10,7 @@ NUMBER_TEXT = r"\d+(?:[\.,]\d+)?"
 NUMBER_RE = re.compile(NUMBER_TEXT)
 RANGE_RE = re.compile(rf"(?P<first>{NUMBER_TEXT})\s*[-–—]\s*(?P<second>{NUMBER_TEXT})")
 
-XAUUSD_RE = re.compile(r"\bXAUUSD\b", re.IGNORECASE)
+SUPPORTED_GOLD_RE = re.compile(r"\b(?:XAUUSD|GOLD)\b", re.IGNORECASE)
 OTHER_ASSET_RE = re.compile(
     r"\b(?:EUR\s*/?\s*USD|GBP\s*/?\s*USD|USD\s*/?\s*JPY|BTC\s*/?\s*USD|"
     r"ETH\s*/?\s*USD|US30|NAS100|SPX500|US500|WTI|OIL)\b",
@@ -32,7 +32,7 @@ def parse_signal_text(
     if not clean_text:
         return ProcessingDecision(DecisionStatus.IGNORED, "empty_message")
 
-    if not XAUUSD_RE.search(clean_text):
+    if not SUPPORTED_GOLD_RE.search(clean_text):
         if looks_like_trade_message(clean_text) or OTHER_ASSET_RE.search(clean_text):
             return ProcessingDecision(DecisionStatus.REJECTED, "unsupported_asset")
         return ProcessingDecision(DecisionStatus.IGNORED, "common_message")
