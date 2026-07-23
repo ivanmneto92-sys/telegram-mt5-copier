@@ -82,6 +82,22 @@ SL 4110
 TP 4125
 TP 4130"""
 
+GOLD_BUY_NOW_PARENTHESIZED = """GOLD BUY NOW (4035-4029)
+
+TP1: 4045
+TP2: 4055
+TP3: 4065
+
+STOP LOSS: 4025"""
+
+SELL_XAUUSD_AT = """📍SELL📍 XAUUSD @4090 - 4095
+
+✅TP1 : 4085
+✅TP2 : 4080
+✅TP3 : 4075
+
+🔴SL : 4105"""
+
 
 class FakePublisher:
     def __init__(self) -> None:
@@ -396,6 +412,34 @@ class ParserTests(unittest.TestCase):
             (Decimal("4125"), Decimal("4130")),
         )
         self.assertEqual(decision.signal.clean_message, GOLD_BUY_NOW_CLEAN)
+
+    def test_gold_buy_now_com_entrada_entre_parenteses(self) -> None:
+        decision = parse_signal_text(GOLD_BUY_NOW_PARENTHESIZED)
+
+        self.assertEqual(decision.status, DecisionStatus.ACCEPTED)
+        self.assertEqual(decision.signal.direction, Direction.BUY)
+        self.assertEqual(decision.signal.entry_low, Decimal("4029"))
+        self.assertEqual(decision.signal.entry_high, Decimal("4035"))
+        self.assertEqual(decision.signal.stop_loss, Decimal("4025"))
+        self.assertEqual(
+            decision.signal.take_profits,
+            (Decimal("4045"), Decimal("4055"), Decimal("4065")),
+        )
+        self.assertEqual(validate_signal(decision.signal).status, DecisionStatus.ACCEPTED)
+
+    def test_sell_antes_de_xauusd_com_entrada_arroba(self) -> None:
+        decision = parse_signal_text(SELL_XAUUSD_AT)
+
+        self.assertEqual(decision.status, DecisionStatus.ACCEPTED)
+        self.assertEqual(decision.signal.direction, Direction.SELL)
+        self.assertEqual(decision.signal.entry_low, Decimal("4090"))
+        self.assertEqual(decision.signal.entry_high, Decimal("4095"))
+        self.assertEqual(decision.signal.stop_loss, Decimal("4105"))
+        self.assertEqual(
+            decision.signal.take_profits,
+            (Decimal("4085"), Decimal("4080"), Decimal("4075")),
+        )
+        self.assertEqual(validate_signal(decision.signal).status, DecisionStatus.ACCEPTED)
 
     def test_faixa_abreviada_4105_03(self) -> None:
         decision = parse_signal_text(BUY_VALID)

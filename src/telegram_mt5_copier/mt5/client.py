@@ -128,6 +128,16 @@ class MT5Client:
             ask=Decimal(str(getattr(tick, "ask"))),
         )
 
+    def symbol_names(self, group: str | None = None) -> tuple[str, ...]:
+        if self._mt5 is None:
+            return ()
+        symbols = self._mt5.symbols_get(group=group) if group else self._mt5.symbols_get()
+        return tuple(
+            str(getattr(symbol, "name", ""))
+            for symbol in (symbols or ())
+            if getattr(symbol, "name", None)
+        )
+
     def positions_get(self) -> tuple[object, ...]:
         positions = self._mt5.positions_get() if self._mt5 is not None else None
         return tuple(positions or ())
@@ -247,6 +257,10 @@ class SimulatedMT5Client:
     def symbol_info_tick(self, symbol: str) -> TickInfo:
         _ = symbol
         return self._tick
+
+    def symbol_names(self, group: str | None = None) -> tuple[str, ...]:
+        _ = group
+        return (self._symbol_info.name,)
 
     def positions_get(self) -> tuple[object, ...]:
         return self._positions

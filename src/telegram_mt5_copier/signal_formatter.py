@@ -5,10 +5,18 @@ import re
 from .models import TradeSignal, decimal_to_text
 
 PRICE_VALUE_PATTERN = r"\d+(?:[\.,]\d+)?(?:\s*[-–—]\s*\d+(?:[\.,]\d+)?)?"
-HEADER_RE = re.compile(r"\b(?:XAUUSD|GOLD)\s+(BUY|SELL)(?:[ \t]+NOW)?\b", re.IGNORECASE)
-HEADER_ENTRY_RE = re.compile(
-    rf"\b(?:XAUUSD|GOLD)\s+(BUY|SELL)(?:[ \t]+NOW)?"
-    rf"[ \t]*[:\-]?[ \t]*(?P<value>{PRICE_VALUE_PATTERN})",
+HEADER_RE = re.compile(
+    r"(?:"
+    r"\b(?:XAUUSD|GOLD)\b[^\w]{1,8}\b(?P<asset_first_direction>BUY|SELL)\b"
+    r"(?:[ \t]+NOW\b)?"
+    r"|"
+    r"\b(?P<direction_first_direction>BUY|SELL)\b[^\w]{1,8}"
+    r"\b(?:XAUUSD|GOLD)\b"
+    r")",
+    re.IGNORECASE,
+)
+HEADER_TAIL_ENTRY_RE = re.compile(
+    rf"^[ \t:@\-\(\)\[\]]*(?P<value>{PRICE_VALUE_PATTERN})",
     re.IGNORECASE,
 )
 ENTRY_LINE_RE = re.compile(r"\bENTRY\b\s*[:\-]?\s*(?P<value>\d+(?:[\.,]\d+)?(?:\s*[-–—]\s*\d+(?:[\.,]\d+)?)?)", re.IGNORECASE)
@@ -28,11 +36,15 @@ def clean_signal_text(text: str) -> str | None:
     if not header_match:
         return None
 
-    direction = header_match.group(1).upper()
+    direction = (
+        header_match.group("asset_first_direction")
+        or header_match.group("direction_first_direction")
+    ).upper()
     body = text[header_match.end() :]
     lines = [strip_noise(line) for line in body.splitlines()]
 
-    header_entry_match = HEADER_ENTRY_RE.search(text)
+    header_line_tail = body.splitlines()[0] if body else ""
+    header_entry_match = HEADER_TAIL_ENTRY_RE.match(header_line_tail)
     entry_value = (
         normalize_range_spacing(header_entry_match.group("value"))
         if header_entry_match

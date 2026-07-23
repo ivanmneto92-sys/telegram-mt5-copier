@@ -28,6 +28,7 @@ from telegram_mt5_copier.mt5.pending_order_executor import PendingOrderExecutor
 from telegram_mt5_copier.mt5.pending_order_monitor import PendingOrderMonitor
 from telegram_mt5_copier.mt5.position_manager import PositionManager
 from telegram_mt5_copier.mt5.pending_order_planner import PendingOrderPlanner
+from telegram_mt5_copier.mt5.symbol_resolver import SymbolResolver
 from telegram_mt5_copier.mt5.terminal_manager import TerminalManager
 from telegram_mt5_copier.mt5.volume_allocator import VolumeAllocationError, allocate_volume
 from telegram_mt5_copier.parser import parse_signal_text
@@ -51,6 +52,54 @@ TP 4050
 TP 4045
 TP 4040
 """
+
+
+class StrictSymbolClient:
+    def __init__(
+        self,
+        names: tuple[str, ...],
+        *,
+        disabled: tuple[str, ...] = (),
+    ) -> None:
+        self.names = names
+        self.disabled = disabled
+
+    def symbol_info(self, symbol: str) -> SymbolInfo | None:
+        return (
+            SymbolInfo(name=symbol, trade_allowed=symbol not in self.disabled)
+            if symbol in self.names
+            else None
+        )
+
+    def symbol_names(self, _group: str | None = None) -> tuple[str, ...]:
+        return self.names
+
+
+class SymbolResolverTests(unittest.TestCase):
+    def test_resolve_sufixo_b_da_hfm(self) -> None:
+        resolver = SymbolResolver(StrictSymbolClient(("XAUUSDb",)))
+
+        self.assertEqual(resolver.resolve("XAUUSD"), "XAUUSDb")
+
+    def test_descobre_sufixo_desconhecido_da_corretora(self) -> None:
+        resolver = SymbolResolver(StrictSymbolClient(("EURUSD", "XAUUSD.pro")))
+
+        self.assertEqual(resolver.resolve("XAUUSD"), "XAUUSD.pro")
+
+    def test_prefere_sufixo_negociavel_ao_simbolo_base_desabilitado(self) -> None:
+        resolver = SymbolResolver(
+            StrictSymbolClient(
+                ("XAUUSD", "XAUUSDb"),
+                disabled=("XAUUSD",),
+            )
+        )
+
+        self.assertEqual(resolver.resolve("XAUUSD"), "XAUUSDb")
+
+    def test_aceita_gold_como_nome_do_ativo_na_corretora(self) -> None:
+        resolver = SymbolResolver(StrictSymbolClient(("GOLD",)))
+
+        self.assertEqual(resolver.resolve("XAUUSD"), "GOLD")
 
 
 class PendingOrderTests(unittest.TestCase):
@@ -109,6 +158,20 @@ class PendingOrderTests(unittest.TestCase):
 
         self.assertEqual(plan.selected_entry_price, Decimal("4061.00"))
         self.assertEqual(plan.order_type, PendingOrderType.BUY_LIMIT)
+
+    def test_plano_e_ordens_preservam_xauusdb_resolvido_na_hfm(self) -> None:
+        signal = parse_signal_text(BUY_SIGNAL).signal
+        plan = PendingOrderPlanner().plan(
+            signal=signal,
+            account=self.account,
+            profile=self.profile(),
+            symbol_info=SymbolInfo(name="XAUUSDb"),
+            tick=TickInfo(bid=Decimal("4062"), ask=Decimal("4062")),
+            execution_mode="live_execution",
+            now=datetime(2026, 7, 23, 12, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(plan.symbol, "XAUUSDb")
 
     def test_buy_acima_do_mercado_gera_buy_stop(self) -> None:
         plan = self.plan_buy(TickInfo(bid=Decimal("4058"), ask=Decimal("4058")))
