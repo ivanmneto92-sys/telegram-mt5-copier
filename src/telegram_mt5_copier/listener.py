@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import json
 import logging
 from pathlib import Path
@@ -28,6 +29,8 @@ from .mt5.pending_order_executor import PendingExecutionResult
 SUPPORTED_TEXT_MEDIA = {"text", "photo"}
 IGNORED_MEDIA = {"video", "audio", "voice", "sticker", "document", "media"}
 SIGNAL_MONITOR_HEARTBEAT_SECONDS = 15
+TELEGRAM_RETRY_DELAY_SECONDS = 5
+MAX_TELEGRAM_SIGNAL_AGE_SECONDS = 300
 
 
 class SignalProcessor:
@@ -203,7 +206,13 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
         execution_notifier=execution_notifier,
     )
 
-    client = TelegramClient(str(config.telegram_session_name), api_id, api_hash)
+    client = TelegramClient(
+        str(config.telegram_session_name),
+        api_id,
+        api_hash,
+        base_logger=logger,
+        **telegram_client_options(),
+    )
     await client.connect()
     try:
         if not await client.is_user_authorized():
@@ -216,12 +225,28 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
         async def handle_new_message(event: Any) -> None:
             incoming = incoming_from_telethon_event(event)
             log_incoming_message(logger, incoming, edited=False)
+            if telegram_event_is_stale(event, edited=False):
+                database.record_event(
+                    DecisionStatus.IGNORED,
+                    "stale_telegram_message",
+                    incoming=incoming,
+                )
+                logger.info("ignored: stale_telegram_message")
+                return
             await processor.process(incoming, client=client)
 
         @client.on(events.MessageEdited(chats=source_entity))
         async def handle_edited_message(event: Any) -> None:
             incoming = incoming_from_telethon_event(event)
             log_incoming_message(logger, incoming, edited=True)
+            if telegram_event_is_stale(event, edited=True):
+                database.record_event(
+                    DecisionStatus.IGNORED,
+                    "stale_telegram_message",
+                    incoming=incoming,
+                )
+                logger.info("ignored: stale_telegram_message")
+                return
             if database.has_accepted_source_message(
                 incoming.source_chat_id,
                 incoming.source_message_id,
@@ -235,7 +260,11 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
             await processor.process(incoming, client=client)
 
         heartbeat_task = asyncio.create_task(
-            run_signal_monitor_heartbeat(config.database_path, logger)
+            run_signal_monitor_heartbeat(
+                config.database_path,
+                logger,
+                is_connected=client.is_connected,
+            )
         )
         logger.info("Monitoramento Telegram iniciado. DRY_RUN=%s", str(config.dry_run).lower())
         try:
@@ -325,8 +354,12 @@ async def run_signal_monitor_heartbeat(
     logger: logging.Logger,
     *,
     interval_seconds: int = SIGNAL_MONITOR_HEARTBEAT_SECONDS,
+    is_connected: Callable[[], bool] | None = None,
 ) -> None:
     while True:
+        if is_connected is not None and not is_connected():
+            await asyncio.sleep(interval_seconds)
+            continue
         try:
             await asyncio.to_thread(
                 update_service_heartbeat,
@@ -337,6 +370,34 @@ async def run_signal_monitor_heartbeat(
         except Exception as exc:
             logger.error("Falha ao registrar heartbeat do monitor de sinais: %s", exc)
         await asyncio.sleep(interval_seconds)
+
+
+def telegram_client_options() -> dict[str, object]:
+    return {
+        "auto_reconnect": True,
+        "connection_retries": None,
+        "retry_delay": TELEGRAM_RETRY_DELAY_SECONDS,
+        "catch_up": True,
+        "sequential_updates": True,
+    }
+
+
+def telegram_event_is_stale(
+    event: Any,
+    *,
+    edited: bool,
+    now: datetime | None = None,
+    max_age_seconds: int = MAX_TELEGRAM_SIGNAL_AGE_SECONDS,
+) -> bool:
+    message = getattr(event, "message", None)
+    timestamp = getattr(message, "edit_date", None) if edited else None
+    timestamp = timestamp or getattr(message, "date", None)
+    if not isinstance(timestamp, datetime):
+        return False
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    current_time = now or datetime.now(tz=timezone.utc)
+    return (current_time - timestamp).total_seconds() > max_age_seconds
 
 
 def incoming_from_telethon_event(event: Any) -> IncomingMessage:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
 import unittest
@@ -10,6 +11,8 @@ from telegram_mt5_copier.listener import (
     SignalProcessor,
     log_incoming_message,
     resolve_source_chat,
+    telegram_client_options,
+    telegram_event_is_stale,
 )
 from telegram_mt5_copier.models import DecisionStatus, IncomingMessage
 from telegram_mt5_copier.parser import parse_signal_text
@@ -102,6 +105,30 @@ class CaptureLogger:
 
 
 class SourceChannelValidationTests(unittest.IsolatedAsyncioTestCase):
+    def test_cliente_telegram_reconecta_e_recupera_atualizacoes(self) -> None:
+        options = telegram_client_options()
+
+        self.assertTrue(options["auto_reconnect"])
+        self.assertIsNone(options["connection_retries"])
+        self.assertTrue(options["catch_up"])
+        self.assertTrue(options["sequential_updates"])
+
+    def test_recuperacao_rejeita_sinal_antigo(self) -> None:
+        now = datetime(2026, 7, 23, 12, 0, tzinfo=timezone.utc)
+        old_event = type(
+            "Event",
+            (),
+            {"message": type("Message", (), {"date": now - timedelta(minutes=6)})()},
+        )()
+        recent_event = type(
+            "Event",
+            (),
+            {"message": type("Message", (), {"date": now - timedelta(minutes=2)})()},
+        )()
+
+        self.assertTrue(telegram_event_is_stale(old_event, edited=False, now=now))
+        self.assertFalse(telegram_event_is_stale(recent_event, edited=False, now=now))
+
     async def test_resolve_canal_protegido_e_confirma_historico(self) -> None:
         client = FakeTelegramClient()
         logger = CaptureLogger()
