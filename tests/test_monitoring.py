@@ -11,6 +11,7 @@ from telegram_mt5_copier.listener import (
     SignalProcessor,
     log_incoming_message,
     resolve_source_chat,
+    resolve_source_chats,
     telegram_client_options,
     telegram_event_is_stale,
 )
@@ -93,6 +94,21 @@ class FakeTelegramClient:
         return [type("Message", (), {"id": 987})()]
 
 
+class FakeMultipleSourceClient:
+    def __init__(self) -> None:
+        self.requested_ids: list[int] = []
+
+    async def get_entity(self, chat_id: int):
+        self.requested_ids.append(chat_id)
+        entity = FakeSourceEntity()
+        entity.id = abs(chat_id)
+        entity.title = f"Canal {abs(chat_id)}"
+        return entity
+
+    async def get_messages(self, _entity, *, limit: int):
+        return [type("Message", (), {"id": limit})()]
+
+
 class CaptureLogger:
     def __init__(self) -> None:
         self.messages: list[str] = []
@@ -144,6 +160,24 @@ class SourceChannelValidationTests(unittest.IsolatedAsyncioTestCase):
     async def test_source_chat_id_precisa_ser_numerico(self) -> None:
         with self.assertRaisesRegex(ValueError, "ID numérico"):
             await resolve_source_chat(FakeTelegramClient(), "canal-vip", CaptureLogger())
+
+    async def test_resolve_todos_os_canais_configurados(self) -> None:
+        client = FakeMultipleSourceClient()
+        logger = CaptureLogger()
+
+        entities = await resolve_source_chats(
+            client,
+            ("-1001111111111", "-1002222222222"),
+            logger,
+        )
+
+        self.assertEqual(len(entities), 2)
+        self.assertEqual(client.requested_ids, [-1001111111111, -1002222222222])
+        self.assertIn("total=2", logger.messages[-1])
+
+    async def test_lista_de_canais_vazia_e_rejeitada(self) -> None:
+        with self.assertRaisesRegex(ValueError, "SOURCE_CHAT_IDS"):
+            await resolve_source_chats(FakeMultipleSourceClient(), (), CaptureLogger())
 
     def test_log_de_mensagem_nao_expoe_conteudo(self) -> None:
         logger = CaptureLogger()

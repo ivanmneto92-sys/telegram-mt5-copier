@@ -154,8 +154,8 @@ def text_for_analysis(incoming: IncomingMessage) -> ProcessingDecision:
 
 async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> int:
     api_id, api_hash = validate_telegram_credentials(config)
-    if not config.source_chat_id:
-        raise ValueError("SOURCE_CHAT_ID nao configurado.")
+    if not config.source_chat_ids:
+        raise ValueError("SOURCE_CHAT_IDS nao configurado.")
 
     try:
         from telethon import TelegramClient, events
@@ -219,9 +219,9 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
             logger.error("Sessao Telegram nao autenticada. Execute telegram-login uma vez antes do monitoramento.")
             return 2
 
-        source_entity = await resolve_source_chat(client, config.source_chat_id, logger)
+        source_entities = await resolve_source_chats(client, config.source_chat_ids, logger)
 
-        @client.on(events.NewMessage(chats=source_entity))
+        @client.on(events.NewMessage(chats=source_entities))
         async def handle_new_message(event: Any) -> None:
             incoming = incoming_from_telethon_event(event)
             log_incoming_message(logger, incoming, edited=False)
@@ -235,7 +235,7 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
                 return
             await processor.process(incoming, client=client)
 
-        @client.on(events.MessageEdited(chats=source_entity))
+        @client.on(events.MessageEdited(chats=source_entities))
         async def handle_edited_message(event: Any) -> None:
             incoming = incoming_from_telethon_event(event)
             log_incoming_message(logger, incoming, edited=True)
@@ -285,13 +285,13 @@ async def resolve_source_chat(client: Any, source_chat_id: str, logger: logging.
     try:
         numeric_chat_id = int(source_chat_id)
     except (TypeError, ValueError) as exc:
-        raise ValueError("SOURCE_CHAT_ID deve ser um ID numérico, como -1001234567890.") from exc
+        raise ValueError("Cada canal de origem deve ter um ID numérico, como -1001234567890.") from exc
 
     try:
         entity = await client.get_entity(numeric_chat_id)
     except Exception as exc:
         raise RuntimeError(
-            "Não foi possível acessar o canal configurado em SOURCE_CHAT_ID. "
+            f"Não foi possível acessar o canal de origem {numeric_chat_id}. "
             "Confirme o ID e se a conta da sessão participa do canal."
         ) from exc
 
@@ -315,6 +315,22 @@ async def resolve_source_chat(client: Any, source_chat_id: str, logger: logging.
         latest_message_id,
     )
     return entity
+
+
+async def resolve_source_chats(
+    client: Any,
+    source_chat_ids: tuple[str, ...],
+    logger: logging.Logger,
+) -> list[Any]:
+    if not source_chat_ids:
+        raise ValueError("SOURCE_CHAT_IDS nao configurado.")
+
+    entities = [
+        await resolve_source_chat(client, source_chat_id, logger)
+        for source_chat_id in source_chat_ids
+    ]
+    logger.info("Canais de origem prontos. total=%s", len(entities))
+    return entities
 
 
 def telegram_entity_title(entity: Any) -> str:

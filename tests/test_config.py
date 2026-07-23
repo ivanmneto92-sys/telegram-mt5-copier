@@ -4,7 +4,12 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from telegram_mt5_copier.config import AppConfig, parse_bool, project_path
+from telegram_mt5_copier.config import (
+    AppConfig,
+    parse_bool,
+    parse_source_chat_ids,
+    project_path,
+)
 
 
 class ConfigTests(unittest.TestCase):
@@ -59,7 +64,7 @@ class ConfigTests(unittest.TestCase):
                 (
                     "TELEGRAM_API_ID",
                     "TELEGRAM_API_HASH",
-                    "SOURCE_CHAT_ID",
+                    "SOURCE_CHAT_IDS",
                     "DESTINATION_CHAT_ID",
                 ),
             )
@@ -87,6 +92,38 @@ class ConfigTests(unittest.TestCase):
                 if key == "BOT_ADMIN_IDS":
                     continue
                 self.assertNotIn(secret_value, rendered_config)
+
+    def test_multiplos_canais_tem_precedencia_sobre_configuracao_antiga(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = AppConfig.load(
+                project_root=Path(tmp),
+                env={
+                    "SOURCE_CHAT_ID": "-1001111111111",
+                    "SOURCE_CHAT_IDS": " -1002222222222, -1003333333333, -1002222222222 ",
+                },
+                create_dirs=False,
+            )
+
+            self.assertEqual(
+                config.source_chat_ids,
+                ("-1002222222222", "-1003333333333"),
+            )
+            self.assertEqual(config.source_chat_id, "-1002222222222")
+
+    def test_source_chat_id_antigo_continua_compativel(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = AppConfig.load(
+                project_root=Path(tmp),
+                env={"SOURCE_CHAT_ID": "-1001111111111"},
+                create_dirs=False,
+            )
+
+            self.assertEqual(config.source_chat_ids, ("-1001111111111",))
+            self.assertEqual(config.source_chat_id, "-1001111111111")
+
+    def test_lista_de_canais_rejeita_identificador_nao_numerico(self) -> None:
+        with self.assertRaisesRegex(ValueError, "IDs numericos"):
+            parse_source_chat_ids("-1001111111111,canal-vip")
 
     def test_session_directory_is_created_from_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

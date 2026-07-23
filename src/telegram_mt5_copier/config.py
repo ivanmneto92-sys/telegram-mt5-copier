@@ -62,6 +62,7 @@ class AppConfig:
     telegram_api_hash: str | None = field(repr=False)
     telegram_bot_token: str | None = field(repr=False)
     source_chat_id: str | None = field(repr=False)
+    source_chat_ids: tuple[str, ...] = field(repr=False)
     destination_chat_id: str | None = field(repr=False)
     bot_admin_ids: tuple[int, ...] = field(repr=False)
     bot_enabled: bool
@@ -91,13 +92,15 @@ class AppConfig:
         env_path = env_file if env_file is not None else root / ENV_FILE
         file_values = load_env_file(env_path)
         runtime_env = os.environ if env is None else env
+        source_chat_ids = configured_source_chat_ids(file_values, runtime_env)
 
         config = cls(
             project_root=root,
             telegram_api_id=_optional_value("TELEGRAM_API_ID", file_values, runtime_env),
             telegram_api_hash=_optional_value("TELEGRAM_API_HASH", file_values, runtime_env),
             telegram_bot_token=_optional_value("TELEGRAM_BOT_TOKEN", file_values, runtime_env),
-            source_chat_id=_optional_value("SOURCE_CHAT_ID", file_values, runtime_env),
+            source_chat_id=source_chat_ids[0] if source_chat_ids else None,
+            source_chat_ids=source_chat_ids,
             destination_chat_id=_optional_value("DESTINATION_CHAT_ID", file_values, runtime_env),
             bot_admin_ids=parse_admin_ids(_value("BOT_ADMIN_IDS", file_values, runtime_env, "")),
             bot_enabled=parse_bool(_value("BOT_ENABLED", file_values, runtime_env, "true"), default=True),
@@ -149,7 +152,7 @@ class AppConfig:
         required = {
             "TELEGRAM_API_ID": self.telegram_api_id,
             "TELEGRAM_API_HASH": self.telegram_api_hash,
-            "SOURCE_CHAT_ID": self.source_chat_id,
+            "SOURCE_CHAT_IDS": self.source_chat_ids,
             "DESTINATION_CHAT_ID": self.destination_chat_id,
         }
         return tuple(name for name, value in required.items() if not value)
@@ -170,6 +173,39 @@ def parse_admin_ids(value: str | None) -> tuple[int, ...]:
             raise ValueError("BOT_ADMIN_IDS deve conter apenas IDs numericos separados por virgula.") from exc
 
     return tuple(admin_ids)
+
+
+def parse_source_chat_ids(value: str | None) -> tuple[str, ...]:
+    if not value:
+        return ()
+
+    source_chat_ids: list[str] = []
+    seen: set[str] = set()
+    for raw_item in value.split(","):
+        item = raw_item.strip()
+        if not item:
+            continue
+        try:
+            int(item)
+        except ValueError as exc:
+            raise ValueError(
+                "SOURCE_CHAT_IDS deve conter apenas IDs numericos separados por virgula."
+            ) from exc
+        if item not in seen:
+            source_chat_ids.append(item)
+            seen.add(item)
+
+    return tuple(source_chat_ids)
+
+
+def configured_source_chat_ids(
+    file_values: Mapping[str, str],
+    runtime_env: Mapping[str, str],
+) -> tuple[str, ...]:
+    plural_value = _optional_value("SOURCE_CHAT_IDS", file_values, runtime_env)
+    if plural_value:
+        return parse_source_chat_ids(plural_value)
+    return parse_source_chat_ids(_optional_value("SOURCE_CHAT_ID", file_values, runtime_env))
 
 
 def parse_positive_int(value: str, name: str) -> int:

@@ -11,7 +11,7 @@ Copie `.env.example` para `.env` no ambiente onde a aplicacao sera executada:
 ```env
 TELEGRAM_API_ID=
 TELEGRAM_API_HASH=
-SOURCE_CHAT_ID=
+SOURCE_CHAT_IDS=-1001111111111,-1002222222222
 DESTINATION_CHAT_ID=
 DRY_RUN=true
 DATA_DIR=./data
@@ -46,7 +46,7 @@ Mantenha `DRY_RUN=true` enquanto estiver preparando o ambiente sem credenciais r
 
 ## 2. Primeiro login no Telegram
 
-O primeiro login deve ser feito manualmente no ambiente onde a sessao sera usada. Preencha `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `SOURCE_CHAT_ID` e `DESTINATION_CHAT_ID` no `.env` local desse ambiente.
+O primeiro login deve ser feito manualmente no ambiente onde a sessao sera usada. Preencha `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `SOURCE_CHAT_IDS` e `DESTINATION_CHAT_ID` no `.env` local desse ambiente. Separe os IDs dos canais de origem por virgula; a conta da sessao deve participar de todos eles. A configuracao antiga `SOURCE_CHAT_ID` continua aceita quando `SOURCE_CHAT_IDS` nao estiver preenchido.
 
 Depois do setup, execute uma unica vez:
 
