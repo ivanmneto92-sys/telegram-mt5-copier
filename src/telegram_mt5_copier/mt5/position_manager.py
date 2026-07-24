@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 import re
@@ -50,7 +51,7 @@ class PositionManager:
                 )
                 if order_record is None:
                     continue
-                order_id, _group_id, direction, original_stop, _take_profit = order_record
+                order_id, _group_id, direction, original_stop, _take_profit, _expiration_at = order_record
                 ticket = int(value(position, "ticket", 0) or 0)
                 self._mark_filled(order_id, ticket)
                 if not (profile.breakeven_enabled or profile.trailing_enabled):
@@ -70,10 +71,24 @@ class PositionManager:
                 )
                 if order_record is None:
                     continue
-                order_id, group_id, direction, stop_loss, take_profit = order_record
+                order_id, group_id, direction, stop_loss, take_profit, expiration_at = order_record
                 symbol = str(value(pending_order, "symbol", ""))
                 tick = client.symbol_info_tick(symbol)
                 if tick is None:
+                    continue
+                ticket = int(value(pending_order, "ticket", value(pending_order, "order", 0)) or 0)
+                if datetime.fromisoformat(expiration_at) <= datetime.now(tz=timezone.utc):
+                    result = client.order_send(
+                        {
+                            "action": mt5_constant(client, "TRADE_ACTION_REMOVE", 8),
+                            "order": ticket,
+                            "magic": MT5_MAGIC_NUMBER,
+                            "comment": "tgcp expired",
+                        }
+                    )
+                    if is_successful_mt5_result(client, result, check=False):
+                        self._mark_expired(order_id, group_id)
+                        changed += 1
                     continue
                 current_price = tick.bid if direction == "BUY" else tick.ask
                 invalidated = (
@@ -83,7 +98,6 @@ class PositionManager:
                 )
                 if not invalidated:
                     continue
-                ticket = int(value(pending_order, "ticket", value(pending_order, "order", 0)) or 0)
                 result = client.order_send(
                     {
                         "action": mt5_constant(client, "TRADE_ACTION_REMOVE", 8),
@@ -154,11 +168,11 @@ class PositionManager:
 
     def _find_order(
         self, account_id: int, signal_prefix: str, tp_index: int
-    ) -> tuple[int, int, str, Decimal, Decimal] | None:
+    ) -> tuple[int, int, str, Decimal, Decimal, str] | None:
         with connect_database(self.database_path) as connection:
             cursor = connection.execute(
                 """
-                SELECT o.id, g.id, g.direction, o.stop_loss, o.take_profit
+                SELECT o.id, g.id, g.direction, o.stop_loss, o.take_profit, g.expiration_at
                 FROM execution_orders o
                 JOIN execution_groups g ON g.id = o.execution_group_id
                 WHERE g.mt5_account_id = ?
@@ -174,7 +188,14 @@ class PositionManager:
                 cursor.close()
         if row is None:
             return None
-        return int(row[0]), int(row[1]), str(row[2]), Decimal(str(row[3])), Decimal(str(row[4]))
+        return (
+            int(row[0]),
+            int(row[1]),
+            str(row[2]),
+            Decimal(str(row[3])),
+            Decimal(str(row[4])),
+            str(row[5]),
+        )
 
     def _mark_filled(self, order_id: int, position_ticket: int) -> None:
         with connect_database(self.database_path) as connection:
@@ -198,6 +219,25 @@ class PositionManager:
             cursor = connection.execute(
                 """
                 UPDATE execution_groups SET status = 'cancelled', updated_at = ?
+                WHERE id = ? AND NOT EXISTS (
+                    SELECT 1 FROM execution_orders
+                    WHERE execution_group_id = ? AND status NOT IN ('cancelled', 'expired', 'failed')
+                )
+                """,
+                (utc_now(), group_id, group_id),
+            )
+            cursor.close()
+
+    def _mark_expired(self, order_id: int, group_id: int) -> None:
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                "UPDATE execution_orders SET status = 'expired', updated_at = ? WHERE id = ?",
+                (utc_now(), order_id),
+            )
+            cursor.close()
+            cursor = connection.execute(
+                """
+                UPDATE execution_groups SET status = 'expired', updated_at = ?
                 WHERE id = ? AND NOT EXISTS (
                     SELECT 1 FROM execution_orders
                     WHERE execution_group_id = ? AND status NOT IN ('cancelled', 'expired', 'failed')

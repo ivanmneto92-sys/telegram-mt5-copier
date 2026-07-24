@@ -116,6 +116,7 @@ class MT5Client:
             digits=int(getattr(info, "digits", 2)),
             stops_level_points=int(getattr(info, "trade_stops_level", 0)),
             filling_mode=int(getattr(info, "filling_mode")) if hasattr(info, "filling_mode") else None,
+            expiration_mode=int(getattr(info, "expiration_mode")) if hasattr(info, "expiration_mode") else None,
             trade_allowed=bool(getattr(info, "trade_mode", 0) != 0),
         )
 

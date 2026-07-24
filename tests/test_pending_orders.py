@@ -479,6 +479,38 @@ class PendingOrderTests(unittest.TestCase):
         self.assertEqual([row["ticket"] for row in rows], ["100001", "100002", "100003", "100004"])
         self.assertIn("ORDENS PENDENTES ENVIADAS EM CONTA DEMO", result.message)
 
+    def test_corretora_com_gtc_nao_recebe_expiration(self) -> None:
+        client = SimulatedMT5Client(
+            tick=TickInfo(bid=Decimal("4062"), ask=Decimal("4062")),
+            symbol_info=SymbolInfo(name="XAUUSD", expiration_mode=1),
+        )
+
+        result = self.executor(
+            client=client,
+            execution_mode="demo_execution",
+            global_kill_switch=False,
+        ).execute_for_account(parse_signal_text(BUY_SIGNAL).signal, self.account, self.profile())
+
+        self.assertIsNone(result.group_result.rejected_reason)
+        self.assertTrue(all(request["type_time"] == 0 for request in client.order_send_requests))
+        self.assertTrue(all("expiration" not in request for request in client.order_send_requests))
+
+    def test_corretora_com_gtc_e_specified_prefere_gtc(self) -> None:
+        client = SimulatedMT5Client(
+            tick=TickInfo(bid=Decimal("4062"), ask=Decimal("4062")),
+            symbol_info=SymbolInfo(name="XAUUSD", expiration_mode=5),
+        )
+
+        result = self.executor(
+            client=client,
+            execution_mode="demo_execution",
+            global_kill_switch=False,
+        ).execute_for_account(parse_signal_text(BUY_SIGNAL).signal, self.account, self.profile())
+
+        self.assertIsNone(result.group_result.rejected_reason)
+        self.assertTrue(all(request["type_time"] == 0 for request in client.order_send_requests))
+        self.assertTrue(all("expiration" not in request for request in client.order_send_requests))
+
     def test_demo_execution_nao_envia_parcial_se_order_check_falhar(self) -> None:
         client = SimulatedMT5Client(
             tick=TickInfo(bid=Decimal("4062"), ask=Decimal("4062")),
@@ -694,6 +726,42 @@ class PendingOrderTests(unittest.TestCase):
                 (result.group_result.group.id,),
             ).fetchone()[0]
         self.assertEqual(status, "cancelled")
+
+    def test_worker_remove_pendente_gtc_ao_vencer_no_banco(self) -> None:
+        signal = parse_signal_text(BUY_SIGNAL).signal
+        result = self.executor().execute_for_account(signal, self.account, self.profile())
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                "UPDATE execution_groups SET expiration_at = ? WHERE id = ?",
+                (
+                    (datetime.now(tz=timezone.utc) - timedelta(minutes=1)).isoformat(),
+                    result.group_result.group.id,
+                ),
+            )
+        client = SimulatedMT5Client(
+            tick=TickInfo(bid=Decimal("4062"), ask=Decimal("4062")),
+            orders=(
+                {
+                    "magic": 27071301,
+                    "comment": f"tgcp {signal.signature[:8]} TP1",
+                    "ticket": 7002,
+                    "symbol": "XAUUSD",
+                },
+            ),
+        )
+        manager = PositionManager(self.database_path, self.accounts, lambda: client)
+
+        changed = manager.manage_account(self.account, self.profile())
+
+        self.assertEqual(changed, 1)
+        self.assertEqual(client.order_send_requests[-1]["action"], 8)
+        self.assertEqual(client.order_send_requests[-1]["order"], 7002)
+        with connect_database(self.database_path) as connection:
+            status = connection.execute(
+                "SELECT status FROM execution_orders WHERE execution_group_id = ? AND tp_index = 1",
+                (result.group_result.group.id,),
+            ).fetchone()[0]
+        self.assertEqual(status, "expired")
 
     def executor(
         self,

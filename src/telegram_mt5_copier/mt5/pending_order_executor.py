@@ -523,10 +523,38 @@ def build_pending_order_request(
         request["type_time"] = mt5_constant(client, "ORDER_TIME_GTC", 0)
         request["type_filling"] = market_filling_constant(client, symbol_info)
     else:
-        request["type_time"] = mt5_constant(client, "ORDER_TIME_SPECIFIED", 2)
-        request["expiration"] = int(datetime.fromisoformat(plan.expiration_at).timestamp())
+        request.update(pending_expiration_fields(client, plan, symbol_info))
         request["type_filling"] = mt5_constant(client, "ORDER_FILLING_RETURN", 2)
     return request
+
+
+def pending_expiration_fields(
+    client: object,
+    plan: PendingOrderPlan,
+    symbol_info: SymbolInfo,
+) -> dict[str, object]:
+    """Use a broker-supported policy while keeping the app expiration in the database.
+
+    GTC is preferred because some brokers expose SPECIFIED but reject its timestamp
+    at order_send. The MT5 worker removes GTC orders when plan.expiration_at is due.
+    An unknown capability keeps the previous SPECIFIED behavior for compatibility.
+    """
+    mode = symbol_info.expiration_mode
+    if mode is not None and mode & 1:
+        return {"type_time": mt5_constant(client, "ORDER_TIME_GTC", 0)}
+    if mode is None or mode & 4:
+        return {
+            "type_time": mt5_constant(client, "ORDER_TIME_SPECIFIED", 2),
+            "expiration": int(datetime.fromisoformat(plan.expiration_at).timestamp()),
+        }
+    if mode & 2:
+        return {"type_time": mt5_constant(client, "ORDER_TIME_DAY", 1)}
+    if mode & 8:
+        return {
+            "type_time": mt5_constant(client, "ORDER_TIME_SPECIFIED_DAY", 3),
+            "expiration": int(datetime.fromisoformat(plan.expiration_at).timestamp()),
+        }
+    return {"type_time": mt5_constant(client, "ORDER_TIME_GTC", 0)}
 
 
 def pending_order_type_constant(client: object, order_type: str) -> int:

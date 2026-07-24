@@ -101,6 +101,7 @@ class SymbolInfo:
     digits: int = 2
     stops_level_points: int = 0
     filling_mode: int | None = None
+    expiration_mode: int | None = None
     trade_allowed: bool = True
 
 
