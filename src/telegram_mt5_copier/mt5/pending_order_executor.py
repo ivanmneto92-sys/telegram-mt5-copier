@@ -336,7 +336,7 @@ class PendingOrderExecutor:
                 )
         for check_result in check_results:
             if not is_successful_mt5_result(client, check_result, check=True):
-                reason = f"order_check_failed:{result_message(check_result)}"
+                reason = f"order_check_failed:{mt5_failure_message(client, check_result)}"
                 group_result = self.groups.reject_group(plan, reason)
                 return PendingExecutionResult(
                     account=account,
@@ -365,7 +365,7 @@ class PendingOrderExecutor:
                 reason = (
                     f"order_send_exception:{send_exception}"
                     if send_exception
-                    else f"order_send_failed:{result_message(send_result)}"
+                    else f"order_send_failed:{mt5_failure_message(client, send_result)}"
                 )
                 rollback_failures = cancel_submitted_pending_orders(client, submitted_tickets)
                 if rollback_failures:
@@ -524,7 +524,7 @@ def build_pending_order_request(
         request["type_filling"] = market_filling_constant(client, symbol_info)
     else:
         request["type_time"] = mt5_constant(client, "ORDER_TIME_SPECIFIED", 2)
-        request["expiration"] = datetime.fromisoformat(plan.expiration_at)
+        request["expiration"] = int(datetime.fromisoformat(plan.expiration_at).timestamp())
         request["type_filling"] = mt5_constant(client, "ORDER_FILLING_RETURN", 2)
     return request
 
@@ -616,6 +616,13 @@ def result_message(result: object | None) -> str:
         if value:
             return str(value)
     return f"retcode={result_retcode(result)}"
+
+
+def mt5_failure_message(client: object, result: object | None) -> str:
+    if result is not None:
+        return result_message(result)
+    last_error = client.last_error() if hasattr(client, "last_error") else None
+    return f"sem_resultado:last_error={last_error!r}"
 
 
 def result_value(result: object | None, key: str, default: object) -> object:

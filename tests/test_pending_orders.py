@@ -468,6 +468,9 @@ class PendingOrderTests(unittest.TestCase):
 
         self.assertIsNone(result.group_result.rejected_reason)
         self.assertEqual(len(client.order_check_requests), 4)
+        self.assertTrue(
+            all(isinstance(request["expiration"], int) for request in client.order_check_requests)
+        )
         self.assertEqual(len(client.order_send_requests), 4)
         self.assertEqual(client.shutdown_count, 1)
         self.assertEqual(group_status(self.database_path, result.group_result.group.id), "pending_active")
@@ -495,6 +498,23 @@ class PendingOrderTests(unittest.TestCase):
         self.assertEqual(len(client.order_send_requests), 0)
         self.assertEqual(result.group_result.rejected_reason, "order_check_failed:invalid stops")
         self.assertEqual(count_execution_orders(self.database_path), 0)
+
+    def test_order_check_sem_resultado_inclui_last_error_do_mt5(self) -> None:
+        client = SimulatedMT5Client(
+            tick=TickInfo(bid=Decimal("4062"), ask=Decimal("4062")),
+            order_check_results=[None],
+        )
+        client._last_error = (-2, 'Invalid "expiration" argument')
+
+        result = self.executor(
+            client=client,
+            execution_mode="demo_execution",
+            global_kill_switch=False,
+        ).execute_for_account(parse_signal_text(BUY_SIGNAL).signal, self.account, self.profile())
+
+        self.assertIn("order_check_failed:sem_resultado", result.group_result.rejected_reason)
+        self.assertIn("Invalid", result.group_result.rejected_reason)
+        self.assertEqual(len(client.order_send_requests), 0)
 
     def test_falha_parcial_tenta_cancelar_ordens_ja_enviadas(self) -> None:
         client = SimulatedMT5Client(
