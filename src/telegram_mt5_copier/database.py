@@ -426,6 +426,56 @@ def initialize_database(database_path: Path) -> None:
                 FOREIGN KEY (user_id) REFERENCES users(id)
             );
 
+            CREATE TABLE IF NOT EXISTS customer_billing (
+                user_id INTEGER PRIMARY KEY,
+                customer_name TEXT,
+                email TEXT,
+                phone TEXT,
+                plan_name TEXT NOT NULL DEFAULT 'Mensal',
+                monthly_amount TEXT NOT NULL DEFAULT '0',
+                due_date TEXT,
+                billing_status TEXT NOT NULL DEFAULT 'pending',
+                last_paid_at TEXT,
+                notes TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS customer_payments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                amount TEXT NOT NULL,
+                paid_at TEXT NOT NULL,
+                period_start TEXT,
+                period_end TEXT,
+                method TEXT,
+                reference TEXT,
+                status TEXT NOT NULL DEFAULT 'paid',
+                admin_telegram_user_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS admin_login_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_hash TEXT NOT NULL UNIQUE,
+                admin_telegram_user_id INTEGER NOT NULL,
+                expires_at TEXT NOT NULL,
+                used_at TEXT,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS admin_browser_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_hash TEXT NOT NULL UNIQUE,
+                admin_telegram_user_id INTEGER NOT NULL,
+                expires_at TEXT NOT NULL,
+                revoked_at TEXT,
+                last_seen_at TEXT,
+                created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS service_heartbeats (
                 service_name TEXT PRIMARY KEY,
                 heartbeat_at TEXT NOT NULL,
@@ -473,6 +523,18 @@ def initialize_database(database_path: Path) -> None:
 
             CREATE INDEX IF NOT EXISTS idx_audit_events_user
                 ON audit_events(user_id);
+
+            CREATE INDEX IF NOT EXISTS idx_customer_billing_due
+                ON customer_billing(due_date, billing_status);
+
+            CREATE INDEX IF NOT EXISTS idx_customer_payments_user_paid
+                ON customer_payments(user_id, paid_at);
+
+            CREATE INDEX IF NOT EXISTS idx_admin_login_tokens_expiration
+                ON admin_login_tokens(expires_at, used_at);
+
+            CREATE INDEX IF NOT EXISTS idx_admin_browser_sessions_expiration
+                ON admin_browser_sessions(expires_at, revoked_at);
             """
         )
         cursor.close()

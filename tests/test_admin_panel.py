@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+from datetime import date, timedelta
 
 from telegram_mt5_copier.admin_panel import (
     AdminPanelService,
@@ -122,6 +123,81 @@ class AdminPanelTests(unittest.TestCase):
             )
         self.assertEqual(self.users.get_by_id(self.alice.id).status, USER_STATUS_PAUSED)
 
+    def test_cadastro_financeiro_aparece_no_dashboard(self) -> None:
+        due_date = (date.today() + timedelta(days=5)).isoformat()
+        self.service.update_billing(
+            admin_telegram_user_id=9001,
+            target_user_id=self.alice.id,
+            customer_name="Alice Silva",
+            email="alice@example.com",
+            phone="+55 11 99999-9999",
+            plan_name="Plano Gold",
+            monthly_amount="149,90",
+            due_date=due_date,
+            billing_status="pending",
+            notes="Cliente mensal.",
+        )
+
+        payload = self.service.dashboard()
+        alice = next(item for item in payload["users"] if item["id"] == self.alice.id)
+
+        self.assertEqual(alice["billing"]["customer_name"], "Alice Silva")
+        self.assertEqual(alice["billing"]["monthly_amount"], "149.90")
+        self.assertEqual(alice["billing"]["due_date"], due_date)
+        self.assertEqual(payload["summary"]["billing_due_soon"], 1)
+        self.assertEqual(payload["summary"]["monthly_total"], "149.90")
+
+    def test_vencido_e_classificado_como_em_atraso(self) -> None:
+        self.service.update_billing(
+            admin_telegram_user_id=9001,
+            target_user_id=self.alice.id,
+            customer_name="Alice",
+            email="",
+            phone="",
+            plan_name="Mensal",
+            monthly_amount="100",
+            due_date=(date.today() - timedelta(days=1)).isoformat(),
+            billing_status="paid",
+            notes="",
+        )
+
+        payload = self.service.dashboard()
+        alice = next(item for item in payload["users"] if item["id"] == self.alice.id)
+
+        self.assertEqual(alice["billing"]["effective_status"], "overdue")
+        self.assertEqual(payload["summary"]["billing_overdue"], 1)
+
+    def test_pagamento_e_registrado_e_avanca_vencimento(self) -> None:
+        self.service.update_billing(
+            admin_telegram_user_id=9001,
+            target_user_id=self.alice.id,
+            customer_name="Alice",
+            email="",
+            phone="",
+            plan_name="Mensal",
+            monthly_amount="200",
+            due_date="2026-01-31",
+            billing_status="pending",
+            notes="",
+        )
+
+        payment = self.service.record_payment(
+            admin_telegram_user_id=9001,
+            target_user_id=self.alice.id,
+            amount="200",
+            paid_at="2026-01-31",
+            method="PIX",
+            reference="TX-123",
+            next_due_date="",
+        )
+        payload = self.service.dashboard()
+        alice = next(item for item in payload["users"] if item["id"] == self.alice.id)
+
+        self.assertEqual(payment["next_due_date"], "2026-02-28")
+        self.assertEqual(alice["billing"]["last_paid_at"], "2026-01-31")
+        self.assertEqual(alice["billing"]["payments"][0]["method"], "PIX")
+        self.assertEqual(alice["billing"]["payments"][0]["amount"], "200.00")
+
     def test_interface_tem_busca_filtros_e_acoes_sem_segredos(self) -> None:
         html = render_admin_panel("nonce")
         script = render_admin_script()
@@ -131,6 +207,9 @@ class AdminPanelTests(unittest.TestCase):
         self.assertIn('data-filter="attention"', html)
         self.assertIn("/api/admin/session", script)
         self.assertIn("/api/admin/user-status", script)
+        self.assertIn("/api/admin/billing-update", script)
+        self.assertIn("/api/admin/payment", script)
+        self.assertIn('data-filter="overdue"', html)
         self.assertNotIn("TELEGRAM_BOT_TOKEN", html + script)
 
 

@@ -180,7 +180,24 @@ class BotManagementTests(unittest.TestCase):
         client_buttons = [button for row in client.keyboard for button in row]
         panel_button = next(button for button in admin_buttons if button.text == "🛡️ Painel Admin")
         self.assertEqual(panel_button.web_app_url, "https://institutotrader.online/admin?v=4")
+        self.assertIn("🖥️ Acessar pelo PC", [button.text for button in admin_buttons])
         self.assertNotIn("🛡️ Painel Admin", [button.text for button in client_buttons])
+
+    def test_admin_gera_link_temporario_para_acesso_no_pc(self) -> None:
+        service = BotService(
+            self.database_path,
+            admin_ids=(9001,),
+            mt5_onboarding_url="https://institutotrader.online/?v=4",
+        )
+        try:
+            response = service.handle_callback(9001, "master", "v1:admin:pc")
+            denied = service.handle_callback(101, "alice", "v1:admin:pc")
+        finally:
+            service.close()
+
+        self.assertIn("https://institutotrader.online/admin?v=4#token=", response.text)
+        self.assertIn("expira em 5 minutos", response.text)
+        self.assertIn("não autorizado", denied.text)
 
     def test_submenu_execucao_dos_sinais_salva_preferencias(self) -> None:
         accounts = MT5AccountService(

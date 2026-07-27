@@ -29,6 +29,7 @@ CB_MT5_TEST = "v1:mt5:test"
 CB_MT5_REMOVE = "v1:mt5:remove"
 CB_MT5_CONFIRM_REMOVE = "v1:mt5:remove:ok"
 CB_SIGNAL_EXECUTION = "v1:ex"
+CB_ADMIN_BROWSER_ACCESS = "v1:admin:pc"
 CB_EXEC_ENTRY_MENU = "v1:ex:entry"
 CB_EXEC_ENTRY_PENDING = "v1:ex:entry:pending"
 CB_EXEC_ENTRY_MARKET_ZONE = "v1:ex:entry:zone"
@@ -217,7 +218,10 @@ def mt5_connect_menu(web_app_url: str | None = None) -> tuple[tuple[Button, ...]
 def main_menu(admin_panel_url: str | None = None) -> tuple[tuple[Button, ...], ...]:
     if not admin_panel_url:
         return MAIN_MENU
-    return MAIN_MENU + ((Button("🛡️ Painel Admin", web_app_url=admin_panel_url),),)
+    return MAIN_MENU + (
+        (Button("🛡️ Painel Admin", web_app_url=admin_panel_url),),
+        (Button("🖥️ Acessar pelo PC", CB_ADMIN_BROWSER_ACCESS),),
+    )
 
 
 MT5_ACCOUNTS_MENU: tuple[tuple[Button, ...], ...] = (
@@ -299,7 +303,15 @@ STATIC_CALLBACKS = {
     for button in row
     if button.callback_data is not None
 }
-STATIC_CALLBACKS.update({CB_CONNECT_MT5, CB_MT5_SECURE, CB_MT5_ACCOUNTS, CB_SIGNAL_EXECUTION})
+STATIC_CALLBACKS.update(
+    {
+        CB_CONNECT_MT5,
+        CB_MT5_SECURE,
+        CB_MT5_ACCOUNTS,
+        CB_SIGNAL_EXECUTION,
+        CB_ADMIN_BROWSER_ACCESS,
+    }
+)
 
 LEGACY_CALLBACK_ALIASES = {
     "menu:main": CB_MAIN,

@@ -63,17 +63,26 @@ No Windows, use:
 ## Painel administrativo
 
 Quando `BOT_ADMIN_IDS` e `MT5_ONBOARDING_URL` estão configurados, o menu do bot
-exibe o botão **Painel Admin** exclusivamente para os IDs autorizados. O painel
-abre como Telegram Mini App em `/admin`, valida o `initData` assinado pelo
-Telegram e aplica a allowlist no servidor.
+exibe os botões administrativos exclusivamente para os IDs autorizados. O painel
+abre em `/admin` tanto como Telegram Mini App quanto no navegador comum do PC.
+No Telegram, ele valida o `initData` assinado. Para entrar pelo PC, o admin toca
+em **Acessar pelo PC** e abre o link de uso único, válido por 5 minutos. O token
+fica no fragmento da URL, não vai para os logs HTTP e é trocado por uma sessão
+`HttpOnly`, `Secure` e `SameSite=Strict` de até 12 horas.
 
-Nesta primeira versão, o admin master pode:
+O admin master pode:
 
 - consultar totais de clientes ativos, pausados e contas MT5 conectadas;
-- buscar clientes por username, ID Telegram, conta ou servidor;
+- buscar clientes por username, ID Telegram, conta, servidor, nome, e-mail,
+  telefone ou plano;
 - visualizar conta mascarada, saldo, equity, heartbeat e perfil operacional;
 - identificar contas que precisam de atenção;
 - ativar ou pausar clientes com confirmação;
+- cadastrar nome, contato, plano, mensalidade e data de vencimento;
+- identificar pagamentos em dia, vencimentos próximos e clientes em atraso;
+- registrar pagamentos manualmente, avançar o próximo vencimento e consultar o
+  histórico das últimas cobranças;
+- visualizar a receita mensal cadastrada;
 - registrar cada alteração em `admin_actions`.
 
 Exemplo:
@@ -83,8 +92,10 @@ BOT_ADMIN_IDS=8625829080
 MT5_ONBOARDING_URL=https://institutotrader.online/
 ```
 
-O painel não possui login por senha e deve ser aberto pelo botão do bot. A
-autorização é verificada novamente em cada chamada da API.
+O painel não possui senha estática. O acesso pelo Telegram ou pelo link
+temporário do bot é verificado novamente em cada chamada da API. Nesta versão,
+os pagamentos são registrados manualmente pelo admin; integração automática
+com PIX/cartão depende da escolha futura do provedor de pagamento.
 
 Informe telefone, codigo recebido e senha de verificacao em duas etapas apenas no prompt interativo. A sessao autenticada fica em `SESSION_DIR` e os arquivos `*.session` ja estao bloqueados no `.gitignore`.
 

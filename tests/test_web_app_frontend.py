@@ -22,6 +22,8 @@ from telegram_mt5_copier.web_app import (
     render_onboarding_form,
 )
 from telegram_mt5_copier.admin_panel import AdminPanelService, render_admin_panel, render_admin_script
+from telegram_mt5_copier.admin_auth import AdminBrowserAuthService
+from telegram_mt5_copier.users import UserRepository
 from telegram_mt5_copier.web_server import OnboardingHandler, safe_reason
 
 
@@ -269,6 +271,73 @@ class MiniAppFrontendTests(unittest.TestCase):
         self.assertEqual(client["status"], 403)
         self.assertEqual(client["body"]["error"], "Acesso administrativo não autorizado.")
 
+    def test_link_temporario_cria_sessao_de_navegador_com_cookie_seguro(self) -> None:
+        with mini_app_server(admin_ids=(9001,)) as base_url:
+            users = UserRepository(OnboardingHandler.admin_panel.database_path)
+            try:
+                customer = users.get_or_create_user(101, "alice")
+            finally:
+                users.close()
+            login_url = OnboardingHandler.admin_browser_auth.create_login_url(
+                9001,
+                "https://institutotrader.online/admin",
+            )
+            token = login_url.split("#token=", 1)[1]
+            request = Request(
+                f"{base_url}/api/admin/browser-login",
+                data=urlencode({"token": token}).encode("utf-8"),
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                method="POST",
+            )
+            with urlopen(request, timeout=5) as response:
+                login_payload = json.loads(response.read().decode("utf-8"))
+                set_cookie = response.headers.get("Set-Cookie", "")
+            cookie = set_cookie.split(";", 1)[0]
+            session_request = Request(
+                f"{base_url}/api/admin/session",
+                data=b"",
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Cookie": cookie,
+                },
+                method="POST",
+            )
+            with urlopen(session_request, timeout=5) as response:
+                session_payload = json.loads(response.read().decode("utf-8"))
+            billing_request = Request(
+                f"{base_url}/api/admin/billing-update",
+                data=urlencode(
+                    {
+                        "csrf_token": session_payload["csrf_token"],
+                        "user_id": str(customer.id),
+                        "customer_name": "Alice",
+                        "email": "alice@example.com",
+                        "phone": "11999999999",
+                        "plan_name": "Gold",
+                        "monthly_amount": "149.90",
+                        "due_date": "2026-08-10",
+                        "billing_status": "pending",
+                        "notes": "",
+                    }
+                ).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Cookie": cookie,
+                },
+                method="POST",
+            )
+            with urlopen(billing_request, timeout=5) as response:
+                billing_payload = json.loads(response.read().decode("utf-8"))
+
+        self.assertTrue(login_payload["ok"])
+        self.assertTrue(session_payload["ok"])
+        self.assertIn("HttpOnly", set_cookie)
+        self.assertIn("Secure", set_cookie)
+        self.assertIn("SameSite=Strict", set_cookie)
+        self.assertEqual(session_payload["admin"]["telegram_user_id"], 9001)
+        self.assertTrue(billing_payload["ok"])
+        self.assertEqual(billing_payload["billing"]["monthly_amount"], "149.90")
+
     def test_navegador_comum_mostra_mensagem_clara(self) -> None:
         html = render_onboarding_form("test-nonce")
 
@@ -308,6 +377,10 @@ class mini_app_server:
         OnboardingHandler.admin_panel = AdminPanelService(
             database_path,
             bot_token=self.bot_token,
+            admin_ids=self.admin_ids,
+        )
+        OnboardingHandler.admin_browser_auth = AdminBrowserAuthService(
+            database_path,
             admin_ids=self.admin_ids,
         )
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), OnboardingHandler)

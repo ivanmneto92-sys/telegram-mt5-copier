@@ -8,10 +8,12 @@ import time
 from urllib.parse import urlsplit, urlunsplit
 
 from .account_service import AccountService
+from .admin_auth import AdminBrowserAuthService
 from .bot_keyboards import (
     ACCOUNT_MENU,
     ACTIVATED_MENU,
     CB_ACCOUNT,
+    CB_ADMIN_BROWSER_ACCESS,
     CB_ACTIVATE,
     CB_CANCEL,
     CB_CONFIRM_ACTIVATE,
@@ -139,6 +141,10 @@ class BotService:
         self.database_path = database_path
         self.mt5_onboarding_url = mt5_onboarding_url
         self.admin_ids = set(admin_ids)
+        self.admin_browser_auth = AdminBrowserAuthService(
+            database_path,
+            admin_ids=admin_ids,
+        )
         self.rate_limiter = rate_limiter or RateLimiter()
         self._pending_custom_values: dict[int, str] = {}
         self._closed = False
@@ -253,6 +259,35 @@ class BotService:
 
         if callback == CB_MAIN:
             return self._main_panel(user, first_name=first_name)
+        if callback == CB_ADMIN_BROWSER_ACCESS:
+            if telegram_user_id not in self.admin_ids:
+                return BotResponse("Acesso administrativo não autorizado.", MAIN_MENU)
+            panel_url = admin_panel_url(self.mt5_onboarding_url)
+            if not panel_url:
+                return BotResponse(
+                    "URL HTTPS do painel administrativo não configurada.",
+                    main_menu(None),
+                )
+            access_url = self.admin_browser_auth.create_login_url(
+                telegram_user_id,
+                panel_url,
+            )
+            return BotResponse(
+                "\n".join(
+                    [
+                        "🖥️ ACESSO AO PAINEL PELO PC",
+                        "",
+                        "Abra o link abaixo no navegador do seu computador:",
+                        "",
+                        access_url,
+                        "",
+                        "🔐 O link funciona uma única vez e expira em 5 minutos.",
+                        "Depois de entrar, sua sessão permanece ativa por até 12 horas.",
+                    ]
+                ),
+                main_menu(panel_url),
+                screen="admin_access",
+            )
         if callback == CB_ACCOUNT:
             return self._account_screen(user)
         if callback == CB_OPERATIONS:

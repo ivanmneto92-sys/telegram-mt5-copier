@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.cookies import SimpleCookie
 import json
 import secrets
 import sys
 from urllib.parse import parse_qs, urlsplit
 
-from .admin_panel import AdminPanelService, render_admin_panel, render_admin_script
+from .admin_auth import AdminBrowserAuthService
+from .admin_panel import AdminIdentity, AdminPanelService, render_admin_panel, render_admin_script
 from .config import AppConfig
 from .credential_service import CredentialService
 from .mt5.account_service import MT5AccountService
@@ -25,6 +27,7 @@ from .web_app import (
 class OnboardingHandler(BaseHTTPRequestHandler):
     onboarding: MT5OnboardingService
     admin_panel: AdminPanelService
+    admin_browser_auth: AdminBrowserAuthService
     csrf: CSRFTokenService
     bot_token: str
 
@@ -107,8 +110,20 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             if path == "/api/admin/session":
                 self.handle_admin_session(fields)
                 return
+            if path == "/api/admin/browser-login":
+                self.handle_admin_browser_login(fields)
+                return
+            if path == "/api/admin/logout":
+                self.handle_admin_logout(fields)
+                return
             if path == "/api/admin/user-status":
                 self.handle_admin_user_status(fields)
+                return
+            if path == "/api/admin/billing-update":
+                self.handle_admin_billing_update(fields)
+                return
+            if path == "/api/admin/payment":
+                self.handle_admin_payment(fields)
                 return
             self.send_error(404)
         except WebAppValidationError as exc:
@@ -166,7 +181,38 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         self.send_json({"ok": True})
 
     def handle_admin_session(self, fields: dict[str, str]) -> None:
-        identity = self.admin_panel.authenticate(fields.get("init_data", ""))
+        identity = self.authenticate_admin(fields)
+        self.send_admin_dashboard(identity)
+
+    def handle_admin_browser_login(self, fields: dict[str, str]) -> None:
+        try:
+            session = self.admin_browser_auth.consume_login_token(fields.get("token", ""))
+        except ValueError as exc:
+            raise WebAppValidationError(str(exc)) from exc
+        identity = AdminIdentity(session.admin_telegram_user_id, None)
+        self.send_admin_dashboard(
+            identity,
+            extra_headers=(("Set-Cookie", admin_session_cookie(session.session_token)),),
+        )
+
+    def handle_admin_logout(self, fields: dict[str, str]) -> None:
+        identity = self.authenticate_admin(fields)
+        if not self.csrf.validate(fields.get("csrf_token", ""), identity.telegram_user_id):
+            raise WebAppValidationError("CSRF invalido.")
+        session_token = self.admin_session_cookie()
+        if session_token:
+            self.admin_browser_auth.revoke_session(session_token)
+        self.send_json(
+            {"ok": True},
+            extra_headers=(("Set-Cookie", clear_admin_session_cookie()),),
+        )
+
+    def send_admin_dashboard(
+        self,
+        identity: AdminIdentity,
+        *,
+        extra_headers: tuple[tuple[str, str], ...] = (),
+    ) -> None:
         payload = self.admin_panel.dashboard()
         payload.update(
             {
@@ -179,12 +225,10 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             }
         )
         safe_log("admin_session_accepted", user_id=str(identity.telegram_user_id))
-        self.send_json(payload)
+        self.send_json(payload, extra_headers=extra_headers)
 
     def handle_admin_user_status(self, fields: dict[str, str]) -> None:
-        identity = self.admin_panel.authenticate(fields.get("init_data", ""))
-        if not self.csrf.validate(fields.get("csrf_token", ""), identity.telegram_user_id):
-            raise WebAppValidationError("CSRF invalido.")
+        identity = self.authenticate_admin_mutation(fields)
         try:
             target_user_id = int(fields.get("user_id", ""))
         except ValueError as exc:
@@ -201,6 +245,73 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             status=str(result["status"]),
         )
         self.send_json({"ok": True, "user": result})
+
+    def handle_admin_billing_update(self, fields: dict[str, str]) -> None:
+        identity = self.authenticate_admin_mutation(fields)
+        target_user_id = parsed_user_id(fields)
+        result = self.admin_panel.update_billing(
+            admin_telegram_user_id=identity.telegram_user_id,
+            target_user_id=target_user_id,
+            customer_name=fields.get("customer_name", ""),
+            email=fields.get("email", ""),
+            phone=fields.get("phone", ""),
+            plan_name=fields.get("plan_name", ""),
+            monthly_amount=fields.get("monthly_amount", ""),
+            due_date=fields.get("due_date", ""),
+            billing_status=fields.get("billing_status", ""),
+            notes=fields.get("notes", ""),
+        )
+        safe_log(
+            "admin_billing_updated",
+            admin_id=str(identity.telegram_user_id),
+            target_id=str(target_user_id),
+        )
+        self.send_json({"ok": True, "billing": result})
+
+    def handle_admin_payment(self, fields: dict[str, str]) -> None:
+        identity = self.authenticate_admin_mutation(fields)
+        target_user_id = parsed_user_id(fields)
+        result = self.admin_panel.record_payment(
+            admin_telegram_user_id=identity.telegram_user_id,
+            target_user_id=target_user_id,
+            amount=fields.get("amount", ""),
+            paid_at=fields.get("paid_at", ""),
+            method=fields.get("method", ""),
+            reference=fields.get("reference", ""),
+            next_due_date=fields.get("next_due_date", ""),
+        )
+        safe_log(
+            "admin_payment_recorded",
+            admin_id=str(identity.telegram_user_id),
+            target_id=str(target_user_id),
+        )
+        self.send_json({"ok": True, "payment": result})
+
+    def authenticate_admin_mutation(self, fields: dict[str, str]) -> AdminIdentity:
+        identity = self.authenticate_admin(fields)
+        if not self.csrf.validate(fields.get("csrf_token", ""), identity.telegram_user_id):
+            raise WebAppValidationError("CSRF invalido.")
+        return identity
+
+    def authenticate_admin(self, fields: dict[str, str]) -> AdminIdentity:
+        init_data = fields.get("init_data", "")
+        if init_data:
+            return self.admin_panel.authenticate(init_data)
+        session_token = self.admin_session_cookie()
+        try:
+            admin_id = self.admin_browser_auth.authenticate_session(session_token)
+        except ValueError as exc:
+            raise WebAppValidationError(str(exc)) from exc
+        return AdminIdentity(admin_id, None)
+
+    def admin_session_cookie(self) -> str:
+        cookie = SimpleCookie()
+        try:
+            cookie.load(self.headers.get("Cookie", ""))
+        except Exception:
+            return ""
+        morsel = cookie.get("admin_session")
+        return morsel.value if morsel is not None else ""
 
     def route_path(self) -> str:
         return urlsplit(self.path).path
@@ -223,11 +334,20 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             return
         self.wfile.write(encoded)
 
-    def send_json(self, payload: dict[str, object], status: int = 200, *, head_only: bool = False) -> None:
+    def send_json(
+        self,
+        payload: dict[str, object],
+        status: int = 200,
+        *,
+        head_only: bool = False,
+        extra_headers: tuple[tuple[str, str], ...] = (),
+    ) -> None:
         encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_common_security_headers()
+        for name, value in extra_headers:
+            self.send_header(name, value)
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
         if head_only:
@@ -287,10 +407,15 @@ def main() -> int:
             bot_token=config.telegram_bot_token,
             admin_ids=config.bot_admin_ids,
         )
+        admin_browser_auth = AdminBrowserAuthService(
+            config.database_path,
+            admin_ids=config.bot_admin_ids,
+        )
         OnboardingHandler.bot_token = config.telegram_bot_token
         OnboardingHandler.csrf = csrf
         OnboardingHandler.onboarding = onboarding
         OnboardingHandler.admin_panel = admin_panel
+        OnboardingHandler.admin_browser_auth = admin_browser_auth
 
         server = ThreadingHTTPServer(("127.0.0.1", 8080), OnboardingHandler)
         print("Mini App MT5 ouvindo em http://127.0.0.1:8080. Publique atras de HTTPS.")
@@ -362,12 +487,42 @@ def safe_frontend_event(value: str) -> str:
 
 
 def safe_endpoint(value: str) -> str:
-    allowed = {"csrf", "connect", "/api/admin/session", "/api/admin/user-status"}
+    allowed = {
+        "csrf",
+        "connect",
+        "/api/admin/session",
+        "/api/admin/browser-login",
+        "/api/admin/logout",
+        "/api/admin/user-status",
+        "/api/admin/billing-update",
+        "/api/admin/payment",
+    }
     return value if value in allowed else ""
 
 
 def generate_script_nonce() -> str:
     return secrets.token_urlsafe(24)
+
+
+def parsed_user_id(fields: dict[str, str]) -> int:
+    try:
+        return int(fields.get("user_id", ""))
+    except ValueError as exc:
+        raise ValueError("Cliente inválido.") from exc
+
+
+def admin_session_cookie(token: str) -> str:
+    return (
+        f"admin_session={token}; Path=/; Max-Age=43200; "
+        "Secure; HttpOnly; SameSite=Strict"
+    )
+
+
+def clear_admin_session_cookie() -> str:
+    return (
+        "admin_session=; Path=/; Max-Age=0; "
+        "Secure; HttpOnly; SameSite=Strict"
+    )
 
 
 def content_security_policy(script_nonce: str = "") -> str:
