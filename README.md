@@ -127,6 +127,12 @@ da escolha das contas MT5. Clientes no modo personalizado não recebem execuçã
 de canais desmarcados. O painel administrativo mostra solicitações aguardando a
 entrada da conta principal, canais prontos para análise e canais ativos.
 
+O analisador também reconhece mensagens em português como `Moeda: XAU-USD`,
+`Análise: Venda (Sell)`, `Entrada`, `Stop Loss (SL)` e listas com vários
+`Take Profit (TP)`. `Compra`/`Venda` são normalizados para `BUY`/`SELL`, e
+`XAU-USD` continua sendo resolvido para o símbolo específico da corretora, como
+`XAUUSDb` na HFM.
+
 Uma conta MT5 recém-conectada permanece aguardando aprovação. O cliente não
 consegue se autoativar pelo bot. Somente o admin pode liberar sinais, registrando
 o pagamento e definindo a data final do acesso. Depois do vencimento, a conta é

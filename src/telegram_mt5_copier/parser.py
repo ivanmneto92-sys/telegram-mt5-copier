@@ -10,14 +10,14 @@ NUMBER_TEXT = r"\d+(?:[\.,]\d+)?"
 NUMBER_RE = re.compile(NUMBER_TEXT)
 RANGE_RE = re.compile(rf"(?P<first>{NUMBER_TEXT})\s*[-–—]\s*(?P<second>{NUMBER_TEXT})")
 
-SUPPORTED_GOLD_RE = re.compile(r"\b(?:XAUUSD|GOLD)\b", re.IGNORECASE)
+SUPPORTED_GOLD_RE = re.compile(r"\b(?:XAU\s*[-/]?\s*USD|GOLD)\b", re.IGNORECASE)
 OTHER_ASSET_RE = re.compile(
     r"\b(?:EUR\s*/?\s*USD|GBP\s*/?\s*USD|USD\s*/?\s*JPY|BTC\s*/?\s*USD|"
     r"ETH\s*/?\s*USD|US30|NAS100|SPX500|US500|WTI|OIL)\b",
     re.IGNORECASE,
 )
-DIRECTION_RE = re.compile(r"\b(BUY|SELL)\b", re.IGNORECASE)
-ENTRY_LABEL_RE = re.compile(r"\b(?:ENTRY(?:\s+ZONE)?|ENTER)\b", re.IGNORECASE)
+DIRECTION_RE = re.compile(r"\b(BUY|SELL|COMPRA|VENDA)\b", re.IGNORECASE)
+ENTRY_LABEL_RE = re.compile(r"\b(?:ENTRY(?:\s+ZONE)?|ENTER|ENTRADA)\b", re.IGNORECASE)
 SL_LABEL_RE = re.compile(r"\b(?:SL|STOP(?:\s+LOSS)?)\b", re.IGNORECASE)
 TP_LABEL_RE = re.compile(r"\b(?:TP\d*|TARGET\d*|TAKE\s+PROFIT\d*)\b", re.IGNORECASE)
 
@@ -45,7 +45,7 @@ def parse_signal_text(
         return ProcessingDecision(DecisionStatus.REJECTED, "missing_direction")
 
     cleaned_signal = clean_signal_text(clean_text)
-    direction = Direction(direction_match.group(1).upper())
+    direction = direction_from_text(direction_match.group(1))
     lines = [line.strip() for line in (cleaned_signal or clean_text).splitlines() if line.strip()]
 
     try:
@@ -177,3 +177,10 @@ def decimal_from_text(value: str) -> Decimal:
 
 def normalize_number_text(value: str) -> str:
     return value.strip().replace(",", ".")
+
+
+def direction_from_text(value: str) -> Direction:
+    normalized = value.upper()
+    if normalized in {"BUY", "COMPRA"}:
+        return Direction.BUY
+    return Direction.SELL

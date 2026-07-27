@@ -398,6 +398,32 @@ class MonitorPipelineTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ParserTests(unittest.TestCase):
+    def test_scalping_em_portugues_com_xau_hifen(self) -> None:
+        decision = parse_signal_text(
+            """📊 VAMOS FAZER UM SCALPING
+
+💵 Moeda: XAU-USD
+✋ Análise: Venda ( Sell ) 4075
+🎯 Entrada: 4075
+⛔ Stop Loss (SL): 4090
+
+Take Profit (TP):
+✅ TP 4070
+✅ TP 4065"""
+        )
+
+        self.assertEqual(decision.status, DecisionStatus.ACCEPTED)
+        self.assertEqual(decision.signal.symbol, "XAUUSD")
+        self.assertEqual(decision.signal.direction, Direction.SELL)
+        self.assertEqual(decision.signal.entry_low, Decimal("4075"))
+        self.assertEqual(decision.signal.entry_high, Decimal("4075"))
+        self.assertEqual(decision.signal.stop_loss, Decimal("4090"))
+        self.assertEqual(
+            decision.signal.take_profits,
+            (Decimal("4070"), Decimal("4065")),
+        )
+        self.assertEqual(validate_signal(decision.signal).status, DecisionStatus.ACCEPTED)
+
     def test_gold_buy_now_com_entrada_no_cabecalho(self) -> None:
         decision = parse_signal_text(GOLD_BUY_NOW)
 

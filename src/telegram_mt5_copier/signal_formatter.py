@@ -5,13 +5,19 @@ import re
 from .models import TradeSignal, decimal_to_text
 
 PRICE_VALUE_PATTERN = r"\d+(?:[\.,]\d+)?(?:\s*[-–—]\s*\d+(?:[\.,]\d+)?)?"
+GOLD_ASSET_PATTERN = r"(?:XAU\s*[-/]?\s*USD|GOLD)"
+DIRECTION_PATTERN = r"(?:BUY|SELL|COMPRA|VENDA)"
 HEADER_RE = re.compile(
     r"(?:"
-    r"\b(?:XAUUSD|GOLD)\b[^\w]{1,8}\b(?P<asset_first_direction>BUY|SELL)\b"
+    rf"\b{GOLD_ASSET_PATTERN}\b[^\w]{{1,8}}\b(?P<asset_first_direction>{DIRECTION_PATTERN})\b"
     r"(?:[ \t]+NOW\b)?"
     r"|"
-    r"\b(?P<direction_first_direction>BUY|SELL)\b[^\w]{1,8}"
-    r"\b(?:XAUUSD|GOLD)\b"
+    rf"\b(?P<direction_first_direction>{DIRECTION_PATTERN})\b[^\w]{{1,8}}"
+    rf"\b{GOLD_ASSET_PATTERN}\b"
+    r"|"
+    rf"\b{GOLD_ASSET_PATTERN}\b[^\r\n]*\r?\n"
+    rf"[^\r\n]*\b(?:AN[ÁA]LISE)\b\s*:\s*"
+    rf"(?P<localized_direction>{DIRECTION_PATTERN})\b"
     r")",
     re.IGNORECASE,
 )
@@ -19,9 +25,10 @@ HEADER_TAIL_ENTRY_RE = re.compile(
     rf"^[ \t:@\-\(\)\[\]]*(?P<value>{PRICE_VALUE_PATTERN})",
     re.IGNORECASE,
 )
-ENTRY_LINE_RE = re.compile(r"\bENTRY\b\s*[:\-]?\s*(?P<value>\d+(?:[\.,]\d+)?(?:\s*[-–—]\s*\d+(?:[\.,]\d+)?)?)", re.IGNORECASE)
+ENTRY_LINE_RE = re.compile(r"\b(?:ENTRY|ENTRADA)\b\s*[:\-]?\s*(?P<value>\d+(?:[\.,]\d+)?(?:\s*[-–—]\s*\d+(?:[\.,]\d+)?)?)", re.IGNORECASE)
 SL_LINE_RE = re.compile(
-    r"\b(?:SL|STOP[ \t]+LOSS)\b\s*[:\-]?\s*(?P<value>\d+(?:[\.,]\d+)?)",
+    r"\b(?:SL|STOP[ \t]+LOSS)\b(?:\s*\(\s*SL\s*\))?\s*[:\-]?\s*"
+    r"(?P<value>\d+(?:[\.,]\d+)?)",
     re.IGNORECASE,
 )
 TP_LINE_RE = re.compile(
@@ -39,7 +46,9 @@ def clean_signal_text(text: str) -> str | None:
     direction = (
         header_match.group("asset_first_direction")
         or header_match.group("direction_first_direction")
+        or header_match.group("localized_direction")
     ).upper()
+    direction = {"COMPRA": "BUY", "VENDA": "SELL"}.get(direction, direction)
     body = text[header_match.end() :]
     lines = [strip_noise(line) for line in body.splitlines()]
 
