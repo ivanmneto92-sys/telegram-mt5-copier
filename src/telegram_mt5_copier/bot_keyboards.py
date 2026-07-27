@@ -214,6 +214,12 @@ def mt5_connect_menu(web_app_url: str | None = None) -> tuple[tuple[Button, ...]
     )
 
 
+def main_menu(admin_panel_url: str | None = None) -> tuple[tuple[Button, ...], ...]:
+    if not admin_panel_url:
+        return MAIN_MENU
+    return MAIN_MENU + ((Button("🛡️ Painel Admin", web_app_url=admin_panel_url),),)
+
+
 MT5_ACCOUNTS_MENU: tuple[tuple[Button, ...], ...] = (
     (Button("📊 Ver conta", CB_MT5_VIEW), Button("⚙️ Configurar", CB_MT5_CONFIG)),
     (Button("⚙️ Execução dos sinais", CB_SIGNAL_EXECUTION),),

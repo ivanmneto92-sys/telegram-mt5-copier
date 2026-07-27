@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from http.server import ThreadingHTTPServer
 import json
+from pathlib import Path
 import re
 import threading
+import tempfile
 import time
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -19,6 +21,7 @@ from telegram_mt5_copier.web_app import (
     render_miniapp_script,
     render_onboarding_form,
 )
+from telegram_mt5_copier.admin_panel import AdminPanelService, render_admin_panel, render_admin_script
 from telegram_mt5_copier.web_server import OnboardingHandler, safe_reason
 
 
@@ -221,6 +224,51 @@ class MiniAppFrontendTests(unittest.TestCase):
         self.assertIn("web_app_ready", body)
         self.assertIn('postApi("/api/csrf"', body)
 
+    def test_painel_admin_e_script_sao_servidos(self) -> None:
+        with mini_app_server() as base_url:
+            with urlopen(f"{base_url}/admin?v=4", timeout=5) as response:
+                html = response.read().decode("utf-8")
+            with urlopen(f"{base_url}/admin.js?v=4", timeout=5) as response:
+                script = response.read().decode("utf-8")
+
+        self.assertIn("Central de clientes", html)
+        self.assertIn('src="/admin.js"', html)
+        self.assertIn("/api/admin/session", script)
+        self.assertEqual(render_admin_panel("nonce").count('nonce="nonce"'), 1)
+        self.assertIn("Abra o Painel Admin pelo botão", render_admin_script())
+
+    def test_api_admin_valida_allowlist_do_telegram(self) -> None:
+        token = "123456:bot-token"
+        now = int(time.time())
+        admin_init_data = build_signed_init_data(
+            token,
+            {
+                "query_id": "admin",
+                "auth_date": str(now),
+                "user": json.dumps({"id": 9001, "username": "master"}, separators=(",", ":")),
+            },
+        )
+        client_init_data = build_signed_init_data(
+            token,
+            {
+                "query_id": "client",
+                "auth_date": str(now),
+                "user": json.dumps({"id": 101, "username": "alice"}, separators=(",", ":")),
+            },
+        )
+        with mini_app_server(bot_token=token, admin_ids=(9001,)) as base_url:
+            admin = post_json(f"{base_url}/api/admin/session", {"init_data": admin_init_data})
+            client = post_expect_error(
+                f"{base_url}/api/admin/session",
+                {"init_data": client_init_data},
+            )
+
+        self.assertTrue(admin["ok"])
+        self.assertEqual(admin["admin"]["telegram_user_id"], 9001)
+        self.assertIn("csrf_token", admin)
+        self.assertEqual(client["status"], 403)
+        self.assertEqual(client["body"]["error"], "Acesso administrativo não autorizado.")
+
     def test_navegador_comum_mostra_mensagem_clara(self) -> None:
         html = render_onboarding_form("test-nonce")
 
@@ -241,14 +289,27 @@ class MiniAppFrontendTests(unittest.TestCase):
 
 
 class mini_app_server:
-    def __init__(self, bot_token: str = "123456:bot-token") -> None:
+    def __init__(
+        self,
+        bot_token: str = "123456:bot-token",
+        admin_ids: tuple[int, ...] = (),
+    ) -> None:
         self.bot_token = bot_token
+        self.admin_ids = admin_ids
         self.server: ThreadingHTTPServer | None = None
         self.thread: threading.Thread | None = None
+        self.temp_dir: tempfile.TemporaryDirectory[str] | None = None
 
     def __enter__(self) -> str:
         OnboardingHandler.bot_token = self.bot_token
         OnboardingHandler.csrf = CSRFTokenService("csrf-secret")
+        self.temp_dir = tempfile.TemporaryDirectory()
+        database_path = Path(self.temp_dir.name) / "web.sqlite3"
+        OnboardingHandler.admin_panel = AdminPanelService(
+            database_path,
+            bot_token=self.bot_token,
+            admin_ids=self.admin_ids,
+        )
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), OnboardingHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -261,6 +322,8 @@ class mini_app_server:
             self.server.server_close()
         if self.thread is not None:
             self.thread.join(timeout=5)
+        if self.temp_dir is not None:
+            self.temp_dir.cleanup()
 
 
 def post_json(url: str, fields: dict[str, str]) -> dict[str, object]:

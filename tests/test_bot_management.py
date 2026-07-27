@@ -164,6 +164,24 @@ class BotManagementTests(unittest.TestCase):
         self.assertIn("🖥️ Minhas contas", button_texts)
         self.assertIn("⚙️ Execução dos sinais", button_texts)
 
+    def test_painel_admin_aparece_somente_para_admin_configurado(self) -> None:
+        service = BotService(
+            self.database_path,
+            admin_ids=(9001,),
+            mt5_onboarding_url="https://institutotrader.online/?v=4",
+        )
+        try:
+            admin = service.menu(9001, "master")
+            client = service.menu(101, "alice")
+        finally:
+            service.close()
+
+        admin_buttons = [button for row in admin.keyboard for button in row]
+        client_buttons = [button for row in client.keyboard for button in row]
+        panel_button = next(button for button in admin_buttons if button.text == "🛡️ Painel Admin")
+        self.assertEqual(panel_button.web_app_url, "https://institutotrader.online/admin?v=4")
+        self.assertNotIn("🛡️ Painel Admin", [button.text for button in client_buttons])
+
     def test_submenu_execucao_dos_sinais_salva_preferencias(self) -> None:
         accounts = MT5AccountService(
             self.database_path,

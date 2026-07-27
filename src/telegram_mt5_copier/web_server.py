@@ -6,6 +6,7 @@ import secrets
 import sys
 from urllib.parse import parse_qs, urlsplit
 
+from .admin_panel import AdminPanelService, render_admin_panel, render_admin_script
 from .config import AppConfig
 from .credential_service import CredentialService
 from .mt5.account_service import MT5AccountService
@@ -23,6 +24,7 @@ from .web_app import (
 
 class OnboardingHandler(BaseHTTPRequestHandler):
     onboarding: MT5OnboardingService
+    admin_panel: AdminPanelService
     csrf: CSRFTokenService
     bot_token: str
 
@@ -44,6 +46,14 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         if path == "/miniapp.js":
             self.send_javascript(render_miniapp_script())
             return
+        if path == "/admin.js":
+            self.send_javascript(render_admin_script())
+            return
+        if path == "/admin":
+            safe_log("admin_page_loaded")
+            script_nonce = generate_script_nonce()
+            self.send_html(render_admin_panel(script_nonce), script_nonce=script_nonce)
+            return
         if path != "/":
             self.send_error(404)
             return
@@ -63,6 +73,14 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         if path == "/miniapp.js":
             self.send_javascript(render_miniapp_script(), head_only=True)
             return
+        if path == "/admin.js":
+            self.send_javascript(render_admin_script(), head_only=True)
+            return
+        if path == "/admin":
+            safe_log("admin_page_loaded")
+            script_nonce = generate_script_nonce()
+            self.send_html(render_admin_panel(script_nonce), script_nonce=script_nonce, head_only=True)
+            return
         if path != "/":
             self.send_error(404)
             return
@@ -71,6 +89,7 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         self.send_html(render_onboarding_form(script_nonce), script_nonce=script_nonce, head_only=True)
 
     def do_POST(self) -> None:
+        path = ""
         try:
             path = self.route_path()
             length = int(self.headers.get("Content-Length", "0"))
@@ -85,10 +104,24 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             if path in {"/api/connect", "/connect"}:
                 self.handle_connect(fields)
                 return
+            if path == "/api/admin/session":
+                self.handle_admin_session(fields)
+                return
+            if path == "/api/admin/user-status":
+                self.handle_admin_user_status(fields)
+                return
             self.send_error(404)
         except WebAppValidationError as exc:
             safe_log("validation_rejected", reason=safe_reason(str(exc)))
-            self.send_json({"ok": False, "error": "Não foi possível validar sua sessão do Telegram."}, status=403)
+            error = (
+                "Acesso administrativo não autorizado."
+                if path.startswith("/api/admin/")
+                else "Não foi possível validar sua sessão do Telegram."
+            )
+            self.send_json({"ok": False, "error": error}, status=403)
+        except ValueError as exc:
+            safe_log("api_rejected", endpoint=safe_endpoint(path), reason=safe_reason(str(exc)))
+            self.send_json({"ok": False, "error": str(exc)}, status=400)
         except Exception as exc:
             safe_log("api_error", error_type=type(exc).__name__)
             self.send_json({"ok": False, "error": "Falha ao processar solicitacao."}, status=500)
@@ -131,6 +164,43 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         has_init_data = "presente" if fields.get("has_init_data") == "true" else "ausente"
         safe_log(event, init_data=has_init_data, endpoint=safe_endpoint(fields.get("endpoint", "")))
         self.send_json({"ok": True})
+
+    def handle_admin_session(self, fields: dict[str, str]) -> None:
+        identity = self.admin_panel.authenticate(fields.get("init_data", ""))
+        payload = self.admin_panel.dashboard()
+        payload.update(
+            {
+                "ok": True,
+                "csrf_token": self.csrf.issue(identity.telegram_user_id),
+                "admin": {
+                    "telegram_user_id": identity.telegram_user_id,
+                    "username": identity.username,
+                },
+            }
+        )
+        safe_log("admin_session_accepted", user_id=str(identity.telegram_user_id))
+        self.send_json(payload)
+
+    def handle_admin_user_status(self, fields: dict[str, str]) -> None:
+        identity = self.admin_panel.authenticate(fields.get("init_data", ""))
+        if not self.csrf.validate(fields.get("csrf_token", ""), identity.telegram_user_id):
+            raise WebAppValidationError("CSRF invalido.")
+        try:
+            target_user_id = int(fields.get("user_id", ""))
+        except ValueError as exc:
+            raise ValueError("Cliente inválido.") from exc
+        result = self.admin_panel.set_user_status(
+            admin_telegram_user_id=identity.telegram_user_id,
+            target_user_id=target_user_id,
+            status=fields.get("status", ""),
+        )
+        safe_log(
+            "admin_user_status_changed",
+            admin_id=str(identity.telegram_user_id),
+            target_id=str(target_user_id),
+            status=str(result["status"]),
+        )
+        self.send_json({"ok": True, "user": result})
 
     def route_path(self) -> str:
         return urlsplit(self.path).path
@@ -212,9 +282,15 @@ def main() -> int:
             csrf=csrf,
             require_https=True,
         )
+        admin_panel = AdminPanelService(
+            config.database_path,
+            bot_token=config.telegram_bot_token,
+            admin_ids=config.bot_admin_ids,
+        )
         OnboardingHandler.bot_token = config.telegram_bot_token
         OnboardingHandler.csrf = csrf
         OnboardingHandler.onboarding = onboarding
+        OnboardingHandler.admin_panel = admin_panel
 
         server = ThreadingHTTPServer(("127.0.0.1", 8080), OnboardingHandler)
         print("Mini App MT5 ouvindo em http://127.0.0.1:8080. Publique atras de HTTPS.")
@@ -286,7 +362,8 @@ def safe_frontend_event(value: str) -> str:
 
 
 def safe_endpoint(value: str) -> str:
-    return value if value in {"csrf", "connect"} else ""
+    allowed = {"csrf", "connect", "/api/admin/session", "/api/admin/user-status"}
+    return value if value in allowed else ""
 
 
 def generate_script_nonce() -> str:

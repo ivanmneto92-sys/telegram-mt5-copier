@@ -60,6 +60,32 @@ No Windows, use:
 .\.venv\Scripts\python.exe -m telegram_mt5_copier --telegram-login
 ```
 
+## Painel administrativo
+
+Quando `BOT_ADMIN_IDS` e `MT5_ONBOARDING_URL` estão configurados, o menu do bot
+exibe o botão **Painel Admin** exclusivamente para os IDs autorizados. O painel
+abre como Telegram Mini App em `/admin`, valida o `initData` assinado pelo
+Telegram e aplica a allowlist no servidor.
+
+Nesta primeira versão, o admin master pode:
+
+- consultar totais de clientes ativos, pausados e contas MT5 conectadas;
+- buscar clientes por username, ID Telegram, conta ou servidor;
+- visualizar conta mascarada, saldo, equity, heartbeat e perfil operacional;
+- identificar contas que precisam de atenção;
+- ativar ou pausar clientes com confirmação;
+- registrar cada alteração em `admin_actions`.
+
+Exemplo:
+
+```env
+BOT_ADMIN_IDS=8625829080
+MT5_ONBOARDING_URL=https://institutotrader.online/
+```
+
+O painel não possui login por senha e deve ser aberto pelo botão do bot. A
+autorização é verificada novamente em cada chamada da API.
+
 Informe telefone, codigo recebido e senha de verificacao em duas etapas apenas no prompt interativo. A sessao autenticada fica em `SESSION_DIR` e os arquivos `*.session` ja estao bloqueados no `.gitignore`.
 
 ## 3. Execucao dos testes no Mac

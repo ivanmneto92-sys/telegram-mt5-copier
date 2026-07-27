@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import time
+from urllib.parse import urlsplit, urlunsplit
 
 from .account_service import AccountService
 from .bot_keyboards import (
@@ -74,6 +75,7 @@ from .bot_keyboards import (
     extract_risk_value,
     extract_refresh_screen,
     is_valid_callback_data,
+    main_menu,
     mt5_connect_menu,
     normalize_callback_data,
 )
@@ -598,6 +600,11 @@ class BotService:
         mt5_status = "⚪ Não conectado"
         if mt5_account is not None:
             mt5_status = mt5_account_connection_label(mt5_account.connection_status)
+        admin_url = (
+            admin_panel_url(self.mt5_onboarding_url)
+            if user.telegram_user_id in self.admin_ids
+            else None
+        )
         return BotResponse(
             "\n".join(
                 [
@@ -613,7 +620,7 @@ class BotService:
                     "bot privado de gestão.",
                 ]
             ),
-            MAIN_MENU,
+            main_menu(admin_url),
             screen="main",
         )
 
@@ -921,6 +928,17 @@ def status_labels(status: str) -> tuple[str, str]:
     if status == USER_STATUS_ACTIVE:
         return "🟢 Ativo", "▶️ Liberadas"
     return "🟡 Pausado", "⏸️ Bloqueadas"
+
+
+def admin_panel_url(onboarding_url: str | None) -> str | None:
+    if not onboarding_url:
+        return None
+    parsed = urlsplit(onboarding_url)
+    if parsed.scheme != "https" or not parsed.netloc:
+        return None
+    path = parsed.path.rstrip("/")
+    path = f"{path}/admin" if path else "/admin"
+    return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, ""))
 
 
 def connection_label(status: str) -> str:
