@@ -8,10 +8,10 @@ import time
 from urllib.parse import urlsplit, urlunsplit
 
 from .account_service import AccountService
+from .access_control import ACCESS_EXPIRED, paid_access_decision
 from .admin_auth import AdminBrowserAuthService
 from .bot_keyboards import (
     ACCOUNT_MENU,
-    ACTIVATED_MENU,
     CB_ACCOUNT,
     CB_ADMIN_BROWSER_ACCESS,
     CB_ACTIVATE,
@@ -48,7 +48,6 @@ from .bot_keyboards import (
     CB_PROTECTIONS,
     CB_RISK,
     CB_SIGNAL_EXECUTION,
-    CONFIRM_ACTIVATE,
     CONFIRM_PAUSE,
     CONFIRM_REMOVE_MT5,
     CONNECTION_MENU,
@@ -411,17 +410,17 @@ class BotService:
             return BotResponse(
                 "\n".join(
                     [
-                        "▶️ ATIVAR COPIADOR",
+                        "🔐 ATIVAÇÃO DO COPIADOR",
                         "",
-                        "Ao confirmar, o sistema ficará autorizado a receber novos sinais e criar novas operações quando o MT5 estiver conectado.",
+                        "Sua conta MT5 pode ser conectada e configurada normalmente.",
                         "",
-                        "Confirme para continuar.",
+                        "A liberação dos sinais é feita pelo administrador após a confirmação do pagamento e da data de validade.",
                         "",
-                        "Deseja continuar?",
+                        "Quando o acesso for aprovado, o status aparecerá como ativo automaticamente.",
                     ]
                 ),
-                CONFIRM_ACTIVATE,
-                screen="confirm_activate",
+                MAIN_MENU,
+                screen="activation_pending",
             )
         if callback == CB_PAUSE:
             return BotResponse(
@@ -453,26 +452,18 @@ class BotService:
                 screen="mt5_connect",
             )
         if callback == CB_CONFIRM_ACTIVATE:
-            self.users.set_status(user.id, USER_STATUS_ACTIVE)
-            self._log_admin_if_needed(telegram_user_id, user.id, "activate")
-            account = self.mt5_accounts.first_account(user.id)
-            mt5_status = mt5_account_connection_label(account.connection_status) if account else "⚪ Não conectado"
             return BotResponse(
                 "\n".join(
                     [
-                        "✅ COPIADOR ATIVADO",
+                        "🔐 APROVAÇÃO NECESSÁRIA",
                         "",
-                        "Copiador ativado com sucesso.",
+                        "A ativação direta pelo cliente foi desabilitada.",
                         "",
-                        "Novos sinais estão liberados.",
-                        "",
-                        f"MetaTrader 5: {mt5_status}",
-                        "",
-                        "A configuração foi salva. Novos sinais seguirão o perfil operacional configurado.",
+                        "O administrador precisa registrar o pagamento, definir a validade e aprovar seu acesso.",
                     ]
                 ),
-                ACTIVATED_MENU,
-                screen="activated",
+                MAIN_MENU,
+                screen="activation_pending",
             )
         if callback == CB_CONFIRM_PAUSE:
             self.users.set_status(user.id, USER_STATUS_PAUSED)
@@ -630,7 +621,7 @@ class BotService:
 
     def _main_panel(self, user: User, first_name: str | None = None) -> BotResponse:
         name = first_name or user.telegram_username or "trader"
-        status_label, operations_label = status_labels(user.status)
+        status_label, operations_label = self._status_labels(user)
         mt5_account = self.mt5_accounts.first_account(user.id)
         mt5_status = "⚪ Não conectado"
         if mt5_account is not None:
@@ -660,7 +651,7 @@ class BotService:
         )
 
     def _account_screen(self, user: User) -> BotResponse:
-        status_label, _operations_label = status_labels(user.status)
+        status_label, _operations_label = self._status_labels(user)
         account = self.mt5_accounts.first_account(user.id)
         connection_status = "⚪ Não conectado"
         balance = "Aguardando conexão"
@@ -898,7 +889,7 @@ class BotService:
         if account is None:
             return self._connect_mt5_screen()
 
-        status_label, operations_label = status_labels(user.status)
+        status_label, operations_label = self._status_labels(user)
         error_lines = ["", f"Erro: {account.last_error}"] if account.last_error else []
         return BotResponse(
             "\n".join(
@@ -947,6 +938,16 @@ class BotService:
             SIGNAL_EXECUTION_MENU,
             screen="signal_execution",
         )
+
+    def _status_labels(self, user: User) -> tuple[str, str]:
+        if user.status != USER_STATUS_ACTIVE:
+            return "🟡 Aguardando aprovação", "⏸️ Bloqueadas"
+        access = paid_access_decision(self.database_path, user.id)
+        if access.allowed:
+            return "🟢 Ativo", "▶️ Liberadas"
+        if access.reason == ACCESS_EXPIRED:
+            return "🔴 Acesso expirado", "⏸️ Bloqueadas"
+        return "🟡 Aguardando aprovação", "⏸️ Bloqueadas"
 
     def _log_admin_if_needed(self, telegram_user_id: int, target_user_id: int, action_type: str) -> None:
         if telegram_user_id not in self.admin_ids:

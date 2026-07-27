@@ -82,6 +82,8 @@ O admin master pode:
 - identificar pagamentos em dia, vencimentos próximos e clientes em atraso;
 - registrar pagamentos manualmente, avançar o próximo vencimento e consultar o
   histórico das últimas cobranças;
+- aprovar o acesso somente ao registrar o valor pago e a data de validade;
+- bloquear automaticamente novas entradas quando a validade terminar;
 - visualizar a receita mensal cadastrada;
 - registrar cada alteração em `admin_actions`.
 
@@ -96,6 +98,12 @@ O painel não possui senha estática. O acesso pelo Telegram ou pelo link
 temporário do bot é verificado novamente em cada chamada da API. Nesta versão,
 os pagamentos são registrados manualmente pelo admin; integração automática
 com PIX/cartão depende da escolha futura do provedor de pagamento.
+
+Uma conta MT5 recém-conectada permanece aguardando aprovação. O cliente não
+consegue se autoativar pelo bot. Somente o admin pode liberar sinais, registrando
+o pagamento e definindo a data final do acesso. Depois do vencimento, a conta é
+retirada da seleção de novos sinais; o Worker MT5 continua disponível para
+acompanhar operações que já existiam.
 
 Informe telefone, codigo recebido e senha de verificacao em duas etapas apenas no prompt interativo. A sessao autenticada fica em `SESSION_DIR` e os arquivos `*.session` ja estao bloqueados no `.gitignore`.
 

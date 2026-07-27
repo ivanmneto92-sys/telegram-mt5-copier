@@ -19,6 +19,7 @@ from telegram_mt5_copier.mt5.models import ENTRY_PRICE_MIDDLE
 from telegram_mt5_copier.mt5.terminal_manager import TerminalManager
 from telegram_mt5_copier.settings_service import SettingsService
 from telegram_mt5_copier.users import USER_STATUS_ACTIVE, USER_STATUS_PAUSED, UserRepository
+from tests.access_helpers import grant_paid_access
 
 
 class BotManagementTests(unittest.TestCase):
@@ -45,7 +46,7 @@ class BotManagementTests(unittest.TestCase):
         self.assertEqual(user.status, USER_STATUS_PAUSED)
         self.assertIsNotNone(self.settings.get_settings(user.id))
 
-    def test_ativar_exige_confirmacao_e_depois_ativa(self) -> None:
+    def test_cliente_nao_consegue_se_autoativar(self) -> None:
         self.service.start(101, "alice")
 
         confirm_response = self.service.handle_callback(101, "alice", "confirm:activate")
@@ -53,14 +54,15 @@ class BotManagementTests(unittest.TestCase):
         action_response = self.service.handle_callback(101, "alice", "action:activate:confirm")
         user_after_confirm = self.users.get_by_telegram_user_id(101)
 
-        self.assertIn("Confirme", confirm_response.text)
+        self.assertIn("administrador", confirm_response.text)
         self.assertEqual(user_after_prompt.status, USER_STATUS_PAUSED)
-        self.assertIn("ativado", action_response.text)
-        self.assertEqual(user_after_confirm.status, USER_STATUS_ACTIVE)
+        self.assertIn("APROVAÇÃO NECESSÁRIA", action_response.text)
+        self.assertEqual(user_after_confirm.status, USER_STATUS_PAUSED)
 
     def test_pausar(self) -> None:
         self.service.start(101, "alice")
-        self.service.handle_callback(101, "alice", "action:activate:confirm")
+        user = self.users.get_by_telegram_user_id(101)
+        grant_paid_access(self.database_path, user.id)
 
         response = self.service.handle_callback(101, "alice", "action:pause:confirm")
         user = self.users.get_by_telegram_user_id(101)
@@ -141,12 +143,13 @@ class BotManagementTests(unittest.TestCase):
 
         self.assertIn("🤖 INSTITUTO TRADER", response.text)
         self.assertIn("Olá, Alice!", response.text)
-        self.assertIn("Status do copiador: 🟡 Pausado", response.text)
+        self.assertIn("Status do copiador: 🟡 Aguardando aprovação", response.text)
         self.assertIn("Novas operações: ⏸️ Bloqueadas", response.text)
 
     def test_painel_ativo(self) -> None:
         self.service.start(101, "alice", "Alice")
-        self.service.handle_callback(101, "alice", "v1:act:ok")
+        user = self.users.get_by_telegram_user_id(101)
+        grant_paid_access(self.database_path, user.id)
 
         response = self.service.menu(101, "alice", "Alice")
 
@@ -390,14 +393,14 @@ class BotManagementTests(unittest.TestCase):
         self.assertIn("Nenhuma operação do copiador registrada como ativa.", response.text)
         self.assertIn("MetaTrader 5: ⚪ Não conectado", response.text)
 
-    def test_confirmacao_de_ativacao_visual(self) -> None:
+    def test_solicitacao_de_ativacao_explica_aprovacao(self) -> None:
         self.service.start(101, "alice")
 
         response = self.service.handle_callback(101, "alice", "v1:act")
 
-        self.assertIn("▶️ ATIVAR COPIADOR", response.text)
-        self.assertIn("Deseja continuar?", response.text)
-        self.assertIn("✅ Confirmar ativação", [button.text for row in response.keyboard for button in row])
+        self.assertIn("🔐 ATIVAÇÃO DO COPIADOR", response.text)
+        self.assertIn("administrador", response.text)
+        self.assertNotIn("✅ Confirmar ativação", [button.text for row in response.keyboard for button in row])
 
     def test_confirmacao_de_pausa_visual(self) -> None:
         self.service.start(101, "alice")

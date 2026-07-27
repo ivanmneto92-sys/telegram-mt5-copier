@@ -328,6 +328,27 @@ class MiniAppFrontendTests(unittest.TestCase):
             )
             with urlopen(billing_request, timeout=5) as response:
                 billing_payload = json.loads(response.read().decode("utf-8"))
+            approval_request = Request(
+                f"{base_url}/api/admin/approve",
+                data=urlencode(
+                    {
+                        "csrf_token": session_payload["csrf_token"],
+                        "user_id": str(customer.id),
+                        "amount": "149.90",
+                        "paid_at": "2026-07-27",
+                        "method": "PIX",
+                        "reference": "PAG-1",
+                        "expires_on": "2026-08-27",
+                    }
+                ).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Cookie": cookie,
+                },
+                method="POST",
+            )
+            with urlopen(approval_request, timeout=5) as response:
+                approval_payload = json.loads(response.read().decode("utf-8"))
 
         self.assertTrue(login_payload["ok"])
         self.assertTrue(session_payload["ok"])
@@ -337,6 +358,8 @@ class MiniAppFrontendTests(unittest.TestCase):
         self.assertEqual(session_payload["admin"]["telegram_user_id"], 9001)
         self.assertTrue(billing_payload["ok"])
         self.assertEqual(billing_payload["billing"]["monthly_amount"], "149.90")
+        self.assertTrue(approval_payload["ok"])
+        self.assertEqual(approval_payload["approval"]["status"], "active")
 
     def test_navegador_comum_mostra_mensagem_clara(self) -> None:
         html = render_onboarding_form("test-nonce")

@@ -15,6 +15,7 @@ from telegram_mt5_copier.admin_panel import (
 from telegram_mt5_copier.database import connect_database
 from telegram_mt5_copier.users import USER_STATUS_ACTIVE, USER_STATUS_PAUSED, UserRepository
 from telegram_mt5_copier.web_app import WebAppValidationError, build_signed_init_data
+from tests.access_helpers import grant_paid_access
 
 
 class AdminPanelTests(unittest.TestCase):
@@ -97,6 +98,8 @@ class AdminPanelTests(unittest.TestCase):
         self.assertNotIn("encrypted", repr(payload))
 
     def test_alteracao_de_status_fica_auditada(self) -> None:
+        grant_paid_access(self.database_path, self.bob.id)
+        self.users.set_status(self.bob.id, USER_STATUS_PAUSED)
         result = self.service.set_user_status(
             admin_telegram_user_id=9001,
             target_user_id=self.bob.id,
@@ -107,7 +110,11 @@ class AdminPanelTests(unittest.TestCase):
         self.assertEqual(self.users.get_by_id(self.bob.id).status, USER_STATUS_ACTIVE)
         with connect_database(self.database_path) as connection:
             action = connection.execute(
-                "SELECT action_type, admin_telegram_user_id, target_user_id FROM admin_actions"
+                """
+                SELECT action_type, admin_telegram_user_id, target_user_id
+                FROM admin_actions
+                WHERE action_type = 'admin_panel_set_user_status'
+                """
             ).fetchone()
         self.assertEqual(
             tuple(action),
@@ -122,6 +129,31 @@ class AdminPanelTests(unittest.TestCase):
                 status="deleted",
             )
         self.assertEqual(self.users.get_by_id(self.alice.id).status, USER_STATUS_PAUSED)
+
+    def test_aprovacao_exige_pagamento_e_validade(self) -> None:
+        with self.assertRaises(ValueError):
+            self.service.set_user_status(
+                admin_telegram_user_id=9001,
+                target_user_id=self.alice.id,
+                status=USER_STATUS_ACTIVE,
+            )
+
+        result = self.service.approve_paid_access(
+            admin_telegram_user_id=9001,
+            target_user_id=self.alice.id,
+            amount="250.00",
+            paid_at=date.today().isoformat(),
+            method="PIX",
+            reference="PAG-1",
+            expires_on=(date.today() + timedelta(days=30)).isoformat(),
+        )
+        dashboard = self.service.dashboard()
+        alice = next(item for item in dashboard["users"] if item["id"] == self.alice.id)
+
+        self.assertEqual(result["status"], USER_STATUS_ACTIVE)
+        self.assertTrue(alice["access"]["allowed"])
+        self.assertEqual(alice["access"]["amount_paid"], "250.00")
+        self.assertEqual(dashboard["summary"]["approved_accesses"], 1)
 
     def test_cadastro_financeiro_aparece_no_dashboard(self) -> None:
         due_date = (date.today() + timedelta(days=5)).isoformat()
@@ -208,7 +240,7 @@ class AdminPanelTests(unittest.TestCase):
         self.assertIn("/api/admin/session", script)
         self.assertIn("/api/admin/user-status", script)
         self.assertIn("/api/admin/billing-update", script)
-        self.assertIn("/api/admin/payment", script)
+        self.assertIn("/api/admin/approve", script)
         self.assertIn('data-filter="overdue"', html)
         self.assertNotIn("TELEGRAM_BOT_TOKEN", html + script)
 

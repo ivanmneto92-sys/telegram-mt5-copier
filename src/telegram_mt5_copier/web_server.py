@@ -125,6 +125,9 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             if path == "/api/admin/payment":
                 self.handle_admin_payment(fields)
                 return
+            if path == "/api/admin/approve":
+                self.handle_admin_approve(fields)
+                return
             self.send_error(404)
         except WebAppValidationError as exc:
             safe_log("validation_rejected", reason=safe_reason(str(exc)))
@@ -286,6 +289,25 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             target_id=str(target_user_id),
         )
         self.send_json({"ok": True, "payment": result})
+
+    def handle_admin_approve(self, fields: dict[str, str]) -> None:
+        identity = self.authenticate_admin_mutation(fields)
+        target_user_id = parsed_user_id(fields)
+        result = self.admin_panel.approve_paid_access(
+            admin_telegram_user_id=identity.telegram_user_id,
+            target_user_id=target_user_id,
+            amount=fields.get("amount", ""),
+            paid_at=fields.get("paid_at", ""),
+            method=fields.get("method", ""),
+            reference=fields.get("reference", ""),
+            expires_on=fields.get("expires_on", ""),
+        )
+        safe_log(
+            "admin_access_approved",
+            admin_id=str(identity.telegram_user_id),
+            target_id=str(target_user_id),
+        )
+        self.send_json({"ok": True, "approval": result})
 
     def authenticate_admin_mutation(self, fields: dict[str, str]) -> AdminIdentity:
         identity = self.authenticate_admin(fields)
@@ -496,6 +518,7 @@ def safe_endpoint(value: str) -> str:
         "/api/admin/user-status",
         "/api/admin/billing-update",
         "/api/admin/payment",
+        "/api/admin/approve",
     }
     return value if value in allowed else ""
 

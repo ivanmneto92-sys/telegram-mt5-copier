@@ -33,6 +33,7 @@ from telegram_mt5_copier.mt5.terminal_manager import TerminalManager
 from telegram_mt5_copier.mt5.volume_allocator import VolumeAllocationError, allocate_volume
 from telegram_mt5_copier.parser import parse_signal_text
 from telegram_mt5_copier.users import USER_STATUS_ACTIVE, UserRepository
+from tests.access_helpers import grant_paid_access
 
 
 BUY_SIGNAL = """XAUUSD BUY
@@ -116,7 +117,7 @@ class PendingOrderTests(unittest.TestCase):
             client_factory=lambda: SimulatedMT5Client(),
         )
         self.user = self.users.get_or_create_user(101, "alice")
-        self.users.set_status(self.user.id, USER_STATUS_ACTIVE)
+        grant_paid_access(self.database_path, self.user.id)
         self.account = self.accounts.register_account(
             self.user.id,
             MT5AccountForm("Broker", "Broker-Demo", "12345678", "secret", "Demo"),
@@ -386,6 +387,19 @@ class PendingOrderTests(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].account.user_id, self.user.id)
 
+    def test_acesso_expirado_bloqueia_novos_sinais_sem_desligar_worker(self) -> None:
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                "UPDATE customer_billing SET due_date = '2020-01-01' WHERE user_id = ?",
+                (self.user.id,),
+            )
+
+        results = self.executor().execute_for_signal(parse_signal_text(BUY_SIGNAL).signal)
+
+        self.assertEqual(results, [])
+        self.assertEqual(len(self.accounts.accounts_for_approved_users()), 0)
+        self.assertEqual(len(self.accounts.accounts_for_active_users()), 1)
+
     def test_kill_switch_bloqueia_execucao_demo(self) -> None:
         client = SimulatedMT5Client()
         result = self.executor(
@@ -627,7 +641,7 @@ class PendingOrderTests(unittest.TestCase):
 
     def test_isolamento_entre_usuarios(self) -> None:
         bob = self.users.get_or_create_user(202, "bob")
-        self.users.set_status(bob.id, USER_STATUS_ACTIVE)
+        grant_paid_access(self.database_path, bob.id)
         bob_account = self.accounts.register_account(
             bob.id,
             MT5AccountForm("Broker", "Broker-Demo", "223344", "secret", "Bob"),

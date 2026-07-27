@@ -7,6 +7,11 @@ from decimal import Decimal
 from html import escape
 from pathlib import Path
 
+from .access_control import (
+    ACCESS_EXPIRED,
+    AccessDecision,
+    paid_access_decision,
+)
 from .database import connect_database, initialize_database
 from .mt5.models import mask_login
 from .users import USER_STATUS_ACTIVE, USER_STATUS_PAUSED, UserRepository
@@ -166,6 +171,10 @@ class AdminPanelService:
                     billing_summary["due_soon"] += 1
             if status not in {"exempt", "cancelled"}:
                 billing_summary["monthly_total"] += Decimal(str(billing["monthly_amount"]))
+            access = paid_access_decision(self.database_path, int(user["id"]), today=today)
+            user["access"] = access_payload(access, str(user["status"]))
+
+        approved_accesses = sum(1 for user in users if user["access"]["allowed"])
 
         return {
             "summary": {
@@ -175,6 +184,7 @@ class AdminPanelService:
                 "connected_accounts": int(connected_accounts or 0),
                 "attention_accounts": int(attention_accounts or 0),
                 "active_groups": int(active_groups or 0),
+                "approved_accesses": approved_accesses,
                 "billing_paid": int(billing_summary["paid"]),
                 "billing_pending": int(billing_summary["pending"]),
                 "billing_overdue": int(billing_summary["overdue"]),
@@ -194,6 +204,11 @@ class AdminPanelService:
     ) -> dict[str, object]:
         if status not in {USER_STATUS_ACTIVE, USER_STATUS_PAUSED}:
             raise ValueError("Status de usuário inválido.")
+        self._require_user(target_user_id)
+        if status == USER_STATUS_ACTIVE:
+            access = paid_access_decision(self.database_path, target_user_id)
+            if not access.allowed:
+                raise ValueError(access_denied_message(access))
         users = UserRepository(self.database_path)
         try:
             target = users.get_by_id(target_user_id)
@@ -213,6 +228,52 @@ class AdminPanelService:
         return {
             "id": updated.id,
             "status": updated.status,
+        }
+
+    def approve_paid_access(
+        self,
+        *,
+        admin_telegram_user_id: int,
+        target_user_id: int,
+        amount: str,
+        paid_at: str,
+        method: str,
+        reference: str,
+        expires_on: str,
+    ) -> dict[str, object]:
+        expiration = validated_date(expires_on, required=True)
+        assert expiration is not None
+        if date.fromisoformat(expiration) < date.today():
+            raise ValueError("A data de expiração não pode estar no passado.")
+        payment = self.record_payment(
+            admin_telegram_user_id=admin_telegram_user_id,
+            target_user_id=target_user_id,
+            amount=amount,
+            paid_at=paid_at,
+            method=method,
+            reference=reference,
+            next_due_date=expiration,
+        )
+        user = self.set_user_status(
+            admin_telegram_user_id=admin_telegram_user_id,
+            target_user_id=target_user_id,
+            status=USER_STATUS_ACTIVE,
+        )
+        self._log_admin_action(
+            admin_telegram_user_id,
+            target_user_id,
+            "admin_panel_approve_paid_access",
+            {
+                "amount": payment["amount"],
+                "expires_on": expiration,
+            },
+        )
+        return {
+            "user_id": target_user_id,
+            "status": user["status"],
+            "amount": payment["amount"],
+            "paid_at": payment["paid_at"],
+            "expires_on": expiration,
         }
 
     def update_billing(
@@ -469,6 +530,26 @@ def decimal_text(value: object) -> str | None:
     return format(Decimal(str(value)), "f")
 
 
+def access_payload(access: AccessDecision, user_status: str) -> dict[str, object]:
+    allowed = user_status == USER_STATUS_ACTIVE and access.allowed
+    reason = access.reason
+    if access.allowed and user_status != USER_STATUS_ACTIVE:
+        reason = "user_paused"
+    return {
+        "allowed": allowed,
+        "entitlement_valid": access.allowed,
+        "reason": reason,
+        "expires_on": access.expires_on,
+        "amount_paid": decimal_text(access.amount_paid),
+    }
+
+
+def access_denied_message(access: AccessDecision) -> str:
+    if access.reason == ACCESS_EXPIRED:
+        return "Acesso expirado. Registre um novo pagamento e uma nova validade."
+    return "Registre o valor pago e uma data de validade antes de aprovar o cliente."
+
+
 def validated_amount(value: str, *, allow_zero: bool) -> Decimal:
     try:
         amount = Decimal(value.replace(",", ".").strip())
@@ -710,9 +791,9 @@ def render_admin_panel(script_nonce: str = "") -> str:
             <label>Data do pagamento<input id="paid-at" type="date" required></label>
             <label>Forma de pagamento<input id="payment-method" maxlength="80" placeholder="PIX, cartão, transferência"></label>
             <label>Referência<input id="payment-reference" maxlength="180" placeholder="Comprovante ou observação"></label>
-            <label>Próximo vencimento (opcional)<input id="next-due-date" type="date"></label>
+            <label>Acesso válido até<input id="next-due-date" type="date" required></label>
           </div>
-          <div class="form-actions"><button class="save payment" type="submit">Confirmar pagamento</button></div>
+          <div class="form-actions"><button class="save payment" type="submit">Registrar pagamento e aprovar acesso</button></div>
         </form>
         <section class="form-section">
           <h3>Histórico de pagamentos</h3>
@@ -813,6 +894,7 @@ def render_admin_script() -> str:
     var items = [
       ["Clientes", state.summary.users],
       ["Ativos", state.summary.active],
+      ["Acessos liberados", state.summary.approved_accesses],
       ["MT5 conectadas", state.summary.connected_accounts],
       ["Precisam atenção", state.summary.attention_accounts],
       ["Sinais ativos", state.summary.active_groups],
@@ -855,8 +937,9 @@ def render_admin_script() -> str:
     var account = user.account;
     var profile = user.profile;
     var billing = user.billing || {};
+    var access = user.access || {};
     var nextStatus = user.status === "active" ? "paused" : "active";
-    var actionLabel = nextStatus === "active" ? "Ativar" : "Pausar";
+    var actionLabel = nextStatus === "active" ? (access.entitlement_valid ? "Reativar" : "Aprovar") : "Pausar";
     var accountHtml = account
       ? '<div><div class="account-name">' + esc(account.alias) + ' · ' + esc(account.masked_login) + '</div>' +
         '<div class="detail">' + esc(account.server) + '<br><span class="status ' + esc(account.connection_status) + '">' + esc(statusLabel(account.connection_status)) + '</span>' +
@@ -874,7 +957,15 @@ def render_admin_script() -> str:
       '<span class="account-name">' + esc(billing.customer_name || "Financeiro não cadastrado") + '</span><br>' +
       esc(billing.plan_name || "Mensal") + ' · ' + money(billing.monthly_amount || "0") +
       '<br>Vencimento: ' + dateOnly(billing.due_date) +
-      '<br>Último pagamento: ' + dateOnly(billing.last_paid_at) + '</div>';
+      '<br>Último pagamento: ' + dateOnly(billing.last_paid_at) +
+      ' · ' + money(access.amount_paid) +
+      '<br><strong style="color:' + (access.allowed ? 'var(--green)' : 'var(--red)') + '">' +
+      (access.allowed ? 'Sinais liberados' : 'Sinais bloqueados') + '</strong></div>';
+    var primaryAction = nextStatus === "active" && !access.entitlement_valid
+      ? '<button class="action activate" type="button" data-finance-user="' + esc(user.id) + '">Aprovar</button>'
+      : '<button class="action ' + (nextStatus === "active" ? "activate" : "pause") +
+        '" type="button" data-action-status="' + nextStatus + '" data-user-id="' + esc(user.id) + '">' +
+        actionLabel + '</button>';
     return '<article class="user-card" data-user-id="' + esc(user.id) + '">' +
       '<div class="user-main">' +
         '<div class="identity"><h2>' + esc(user.username ? "@" + user.username : "Cliente #" + user.id) + '</h2>' +
@@ -882,8 +973,7 @@ def render_admin_script() -> str:
           '<span class="status ' + esc(user.status) + '">' + esc(statusLabel(user.status)) + '</span>' + errorHtml +
         '</div>' +
         accountHtml + profileHtml + billingHtml +
-        '<div class="actions"><button class="action ' + (nextStatus === "active" ? "activate" : "pause") +
-          '" type="button" data-action-status="' + nextStatus + '" data-user-id="' + esc(user.id) + '">' + actionLabel + '</button>' +
+        '<div class="actions">' + primaryAction +
           '<button class="action finance" type="button" data-finance-user="' + esc(user.id) + '">Financeiro</button></div>' +
       '</div></article>';
   }
@@ -976,7 +1066,7 @@ def render_admin_script() -> str:
     field("paid-at", todayIso());
     field("payment-method", "");
     field("payment-reference", "");
-    field("next-due-date", "");
+    field("next-due-date", billing.due_date || "");
     var payments = billing.payments || [];
     document.getElementById("payment-history").innerHTML = payments.length
       ? payments.map(function (payment) {
@@ -1011,7 +1101,7 @@ def render_admin_script() -> str:
       paid_at: document.getElementById("paid-at").value,
       method: document.getElementById("payment-method").value,
       reference: document.getElementById("payment-reference").value,
-      next_due_date: document.getElementById("next-due-date").value
+      expires_on: document.getElementById("next-due-date").value
     });
   }
 
@@ -1060,7 +1150,7 @@ def render_admin_script() -> str:
   });
   paymentForm.addEventListener("submit", function (event) {
     event.preventDefault();
-    submitFinance("/api/admin/payment", paymentFields(), paymentForm);
+    submitFinance("/api/admin/approve", paymentFields(), paymentForm);
   });
   logout.addEventListener("click", function () {
     post("/api/admin/logout", authFields({ csrf_token: state.csrf }))

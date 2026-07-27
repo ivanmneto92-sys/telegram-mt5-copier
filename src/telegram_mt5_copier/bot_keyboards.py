@@ -59,7 +59,7 @@ MAIN_MENU: tuple[tuple[Button, ...], ...] = (
         Button("📈 Operações", CB_OPERATIONS),
     ),
     (
-        Button("▶️ Ativar", CB_ACTIVATE),
+        Button("🔐 Solicitar ativação", CB_ACTIVATE),
         Button("⏸️ Pausar", CB_PAUSE),
     ),
     (

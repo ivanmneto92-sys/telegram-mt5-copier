@@ -536,7 +536,17 @@ class MT5AccountService:
                 FROM mt5_accounts a
                 JOIN users u ON u.id = a.user_id
                 JOIN execution_profiles p ON p.user_id = a.user_id AND p.mt5_account_id = a.id
+                JOIN customer_billing b ON b.user_id = a.user_id
                 WHERE u.status = 'active'
+                  AND b.billing_status = 'paid'
+                  AND b.due_date IS NOT NULL
+                  AND date(b.due_date) >= date('now')
+                  AND EXISTS (
+                      SELECT 1 FROM customer_payments cp
+                      WHERE cp.user_id = a.user_id
+                        AND cp.status = 'paid'
+                        AND CAST(cp.amount AS REAL) > 0
+                  )
                   AND a.connection_status = ?
                   AND a.account_type = ?
                   AND p.enabled = 1
@@ -556,7 +566,49 @@ class MT5AccountService:
             results.append((account, profile))
         return results
 
+    def accounts_for_approved_users(self) -> list[tuple[MT5Account, ExecutionProfile]]:
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                """
+                SELECT a.id, a.user_id, a.broker_name, a.server_name, a.login,
+                       a.encrypted_password, a.account_alias, a.terminal_path,
+                       a.account_type, a.connection_status, a.last_error, a.last_connected_at,
+                       a.account_mode, a.balance, a.equity, a.worker_heartbeat_at,
+                       p.enabled, p.risk_mode, p.fixed_lot, p.risk_percent,
+                       p.max_spread_points, p.max_slippage_points, p.daily_profit_target,
+                       p.daily_loss_limit, p.max_open_signals, p.split_tps,
+                       p.breakeven_enabled, p.trailing_enabled, p.entry_execution_mode,
+                       p.entry_price_mode, p.pending_expiration_minutes
+                FROM mt5_accounts a
+                JOIN users u ON u.id = a.user_id
+                JOIN execution_profiles p ON p.user_id = a.user_id AND p.mt5_account_id = a.id
+                JOIN customer_billing b ON b.user_id = a.user_id
+                WHERE u.status = 'active'
+                  AND b.billing_status = 'paid'
+                  AND b.due_date IS NOT NULL
+                  AND date(b.due_date) >= date('now')
+                  AND EXISTS (
+                      SELECT 1 FROM customer_payments cp
+                      WHERE cp.user_id = a.user_id
+                        AND cp.status = 'paid'
+                        AND CAST(cp.amount AS REAL) > 0
+                  )
+                  AND p.enabled = 1
+                ORDER BY a.id ASC
+                """,
+            )
+            try:
+                rows = cursor.fetchall()
+            finally:
+                cursor.close()
+
+        return [
+            (account_from_row(row[:16]), execution_profile_from_row((row[1], row[0], *row[16:])))
+            for row in rows
+        ]
+
     def accounts_for_active_users(self) -> list[tuple[MT5Account, ExecutionProfile]]:
+        """Accounts kept operational for heartbeat and existing-position management."""
         with connect_database(self.database_path) as connection:
             cursor = connection.execute(
                 """
@@ -575,13 +627,12 @@ class MT5AccountService:
                 WHERE u.status = 'active'
                   AND p.enabled = 1
                 ORDER BY a.id ASC
-                """,
+                """
             )
             try:
                 rows = cursor.fetchall()
             finally:
                 cursor.close()
-
         return [
             (account_from_row(row[:16]), execution_profile_from_row((row[1], row[0], *row[16:])))
             for row in rows

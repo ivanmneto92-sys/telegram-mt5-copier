@@ -17,6 +17,7 @@ from telegram_mt5_copier.mt5.terminal_manager import TerminalManager
 from telegram_mt5_copier.parser import parse_signal_text
 from telegram_mt5_copier.settings_service import SettingsService
 from telegram_mt5_copier.users import USER_STATUS_ACTIVE, UserRepository
+from tests.access_helpers import grant_paid_access
 
 
 class SQLiteLifecycleTests(unittest.TestCase):
@@ -88,7 +89,7 @@ class SQLiteLifecycleTests(unittest.TestCase):
 
         try:
             user = users.get_or_create_user(101, "alice")
-            users.set_status(user.id, USER_STATUS_ACTIVE)
+            grant_paid_access(db_path, user.id)
             account = accounts.register_account(
                 user.id,
                 MT5AccountForm("Broker", "Broker-Demo", "12345678", "secret", "Demo"),

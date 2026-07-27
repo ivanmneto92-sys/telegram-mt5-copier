@@ -25,6 +25,7 @@ from telegram_mt5_copier.web_app import (
     build_signed_init_data,
     validate_telegram_web_app_init_data,
 )
+from tests.access_helpers import grant_paid_access
 
 
 BUY_SIGNAL = """XAUUSD BUY
@@ -342,7 +343,7 @@ class MT5OnboardingTests(unittest.TestCase):
 
     def test_execucao_simulada_divide_tps(self) -> None:
         user = self.create_user()
-        self.users.set_status(user.id, USER_STATUS_ACTIVE)
+        grant_paid_access(self.database_path, user.id)
         account = self.create_account(user.id)
         self.accounts.update_execution_profile_fixed_lot(user.id, account.id, Decimal("0.04"))
         signal = parse_signal_text(BUY_SIGNAL).signal
@@ -362,7 +363,7 @@ class MT5OnboardingTests(unittest.TestCase):
 
     def test_lote_invalido_e_rejeitado(self) -> None:
         user = self.create_user()
-        self.users.set_status(user.id, USER_STATUS_ACTIVE)
+        grant_paid_access(self.database_path, user.id)
         account = self.create_account(user.id)
         self.accounts.update_execution_profile_fixed_lot(user.id, account.id, Decimal("0.03"))
         signal = parse_signal_text(BUY_SIGNAL).signal
@@ -380,7 +381,7 @@ class MT5OnboardingTests(unittest.TestCase):
 
     def test_sinal_duplicado_nao_cria_novas_execucoes(self) -> None:
         user = self.create_user()
-        self.users.set_status(user.id, USER_STATUS_ACTIVE)
+        grant_paid_access(self.database_path, user.id)
         account = self.create_account(user.id)
         self.accounts.update_execution_profile_fixed_lot(user.id, account.id, Decimal("0.04"))
         signal = parse_signal_text(BUY_SIGNAL).signal
