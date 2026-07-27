@@ -9,6 +9,7 @@ from typing import Any, Awaitable, Callable
 from urllib import parse, request
 
 from .config import AppConfig
+from .channel_catalog import ChannelCatalogService
 from .database import (
     SIGNAL_MONITOR_SERVICE_NAME,
     SignalDatabase,
@@ -97,7 +98,7 @@ class SignalProcessor:
             return validation_decision
 
         signal = validation_decision.signal
-        if self.database.has_duplicate(signal.content_signature):
+        if self.database.has_duplicate(signal.content_signature, signal.source_chat_id):
             duplicate_decision = ProcessingDecision(DecisionStatus.IGNORED, "duplicate_signal", signal=signal)
             self.database.record_event(duplicate_decision.status, duplicate_decision.reason, signal=signal)
             self.logger.info("%s: %s", duplicate_decision.status.value, duplicate_decision.reason)
@@ -164,6 +165,7 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
 
     database = SignalDatabase(config.database_path)
     database.initialize()
+    channel_catalog = ChannelCatalogService(config.database_path)
     publisher = TelegramPublisher(config, logger)
     pending_order_executor = None
     if config.mt5_execution_mode in {"simulation", "demo_execution", "live_execution"}:
@@ -220,10 +222,22 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
             return 2
 
         source_entities = await resolve_source_chats(client, config.source_chat_ids, logger)
+        for source_chat_id, entity in zip(config.source_chat_ids, source_entities):
+            snapshot = await inspect_source_entity(client, entity)
+            channel_catalog.register_configured_channel(
+                telegram_chat_id=source_chat_id,
+                title=telegram_entity_title(entity),
+                username=getattr(entity, "username", None),
+                content_protected=bool(getattr(entity, "noforwards", False)),
+                history_accessible=bool(snapshot["history_accessible"]),
+                last_message_id=snapshot["last_message_id"],
+            )
 
-        @client.on(events.NewMessage(chats=source_entities))
+        @client.on(events.NewMessage())
         async def handle_new_message(event: Any) -> None:
             incoming = incoming_from_telethon_event(event)
+            if not channel_catalog.is_active_chat(incoming.source_chat_id):
+                return
             log_incoming_message(logger, incoming, edited=False)
             if telegram_event_is_stale(event, edited=False):
                 database.record_event(
@@ -235,9 +249,11 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
                 return
             await processor.process(incoming, client=client)
 
-        @client.on(events.MessageEdited(chats=source_entities))
+        @client.on(events.MessageEdited())
         async def handle_edited_message(event: Any) -> None:
             incoming = incoming_from_telethon_event(event)
+            if not channel_catalog.is_active_chat(incoming.source_chat_id):
+                return
             log_incoming_message(logger, incoming, edited=True)
             if telegram_event_is_stale(event, edited=True):
                 database.record_event(
@@ -266,14 +282,22 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
                 is_connected=client.is_connected,
             )
         )
+        validation_task = asyncio.create_task(
+            run_channel_validation_loop(client, channel_catalog, logger)
+        )
         logger.info("Monitoramento Telegram iniciado. DRY_RUN=%s", str(config.dry_run).lower())
         try:
             await client.run_until_disconnected()
             return 0
         finally:
             heartbeat_task.cancel()
+            validation_task.cancel()
             try:
                 await heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            try:
+                await validation_task
             except asyncio.CancelledError:
                 pass
     finally:
@@ -295,14 +319,9 @@ async def resolve_source_chat(client: Any, source_chat_id: str, logger: logging.
             "Confirme o ID e se a conta da sessão participa do canal."
         ) from exc
 
-    latest_message_id: int | str = "nenhuma"
-    history_access = "sim"
-    try:
-        messages = await client.get_messages(entity, limit=1)
-        if messages:
-            latest_message_id = getattr(messages[0], "id", "desconhecida")
-    except Exception:
-        history_access = "não"
+    snapshot = await inspect_source_entity(client, entity)
+    latest_message_id = snapshot["last_message_id"]
+    history_access = "sim" if snapshot["history_accessible"] else "não"
 
     logger.info(
         "Canal de origem validado. nome=%s id=%s tipo=%s conteudo_protegido=%s "
@@ -315,6 +334,21 @@ async def resolve_source_chat(client: Any, source_chat_id: str, logger: logging.
         latest_message_id,
     )
     return entity
+
+
+async def inspect_source_entity(client: Any, entity: Any) -> dict[str, object]:
+    latest_message_id: int | str = "nenhuma"
+    history_accessible = True
+    try:
+        messages = await client.get_messages(entity, limit=1)
+        if messages:
+            latest_message_id = getattr(messages[0], "id", "desconhecida")
+    except Exception:
+        history_accessible = False
+    return {
+        "history_accessible": history_accessible,
+        "last_message_id": latest_message_id,
+    }
 
 
 async def resolve_source_chats(
@@ -386,6 +420,66 @@ async def run_signal_monitor_heartbeat(
         except Exception as exc:
             logger.error("Falha ao registrar heartbeat do monitor de sinais: %s", exc)
         await asyncio.sleep(interval_seconds)
+
+
+async def run_channel_validation_loop(
+    client: Any,
+    catalog: ChannelCatalogService,
+    logger: logging.Logger,
+    *,
+    interval_seconds: int = 30,
+) -> None:
+    while True:
+        try:
+            await validate_pending_channels_once(client, catalog, logger)
+        except Exception as exc:
+            logger.error("Falha ao validar canais sugeridos: %s", exc)
+        await asyncio.sleep(interval_seconds)
+
+
+async def validate_pending_channels_once(
+    client: Any,
+    catalog: ChannelCatalogService,
+    logger: logging.Logger,
+) -> None:
+    for request_item in await asyncio.to_thread(catalog.pending_validations):
+        normalized_key = str(request_item["normalized_key"])
+        username = str(request_item["username"])
+        try:
+            entity = await client.get_entity(username)
+            if bool(getattr(entity, "left", False)):
+                catalog.mark_awaiting_membership(normalized_key, "monitor_not_member")
+                continue
+            snapshot = await inspect_source_entity(client, entity)
+            if not snapshot["history_accessible"]:
+                catalog.mark_awaiting_membership(normalized_key, "history_not_accessible")
+                continue
+            chat_id = int(getattr(entity, "id"))
+            if chat_id > 0 and (
+                bool(getattr(entity, "broadcast", False))
+                or bool(getattr(entity, "megagroup", False))
+            ):
+                chat_id = int(f"-100{chat_id}")
+            catalog.mark_access_confirmed(
+                normalized_key=normalized_key,
+                telegram_chat_id=chat_id,
+                title=telegram_entity_title(entity),
+                username=getattr(entity, "username", None) or username,
+                content_protected=bool(getattr(entity, "noforwards", False)),
+                history_accessible=True,
+                last_message_id=snapshot["last_message_id"],
+            )
+            logger.info(
+                "Canal sugerido pronto para revisao. nome=%s id=%s",
+                telegram_entity_title(entity),
+                chat_id,
+            )
+        except Exception as exc:
+            await asyncio.to_thread(
+                catalog.mark_awaiting_membership,
+                normalized_key,
+                type(exc).__name__,
+            )
 
 
 def telegram_client_options() -> dict[str, object]:

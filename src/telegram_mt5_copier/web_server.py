@@ -128,6 +128,15 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             if path == "/api/admin/approve":
                 self.handle_admin_approve(fields)
                 return
+            if path == "/api/admin/channel-approve":
+                self.handle_admin_channel_action(fields, "approve")
+                return
+            if path == "/api/admin/channel-reject":
+                self.handle_admin_channel_action(fields, "reject")
+                return
+            if path == "/api/admin/channel-revalidate":
+                self.handle_admin_channel_action(fields, "revalidate")
+                return
             self.send_error(404)
         except WebAppValidationError as exc:
             safe_log("validation_rejected", reason=safe_reason(str(exc)))
@@ -308,6 +317,35 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             target_id=str(target_user_id),
         )
         self.send_json({"ok": True, "approval": result})
+
+    def handle_admin_channel_action(self, fields: dict[str, str], action: str) -> None:
+        identity = self.authenticate_admin_mutation(fields)
+        try:
+            request_id = int(fields.get("request_id", ""))
+        except ValueError as exc:
+            raise ValueError("Solicitação de canal inválida.") from exc
+        if action == "approve":
+            result = self.admin_panel.approve_channel_request(
+                admin_telegram_user_id=identity.telegram_user_id,
+                request_id=request_id,
+            )
+        elif action == "reject":
+            result = self.admin_panel.reject_channel_request(
+                admin_telegram_user_id=identity.telegram_user_id,
+                request_id=request_id,
+                notes=fields.get("notes", ""),
+            )
+        else:
+            result = self.admin_panel.revalidate_channel_request(
+                admin_telegram_user_id=identity.telegram_user_id,
+                request_id=request_id,
+            )
+        safe_log(
+            f"admin_channel_{action}",
+            admin_id=str(identity.telegram_user_id),
+            request_id=str(request_id),
+        )
+        self.send_json({"ok": True, "channel_request": result})
 
     def authenticate_admin_mutation(self, fields: dict[str, str]) -> AdminIdentity:
         identity = self.authenticate_admin(fields)
@@ -519,6 +557,9 @@ def safe_endpoint(value: str) -> str:
         "/api/admin/billing-update",
         "/api/admin/payment",
         "/api/admin/approve",
+        "/api/admin/channel-approve",
+        "/api/admin/channel-reject",
+        "/api/admin/channel-revalidate",
     }
     return value if value in allowed else ""
 

@@ -10,12 +10,25 @@ from urllib.parse import urlsplit, urlunsplit
 from .account_service import AccountService
 from .access_control import ACCESS_EXPIRED, paid_access_decision
 from .admin_auth import AdminBrowserAuthService
+from .channel_catalog import (
+    ChannelCatalogService,
+    REQUEST_APPROVED,
+    REQUEST_AWAITING_MEMBERSHIP,
+    REQUEST_PENDING_ACCESS,
+    REQUEST_READY_REVIEW,
+    extract_channel_toggle,
+)
 from .bot_keyboards import (
     ACCOUNT_MENU,
     CB_ACCOUNT,
     CB_ADMIN_BROWSER_ACCESS,
     CB_ACTIVATE,
     CB_CANCEL,
+    CB_CHANNELS,
+    CB_CHANNEL_ADD,
+    CB_CHANNEL_INFO,
+    CB_CHANNEL_MODE_ALL,
+    CB_CHANNEL_MODE_CUSTOM,
     CB_CONFIRM_ACTIVATE,
     CB_CONFIRM_PAUSE,
     CB_CONNECTION,
@@ -50,6 +63,8 @@ from .bot_keyboards import (
     CB_SIGNAL_EXECUTION,
     CONFIRM_PAUSE,
     CONFIRM_REMOVE_MT5,
+    CHANNEL_MENU,
+    CHANNEL_TEXT_INPUT_MENU,
     CONNECTION_MENU,
     CUSTOM_VALUE_MENU,
     DAILY_LOSS_MENU,
@@ -71,6 +86,7 @@ from .bot_keyboards import (
     ENTRY_PRICE_MENU,
     EXPIRATION_MENU,
     SIGNAL_EXECUTION_MENU,
+    Button,
     extract_fixed_lot,
     extract_custom_value_field,
     extract_risk_value,
@@ -137,6 +153,7 @@ class BotService:
         self.commands = CommandQueue(database_path)
         self.account_service = account_service or AccountService()
         self.mt5_accounts = mt5_account_service or MT5AccountService(database_path)
+        self.channels = ChannelCatalogService(database_path)
         self.database_path = database_path
         self.mt5_onboarding_url = mt5_onboarding_url
         self.admin_ids = set(admin_ids)
@@ -205,6 +222,37 @@ class BotService:
                 "Use os botões do menu para escolher o que deseja configurar.",
                 MAIN_MENU,
             )
+        if field == "channel_link":
+            try:
+                result = self.channels.submit_request(user.id, text)
+            except ValueError as exc:
+                return BotResponse(
+                    f"Não consegui cadastrar esse canal: {exc}\n\nEnvie outro link ou toque em Cancelar.",
+                    CHANNEL_TEXT_INPUT_MENU,
+                    screen="channel_add",
+                )
+            self._pending_custom_values.pop(telegram_user_id, None)
+            if result.status == REQUEST_APPROVED:
+                message = (
+                    f"✅ {result.title} já faz parte do catálogo e foi habilitado para você."
+                )
+            else:
+                message = "\n".join(
+                    [
+                        "✅ SUGESTÃO RECEBIDA",
+                        "",
+                        f"Canal: {result.canonical_link}",
+                        "",
+                        "Agora o administrador vai acessar o canal, analisar o formato dos sinais e confirmar o acesso da conta principal de monitoramento.",
+                        "O canal só será liberado após essa aprovação.",
+                    ]
+                )
+            screen = self._channels_screen(user)
+            return BotResponse(
+                f"{message}\n\n{screen.text}",
+                screen.keyboard,
+                screen="channels",
+            )
         try:
             normalized_value = normalize_custom_numeric_value(text, integer=field in {"max", "spread", "slippage"})
             self._apply_risk_value(user, field, normalized_value)
@@ -258,6 +306,61 @@ class BotService:
 
         if callback == CB_MAIN:
             return self._main_panel(user, first_name=first_name)
+        if callback == CB_CHANNELS:
+            return self._channels_screen(user)
+        if callback == CB_CHANNEL_ADD:
+            self._pending_custom_values[telegram_user_id] = "channel_link"
+            return BotResponse(
+                "\n".join(
+                    [
+                        "➕ SUGERIR CANAL",
+                        "",
+                        "Envie o link público ou @username do canal.",
+                        "",
+                        "Exemplos:",
+                        "https://t.me/NomeDoCanal",
+                        "https://web.telegram.org/k/#@NomeDoCanal",
+                        "@NomeDoCanal",
+                        "",
+                        "⚠️ A conta principal de monitoramento precisa participar do canal. Você apenas sugere; o administrador faz a análise e a aprovação.",
+                        "",
+                        "Links privados devem ser enviados diretamente ao administrador e não ficam armazenados aqui.",
+                    ]
+                ),
+                CHANNEL_TEXT_INPUT_MENU,
+                screen="channel_add",
+            )
+        if callback == CB_CHANNEL_INFO:
+            return BotResponse(
+                "\n".join(
+                    [
+                        "ℹ️ COMO FUNCIONAM OS CANAIS",
+                        "",
+                        "1. Você sugere um canal público.",
+                        "2. O administrador acessa e analisa o formato dos sinais.",
+                        "3. A conta principal do sistema confirma que consegue monitorá-lo.",
+                        "4. Após aprovação, o canal aparece na sua lista.",
+                        "5. Você escolhe seguir todos ou somente canais específicos.",
+                        "",
+                        "A aprovação evita que mensagens incompatíveis gerem operações incorretas.",
+                    ]
+                ),
+                CHANNEL_MENU,
+                screen="channels",
+            )
+        if callback == CB_CHANNEL_MODE_ALL:
+            self.channels.set_selection_mode(user.id, "all")
+            return self._channels_screen(user)
+        if callback == CB_CHANNEL_MODE_CUSTOM:
+            self.channels.set_selection_mode(user.id, "custom")
+            return self._channels_screen(user)
+        channel_id = extract_channel_toggle(callback)
+        if channel_id is not None:
+            try:
+                self.channels.toggle_subscription(user.id, channel_id)
+            except ValueError as exc:
+                return BotResponse(str(exc), CHANNEL_MENU, screen="channels")
+            return self._channels_screen(user)
         if callback == CB_ADMIN_BROWSER_ACCESS:
             if telegram_user_id not in self.admin_ids:
                 return BotResponse("Acesso administrativo não autorizado.", MAIN_MENU)
@@ -617,7 +720,62 @@ class BotService:
             return self._connection_screen(user)
         if screen == "mt5_accounts":
             return self._mt5_accounts_screen(user)
+        if screen == "channels":
+            return self._channels_screen(user)
         return self._main_panel(user, first_name=first_name)
+
+    def _channels_screen(self, user: User) -> BotResponse:
+        overview = self.channels.user_overview(user.id)
+        mode = str(overview["selection_mode"])
+        all_channels = list(overview["channels"])
+        channels = all_channels[:30]
+        requests = list(overview["requests"])
+        channel_lines = ["Nenhum canal aprovado no catálogo."]
+        toggle_rows: list[tuple[Button, ...]] = []
+        if channels:
+            channel_lines = []
+            for channel in channels:
+                enabled = mode == "all" or bool(channel["enabled"])
+                marker = "✅" if enabled else "⚪"
+                channel_lines.append(f"{marker} {channel['title']}")
+                if mode == "custom":
+                    toggle_rows.append(
+                        (
+                            Button(
+                                f"{marker} {channel['title']}"[:55],
+                                f"v1:ch:t:{channel['id']}",
+                            ),
+                        )
+                    )
+        request_lines: list[str] = []
+        if requests:
+            request_lines = ["", "Sugestões em análise:"]
+            request_lines.extend(
+                f"• @{request['username']} — {channel_request_status_label(str(request['status']))}"
+                for request in requests
+            )
+        if len(all_channels) > len(channels):
+            channel_lines.append(
+                f"… e mais {len(all_channels) - len(channels)} canal(is) ativos."
+            )
+        mode_label = "todos os canais aprovados" if mode == "all" else "seleção personalizada"
+        keyboard = tuple(toggle_rows) + CHANNEL_MENU
+        return BotResponse(
+            "\n".join(
+                [
+                    "📻 CANAIS DE SINAIS",
+                    "",
+                    f"Modo atual: {mode_label}",
+                    "",
+                    *channel_lines,
+                    *request_lines,
+                    "",
+                    "Somente canais analisados e aprovados pelo administrador podem gerar operações.",
+                ]
+            ),
+            keyboard,
+            screen="channels",
+        )
 
     def _main_panel(self, user: User, first_name: str | None = None) -> BotResponse:
         name = first_name or user.telegram_username or "trader"
@@ -1134,6 +1292,15 @@ def custom_value_label(field: str, value: str) -> str:
     if field in {"spread", "slippage"}:
         return f"{value} pontos"
     return value
+
+
+def channel_request_status_label(status: str) -> str:
+    return {
+        REQUEST_PENDING_ACCESS: "aguardando verificação",
+        REQUEST_AWAITING_MEMBERSHIP: "aguardando o administrador entrar no canal",
+        REQUEST_READY_REVIEW: "aguardando aprovação do administrador",
+        REQUEST_APPROVED: "aprovado",
+    }.get(status, status)
 
 
 def risk_mode_label(value: str) -> str:

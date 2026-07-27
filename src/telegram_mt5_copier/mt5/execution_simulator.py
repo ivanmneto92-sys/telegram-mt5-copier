@@ -48,7 +48,9 @@ class ExecutionSimulator:
 
     def simulate_for_signal(self, signal: TradeSignal) -> list[SimulationResult]:
         results: list[SimulationResult] = []
-        for account, profile in self.accounts.connected_demo_accounts_for_active_users():
+        for account, profile in self.accounts.connected_demo_accounts_for_active_users(
+            signal.source_chat_id
+        ):
             if self.execution_exists(signal.signature, account.user_id, account.id):
                 results.append(SimulationResult(account=account, executions=(), message="", duplicate=True))
                 continue

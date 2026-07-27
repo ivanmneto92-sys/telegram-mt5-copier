@@ -83,9 +83,9 @@ class PendingOrderExecutor:
     def execute_for_signal(self, signal: TradeSignal) -> list[PendingExecutionResult]:
         results: list[PendingExecutionResult] = []
         candidates = (
-            self.accounts.accounts_for_approved_users()
+            self.accounts.accounts_for_approved_users(signal.source_chat_id)
             if self.execution_mode == "live_execution"
-            else self.accounts.connected_demo_accounts_for_active_users()
+            else self.accounts.connected_demo_accounts_for_active_users(signal.source_chat_id)
         )
         for account, profile in candidates:
             results.append(self.execute_for_account(signal, account, profile))

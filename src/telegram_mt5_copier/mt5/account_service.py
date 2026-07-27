@@ -520,10 +520,17 @@ class MT5AccountService:
             raise ValueError("Campo de risco invalido.")
         return self.update_execution_profile_field(user_id, account_id, field_name, normalized)
 
-    def connected_demo_accounts_for_active_users(self) -> list[tuple[MT5Account, ExecutionProfile]]:
+    def connected_demo_accounts_for_active_users(
+        self,
+        source_chat_id: int | str | None = None,
+    ) -> list[tuple[MT5Account, ExecutionProfile]]:
+        channel_filter = channel_selection_filter_sql() if source_chat_id is not None else ""
+        parameters: tuple[object, ...] = (CONNECTION_STATUS_CONNECTED, ACCOUNT_TYPE_DEMO)
+        if source_chat_id is not None:
+            parameters += (str(source_chat_id),)
         with connect_database(self.database_path) as connection:
             cursor = connection.execute(
-                """
+                f"""
                 SELECT a.id, a.user_id, a.broker_name, a.server_name, a.login,
                        a.encrypted_password, a.account_alias, a.terminal_path,
                        a.account_type, a.connection_status, a.last_error, a.last_connected_at,
@@ -550,9 +557,10 @@ class MT5AccountService:
                   AND a.connection_status = ?
                   AND a.account_type = ?
                   AND p.enabled = 1
+                  {channel_filter}
                 ORDER BY a.id ASC
                 """,
-                (CONNECTION_STATUS_CONNECTED, ACCOUNT_TYPE_DEMO),
+                parameters,
             )
             try:
                 rows = cursor.fetchall()
@@ -566,10 +574,17 @@ class MT5AccountService:
             results.append((account, profile))
         return results
 
-    def accounts_for_approved_users(self) -> list[tuple[MT5Account, ExecutionProfile]]:
+    def accounts_for_approved_users(
+        self,
+        source_chat_id: int | str | None = None,
+    ) -> list[tuple[MT5Account, ExecutionProfile]]:
+        channel_filter = channel_selection_filter_sql() if source_chat_id is not None else ""
+        parameters: tuple[object, ...] = (
+            (str(source_chat_id),) if source_chat_id is not None else ()
+        )
         with connect_database(self.database_path) as connection:
             cursor = connection.execute(
-                """
+                f"""
                 SELECT a.id, a.user_id, a.broker_name, a.server_name, a.login,
                        a.encrypted_password, a.account_alias, a.terminal_path,
                        a.account_type, a.connection_status, a.last_error, a.last_connected_at,
@@ -594,8 +609,10 @@ class MT5AccountService:
                         AND CAST(cp.amount AS REAL) > 0
                   )
                   AND p.enabled = 1
+                  {channel_filter}
                 ORDER BY a.id ASC
                 """,
+                parameters,
             )
             try:
                 rows = cursor.fetchall()
@@ -668,6 +685,29 @@ class MT5AccountService:
     def _require_credentials(self) -> None:
         if self.credential_service is None:
             raise ValueError("MT5_CREDENTIAL_KEY nao configurada.")
+
+
+def channel_selection_filter_sql() -> str:
+    return """
+      AND (
+          COALESCE(
+              (SELECT settings.selection_mode
+               FROM user_channel_settings settings
+               WHERE settings.user_id = a.user_id),
+              'all'
+          ) = 'all'
+          OR EXISTS (
+              SELECT 1
+              FROM user_channel_subscriptions subscription
+              JOIN source_channels channel
+                ON channel.id = subscription.source_channel_id
+              WHERE subscription.user_id = a.user_id
+                AND subscription.enabled = 1
+                AND channel.status = 'active'
+                AND channel.telegram_chat_id = ?
+          )
+      )
+    """
 
 
 def account_from_row(row: tuple[object, ...]) -> MT5Account:

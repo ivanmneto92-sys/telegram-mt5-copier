@@ -13,6 +13,7 @@ from .access_control import (
     paid_access_decision,
 )
 from .database import connect_database, initialize_database
+from .channel_catalog import ChannelCatalogService
 from .mt5.models import mask_login
 from .users import USER_STATUS_ACTIVE, USER_STATUS_PAUSED, UserRepository
 from .web_app import TelegramWebAppInitData, WebAppValidationError, validate_telegram_web_app_init_data
@@ -38,6 +39,7 @@ class AdminPanelService:
         self.bot_token = bot_token
         self.admin_ids = frozenset(admin_ids)
         initialize_database(database_path)
+        self.channels = ChannelCatalogService(database_path)
 
     def authenticate(self, init_data: str) -> AdminIdentity:
         parsed = validate_telegram_web_app_init_data(init_data, self.bot_token)
@@ -175,6 +177,11 @@ class AdminPanelService:
             user["access"] = access_payload(access, str(user["status"]))
 
         approved_accesses = sum(1 for user in users if user["access"]["allowed"])
+        channel_catalog = self.channels.admin_channels()
+        pending_channel_requests = len(channel_catalog["requests"])
+        active_channels = sum(
+            1 for channel in channel_catalog["channels"] if channel["status"] == "active"
+        )
 
         return {
             "summary": {
@@ -191,9 +198,71 @@ class AdminPanelService:
                 "billing_due_soon": int(billing_summary["due_soon"]),
                 "billing_unconfigured": int(billing_summary["unconfigured"]),
                 "monthly_total": decimal_text(billing_summary["monthly_total"]),
+                "active_channels": active_channels,
+                "pending_channel_requests": pending_channel_requests,
             },
             "users": users,
+            "channel_catalog": channel_catalog,
         }
+
+    def approve_channel_request(
+        self,
+        *,
+        admin_telegram_user_id: int,
+        request_id: int,
+    ) -> dict[str, object]:
+        target_user_id = self._channel_request_user_id(request_id)
+        channel_id = self.channels.approve_request(request_id, admin_telegram_user_id)
+        self._log_admin_action(
+            admin_telegram_user_id,
+            target_user_id,
+            "admin_panel_approve_channel",
+            {"request_id": request_id, "channel_id": channel_id},
+        )
+        return {"request_id": request_id, "channel_id": channel_id, "status": "approved"}
+
+    def reject_channel_request(
+        self,
+        *,
+        admin_telegram_user_id: int,
+        request_id: int,
+        notes: str = "",
+    ) -> dict[str, object]:
+        target_user_id = self._channel_request_user_id(request_id)
+        self.channels.reject_request(request_id, notes)
+        self._log_admin_action(
+            admin_telegram_user_id,
+            target_user_id,
+            "admin_panel_reject_channel",
+            {"request_id": request_id, "notes": limited_text(notes, 500)},
+        )
+        return {"request_id": request_id, "status": "rejected"}
+
+    def revalidate_channel_request(
+        self,
+        *,
+        admin_telegram_user_id: int,
+        request_id: int,
+    ) -> dict[str, object]:
+        target_user_id = self._channel_request_user_id(request_id)
+        self.channels.request_revalidation(request_id)
+        self._log_admin_action(
+            admin_telegram_user_id,
+            target_user_id,
+            "admin_panel_revalidate_channel",
+            {"request_id": request_id},
+        )
+        return {"request_id": request_id, "status": "pending_access"}
+
+    def _channel_request_user_id(self, request_id: int) -> int:
+        with connect_database(self.database_path) as connection:
+            row = connection.execute(
+                "SELECT user_id FROM channel_requests WHERE id = ?",
+                (request_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError("Solicitação de canal não encontrada.")
+        return int(row[0])
 
     def set_user_status(
         self,
@@ -665,6 +734,9 @@ def render_admin_panel(script_nonce: str = "") -> str:
     .filter {{ border: 1px solid var(--line); border-radius: 999px; padding: 9px 12px; color: var(--muted); background: transparent; cursor: pointer; white-space: nowrap; }}
     .filter.active {{ color: #06151a; background: var(--cyan); border-color: var(--cyan); font-weight: 800; }}
     .list {{ display: grid; gap: 12px; }}
+    .section-title {{ margin: 32px 0 6px; font-size: 24px; }}
+    .section-copy {{ margin: 0 0 15px; color: var(--muted); }}
+    .channel-card {{ display: grid; grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr) auto; gap: 18px; align-items: center; padding: 18px; border: 1px solid var(--line); border-radius: 18px; background: rgba(13, 27, 46, .94); }}
     .user-card {{ border: 1px solid var(--line); border-radius: 18px; background: rgba(13, 27, 46, .94); box-shadow: var(--shadow); overflow: hidden; }}
     .user-main {{ display: grid; grid-template-columns: minmax(190px, 1.1fr) minmax(190px, 1fr) minmax(180px, .9fr) minmax(180px, .9fr) auto; gap: 18px; align-items: center; padding: 18px; }}
     .identity {{ min-width: 0; }}
@@ -709,6 +781,7 @@ def render_admin_panel(script_nonce: str = "") -> str:
     @media (max-width: 980px) {{
       .summary {{ grid-template-columns: repeat(3, 1fr); }}
       .user-main {{ grid-template-columns: 1fr 1fr; }}
+      .channel-card {{ grid-template-columns: 1fr 1fr; }}
       .actions {{ flex-direction: row; }}
     }}
     @media (max-width: 620px) {{
@@ -718,6 +791,7 @@ def render_admin_panel(script_nonce: str = "") -> str:
       .summary {{ grid-template-columns: repeat(2, 1fr); }}
       .metric {{ padding: 14px; }}
       .user-main {{ grid-template-columns: 1fr; gap: 12px; padding: 15px; }}
+      .channel-card {{ grid-template-columns: 1fr; }}
       .actions {{ width: 100%; }}
       .action {{ flex: 1; }}
       .form-grid {{ grid-template-columns: 1fr; }}
@@ -756,6 +830,9 @@ def render_admin_panel(script_nonce: str = "") -> str:
         </div>
       </div>
       <div class="list" id="user-list"></div>
+      <h2 class="section-title">Canais de sinais</h2>
+      <p class="section-copy">Entre no canal com a conta principal, confira o padrão da mensagem e só então aprove a solicitação.</p>
+      <div class="list" id="channel-list"></div>
     </section>
     <dialog id="finance-dialog">
       <div class="dialog-head">
@@ -811,11 +888,12 @@ def render_admin_script() -> str:
 (function () {
   "use strict";
   var tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
-  var state = { users: [], summary: {}, csrf: "", filter: "all", query: "", busy: false, browser: false };
+  var state = { users: [], summary: {}, channels: { requests: [], channels: [] }, csrf: "", filter: "all", query: "", busy: false, browser: false };
   var notice = document.getElementById("notice");
   var summary = document.getElementById("summary");
   var workspace = document.getElementById("workspace");
   var list = document.getElementById("user-list");
+  var channelList = document.getElementById("channel-list");
   var search = document.getElementById("search");
   var filters = document.getElementById("filters");
   var refresh = document.getElementById("refresh");
@@ -904,6 +982,8 @@ def render_admin_script() -> str:
       ["Vencem em 7 dias", state.summary.billing_due_soon],
       ["Sem financeiro", state.summary.billing_unconfigured],
       ["Receita mensal", money(state.summary.monthly_total)]
+      ,["Canais ativos", state.summary.active_channels]
+      ,["Canais aguardando", state.summary.pending_channel_requests]
     ];
     summary.innerHTML = items.map(function (item) {
       return '<article class="metric"><span>' + esc(item[0]) + '</span><strong>' + esc(item[1] || 0) + '</strong></article>';
@@ -983,9 +1063,47 @@ def render_admin_script() -> str:
     list.innerHTML = visible.length ? visible.map(userCard).join("") : '<div class="empty">Nenhum cliente encontrado neste filtro.</div>';
   }
 
+  function channelRequestStatus(value) {
+    return {
+      pending_access: "Verificação solicitada",
+      awaiting_monitor_membership: "Conta principal ainda não participa",
+      ready_for_admin_review: "Pronto para sua análise"
+    }[value] || value;
+  }
+
+  function renderChannels() {
+    var requests = state.channels.requests || [];
+    var approved = state.channels.channels || [];
+    var requestHtml = requests.map(function (request) {
+      var canApprove = request.status === "ready_for_admin_review";
+      return '<article class="channel-card">' +
+        '<div class="identity"><h2>' + esc(request.title || "@" + request.username) + '</h2>' +
+        '<div class="meta"><a href="' + esc(request.canonical_link) + '" target="_blank" rel="noopener" style="color:var(--cyan)">' +
+        esc(request.canonical_link) + '</a><br>Solicitado por @' + esc(request.telegram_username || request.telegram_user_id) + '</div></div>' +
+        '<div class="detail"><strong>' + esc(channelRequestStatus(request.status)) + '</strong><br>' +
+        'ID: ' + esc(request.telegram_chat_id || "aguardando") + '<br>Histórico: ' +
+        (request.history_accessible ? "acessível" : "não confirmado") + ' · Protegido: ' +
+        (request.content_protected ? "sim" : "não") + '</div>' +
+        '<div class="actions">' +
+        (canApprove ? '<button class="action activate" data-channel-action="approve" data-request-id="' + esc(request.id) + '">Aprovar canal</button>' : '') +
+        '<button class="action finance" data-channel-action="revalidate" data-request-id="' + esc(request.id) + '">Verificar novamente</button>' +
+        '<button class="action pause" data-channel-action="reject" data-request-id="' + esc(request.id) + '">Rejeitar</button>' +
+        '</div></article>';
+    }).join("");
+    var activeHtml = approved.filter(function (channel) { return channel.status === "active"; }).map(function (channel) {
+      return '<article class="channel-card"><div class="identity"><h2>✅ ' + esc(channel.title) + '</h2>' +
+        '<div class="meta">@' + esc(channel.username || "sem username") + ' · ID ' + esc(channel.telegram_chat_id) + '</div></div>' +
+        '<div class="detail">Monitoramento confirmado<br>' + esc(channel.subscriber_count) + ' seleção(ões) personalizadas</div>' +
+        '<div class="status active">Ativo</div></article>';
+    }).join("");
+    channelList.innerHTML = requestHtml + activeHtml ||
+      '<div class="empty">Nenhuma solicitação ou canal cadastrado.</div>';
+  }
+
   function applyDashboard(data) {
     state.users = data.users || [];
     state.summary = data.summary || {};
+    state.channels = data.channel_catalog || { requests: [], channels: [] };
     state.csrf = data.csrf_token || state.csrf;
     state.browser = !tg || !tg.initData;
     logout.hidden = !state.browser;
@@ -994,6 +1112,7 @@ def render_admin_script() -> str:
     workspace.hidden = false;
     renderSummary();
     renderUsers();
+    renderChannels();
   }
 
   function load() {
@@ -1141,6 +1260,26 @@ def render_admin_script() -> str:
     }
     var finance = event.target.closest("[data-finance-user]");
     if (finance) { openFinance(finance.getAttribute("data-finance-user")); }
+  });
+  channelList.addEventListener("click", function (event) {
+    var button = event.target.closest("[data-channel-action]");
+    if (!button || state.busy) { return; }
+    var action = button.getAttribute("data-channel-action");
+    var requestId = button.getAttribute("data-request-id");
+    var question = action === "approve"
+      ? "Você já analisou o formato dos sinais e deseja aprovar este canal?"
+      : action === "reject"
+        ? "Deseja rejeitar esta solicitação?"
+        : "A conta principal já entrou no canal? Deseja verificar novamente?";
+    if (!window.confirm(question)) { return; }
+    state.busy = true;
+    button.disabled = true;
+    post("/api/admin/channel-" + action, authFields({
+      csrf_token: state.csrf,
+      request_id: requestId
+    })).then(reloadDashboard)
+      .catch(function (error) { showError(error.message || "Não foi possível atualizar o canal."); })
+      .finally(function () { state.busy = false; button.disabled = false; });
   });
   refresh.addEventListener("click", load);
   document.getElementById("finance-close").addEventListener("click", function () { dialog.close(); });

@@ -32,13 +32,20 @@ class SignalDatabase:
     def initialize(self) -> None:
         initialize_database(self.database_path)
 
-    def has_duplicate(self, content_signature: str) -> bool:
+    def has_duplicate(
+        self,
+        content_signature: str,
+        source_chat_id: int | str | None = None,
+    ) -> bool:
         cutoff = (datetime.now(tz=timezone.utc) - timedelta(minutes=DUPLICATE_WINDOW_MINUTES)).isoformat()
+        query = "SELECT 1 FROM signals WHERE content_signature = ? AND created_at >= ?"
+        parameters: list[str] = [content_signature, cutoff]
+        if source_chat_id is not None:
+            query += " AND source_chat_id = ?"
+            parameters.append(str(source_chat_id))
+        query += " LIMIT 1"
         with connect_database(self.database_path) as connection:
-            cursor = connection.execute(
-                "SELECT 1 FROM signals WHERE content_signature = ? AND created_at >= ? LIMIT 1",
-                (content_signature, cutoff),
-            )
+            cursor = connection.execute(query, parameters)
             try:
                 return cursor.fetchone() is not None
             finally:
@@ -476,6 +483,59 @@ def initialize_database(database_path: Path) -> None:
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS source_channels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_chat_id TEXT UNIQUE,
+                username TEXT,
+                title TEXT NOT NULL,
+                canonical_link TEXT,
+                status TEXT NOT NULL DEFAULT 'pending_review',
+                access_status TEXT NOT NULL DEFAULT 'pending',
+                content_protected INTEGER NOT NULL DEFAULT 0,
+                history_accessible INTEGER NOT NULL DEFAULT 0,
+                last_message_id TEXT,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                validated_at TEXT,
+                approved_at TEXT,
+                approved_by_admin_id INTEGER
+            );
+
+            CREATE TABLE IF NOT EXISTS channel_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                source_channel_id INTEGER,
+                submitted_link TEXT NOT NULL,
+                normalized_key TEXT NOT NULL,
+                username TEXT,
+                canonical_link TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending_access',
+                admin_notes TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (source_channel_id) REFERENCES source_channels(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS user_channel_settings (
+                user_id INTEGER PRIMARY KEY,
+                selection_mode TEXT NOT NULL DEFAULT 'all',
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS user_channel_subscriptions (
+                user_id INTEGER NOT NULL,
+                source_channel_id INTEGER NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, source_channel_id),
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (source_channel_id) REFERENCES source_channels(id)
+            );
+
             CREATE TABLE IF NOT EXISTS service_heartbeats (
                 service_name TEXT PRIMARY KEY,
                 heartbeat_at TEXT NOT NULL,
@@ -535,6 +595,22 @@ def initialize_database(database_path: Path) -> None:
 
             CREATE INDEX IF NOT EXISTS idx_admin_browser_sessions_expiration
                 ON admin_browser_sessions(expires_at, revoked_at);
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_source_channels_username
+                ON source_channels(username COLLATE NOCASE)
+                WHERE username IS NOT NULL;
+
+            CREATE INDEX IF NOT EXISTS idx_source_channels_status
+                ON source_channels(status, access_status);
+
+            CREATE INDEX IF NOT EXISTS idx_channel_requests_status
+                ON channel_requests(status, normalized_key);
+
+            CREATE INDEX IF NOT EXISTS idx_channel_requests_user
+                ON channel_requests(user_id, created_at);
+
+            CREATE INDEX IF NOT EXISTS idx_user_channel_subscriptions_channel
+                ON user_channel_subscriptions(source_channel_id, enabled);
             """
         )
         cursor.close()

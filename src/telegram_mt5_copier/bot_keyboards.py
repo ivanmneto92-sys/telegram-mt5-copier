@@ -30,6 +30,11 @@ CB_MT5_REMOVE = "v1:mt5:remove"
 CB_MT5_CONFIRM_REMOVE = "v1:mt5:remove:ok"
 CB_SIGNAL_EXECUTION = "v1:ex"
 CB_ADMIN_BROWSER_ACCESS = "v1:admin:pc"
+CB_CHANNELS = "v1:ch"
+CB_CHANNEL_ADD = "v1:ch:add"
+CB_CHANNEL_MODE_ALL = "v1:ch:all"
+CB_CHANNEL_MODE_CUSTOM = "v1:ch:custom"
+CB_CHANNEL_INFO = "v1:ch:info"
 CB_EXEC_ENTRY_MENU = "v1:ex:entry"
 CB_EXEC_ENTRY_PENDING = "v1:ex:entry:pending"
 CB_EXEC_ENTRY_MARKET_ZONE = "v1:ex:entry:zone"
@@ -78,8 +83,24 @@ MAIN_MENU: tuple[tuple[Button, ...], ...] = (
         Button("⚙️ Execução dos sinais", CB_SIGNAL_EXECUTION),
     ),
     (
+        Button("📻 Canais de sinais", CB_CHANNELS),
         Button("📡 Status da conexão", CB_CONNECTION),
     ),
+)
+
+CHANNEL_MENU: tuple[tuple[Button, ...], ...] = (
+    (Button("➕ Sugerir novo canal", CB_CHANNEL_ADD),),
+    (
+        Button("📡 Seguir todos", CB_CHANNEL_MODE_ALL),
+        Button("🎛️ Escolher canais", CB_CHANNEL_MODE_CUSTOM),
+    ),
+    (Button("ℹ️ Como funciona", CB_CHANNEL_INFO),),
+    (Button("🔄 Atualizar", refresh_callback("channels")),),
+    (Button("⬅️ Voltar ao menu", CB_MAIN),),
+)
+
+CHANNEL_TEXT_INPUT_MENU: tuple[tuple[Button, ...], ...] = (
+    (Button("❌ Cancelar", CB_CHANNELS),),
 )
 
 ACCOUNT_MENU: tuple[tuple[Button, ...], ...] = (
@@ -274,6 +295,8 @@ STATIC_CALLBACKS = {
     button.callback_data
     for keyboard in (
         MAIN_MENU,
+        CHANNEL_MENU,
+        CHANNEL_TEXT_INPUT_MENU,
         ACCOUNT_MENU,
         OPERATIONS_MENU,
         RISK_MENU,
@@ -310,6 +333,11 @@ STATIC_CALLBACKS.update(
         CB_MT5_ACCOUNTS,
         CB_SIGNAL_EXECUTION,
         CB_ADMIN_BROWSER_ACCESS,
+        CB_CHANNELS,
+        CB_CHANNEL_ADD,
+        CB_CHANNEL_MODE_ALL,
+        CB_CHANNEL_MODE_CUSTOM,
+        CB_CHANNEL_INFO,
     }
 )
 
@@ -333,8 +361,9 @@ RISK_VALUE_CALLBACK_RE = re.compile(
     r"^v1:r:(?P<field>risk|target|loss|max|spread|slippage):(?P<value>\d+(?:[\.,]\d{1,2})?)$"
 )
 REFRESH_CALLBACK_RE = re.compile(
-    r"^v1:ref:(?P<screen>main|account|operations|risk|protections|history|connection|mt5_accounts)$"
+    r"^v1:ref:(?P<screen>main|account|operations|risk|protections|history|connection|mt5_accounts|channels)$"
 )
+CHANNEL_TOGGLE_CALLBACK_RE = re.compile(r"^v1:ch:t:(?P<channel_id>\d+)$")
 
 
 def normalize_callback_data(callback_data: str) -> str:
@@ -348,6 +377,7 @@ def is_valid_callback_data(callback_data: str) -> bool:
         or bool(FIXED_LOT_CALLBACK_RE.fullmatch(normalized))
         or bool(RISK_VALUE_CALLBACK_RE.fullmatch(normalized))
         or bool(REFRESH_CALLBACK_RE.fullmatch(normalized))
+        or bool(CHANNEL_TOGGLE_CALLBACK_RE.fullmatch(normalized))
     )
 
 

@@ -99,6 +99,34 @@ temporário do bot é verificado novamente em cada chamada da API. Nesta versão
 os pagamentos são registrados manualmente pelo admin; integração automática
 com PIX/cartão depende da escolha futura do provedor de pagamento.
 
+## Catálogo de canais sugeridos pelos clientes
+
+O monitoramento usa uma única conta técnica do Telegram. O cliente não conecta
+a própria sessão e não adiciona canais diretamente à execução. Pelo submenu
+`📻 Canais de sinais`, ele pode enviar `@username`, um link `t.me` público ou um
+link do Telegram Web.
+
+O fluxo de segurança é:
+
+1. o cliente sugere o canal;
+2. o admin entra manualmente no canal com a conta técnica principal;
+3. o monitor confirma a participação e o acesso ao histórico;
+4. o admin analisa se o formato dos sinais é compatível;
+5. o admin aprova o canal no painel;
+6. o cliente escolhe seguir todos os canais aprovados ou apenas canais
+   específicos.
+
+Uma sugestão nunca faz a conta técnica entrar automaticamente em um canal e
+nunca começa a executar ordens antes da aprovação. Links privados de convite
+não são armazenados; devem ser enviados diretamente ao administrador. Os canais
+já informados em `SOURCE_CHAT_IDS` são cadastrados como fontes confiáveis ao
+iniciar o monitor, preservando a configuração existente.
+
+Quando um sinal é aceito, a seleção do canal é aplicada individualmente antes
+da escolha das contas MT5. Clientes no modo personalizado não recebem execução
+de canais desmarcados. O painel administrativo mostra solicitações aguardando a
+entrada da conta principal, canais prontos para análise e canais ativos.
+
 Uma conta MT5 recém-conectada permanece aguardando aprovação. O cliente não
 consegue se autoativar pelo bot. Somente o admin pode liberar sinais, registrando
 o pagamento e definindo a data final do acesso. Depois do vencimento, a conta é
