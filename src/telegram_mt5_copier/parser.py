@@ -17,9 +17,16 @@ OTHER_ASSET_RE = re.compile(
     re.IGNORECASE,
 )
 DIRECTION_RE = re.compile(r"\b(BUY|SELL|COMPRA|VENDA)\b", re.IGNORECASE)
-ENTRY_LABEL_RE = re.compile(r"\b(?:ENTRY(?:\s+ZONE)?|ENTER|ENTRADA)\b", re.IGNORECASE)
+ENTRY_LABEL_RE = re.compile(
+    r"\b(?:ENTRY(?:\s+ZONE)?|ENTER|ENTRADA|(?:IN\s+)?ZONE)\b",
+    re.IGNORECASE,
+)
 SL_LABEL_RE = re.compile(r"\b(?:SL|STOP(?:\s+LOSS)?)\b", re.IGNORECASE)
 TP_LABEL_RE = re.compile(r"\b(?:TP\d*|TARGET\d*|TAKE\s+PROFIT\d*)\b", re.IGNORECASE)
+INDEXED_TP_LABEL_RE = re.compile(
+    r"\b(?:TP|TARGET|TAKE\s+PROFIT)\s+\d+\s*:",
+    re.IGNORECASE,
+)
 
 
 def parse_signal_text(
@@ -114,7 +121,7 @@ def extract_stop_loss(lines: list[str]) -> Decimal | None:
 def extract_take_profits(lines: list[str]) -> list[Decimal]:
     take_profits: list[Decimal] = []
     for line in lines:
-        match = TP_LABEL_RE.search(line)
+        match = INDEXED_TP_LABEL_RE.search(line) or TP_LABEL_RE.search(line)
         if not match:
             continue
 

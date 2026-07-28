@@ -304,6 +304,10 @@ banca estimada no início do dia, calculada por `saldo atual - resultado
 realizado`. O dia segue o horário de Brasília (UTC-3) e é atualizado pelo
 `telegram-mt5-worker`.
 
+O parser também reconhece entradas escritas no cabeçalho como
+`GOLD BUY NOW IN ZONE 4027-4020`. Alvos sem preço, como `TP 3: OPEN`, são
+ignorados; os demais TPs numéricos continuam sendo executados normalmente.
+
 Para que a proteção após TP1 funcione, o Worker MT5 precisa permanecer ligado. Como a alteração do stop é executada pela API na VPS, indisponibilidade prolongada da VPS, do terminal ou da corretora pode impedir a proteção no instante exato; para garantia totalmente independente da VPS seria necessário também um Expert Advisor executado dentro do terminal.
 
 No bot de gestão, cada campo de risco possui valores rápidos e a opção `✍️ Personalizado`. Após tocar nessa opção, envie o número como mensagem: lote (`0,07`), risco (`0,75%`), meta/limite (`$ 150`) ou valores inteiros para operações, spread e slippage. Saldo, equity, meta e limite são exibidos com `$`; entrada, SL e TP permanecem sem símbolo monetário porque representam cotações do ativo.

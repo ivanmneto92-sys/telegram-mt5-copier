@@ -453,6 +453,30 @@ Take Profit (TP):
         )
         self.assertEqual(validate_signal(decision.signal).status, DecisionStatus.ACCEPTED)
 
+    def test_gold_buy_now_in_zone_com_tp_open(self) -> None:
+        decision = parse_signal_text(
+            """GOLD BUY NOW IN ZONE 4027.00-4020.00
+(SCALPING)
+
+TP 1 : 4029.00
+TP 2 : 4031.00
+TP 3 : OPEN
+
+SL : 4017.00"""
+        )
+
+        self.assertEqual(decision.status, DecisionStatus.ACCEPTED)
+        self.assertEqual(decision.signal.direction, Direction.BUY)
+        self.assertEqual(decision.signal.entry_low, Decimal("4020.00"))
+        self.assertEqual(decision.signal.entry_high, Decimal("4027.00"))
+        self.assertEqual(decision.signal.stop_loss, Decimal("4017.00"))
+        self.assertEqual(
+            decision.signal.take_profits,
+            (Decimal("4029.00"), Decimal("4031.00")),
+        )
+        self.assertNotIn("OPEN", decision.signal.clean_message)
+        self.assertEqual(validate_signal(decision.signal).status, DecisionStatus.ACCEPTED)
+
     def test_sell_antes_de_xauusd_com_entrada_arroba(self) -> None:
         decision = parse_signal_text(SELL_XAUUSD_AT)
 

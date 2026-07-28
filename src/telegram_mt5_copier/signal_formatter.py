@@ -22,7 +22,8 @@ HEADER_RE = re.compile(
     re.IGNORECASE,
 )
 HEADER_TAIL_ENTRY_RE = re.compile(
-    rf"^[ \t:@\-\(\)\[\]]*(?P<value>{PRICE_VALUE_PATTERN})",
+    rf"^[ \t:@\-\(\)\[\]]*(?:(?:IN[ \t]+)?ZONE\b\s*[:\-]?\s*)?"
+    rf"(?P<value>{PRICE_VALUE_PATTERN})",
     re.IGNORECASE,
 )
 ENTRY_LINE_RE = re.compile(r"\b(?:ENTRY|ENTRADA)\b\s*[:\-]?\s*(?P<value>\d+(?:[\.,]\d+)?(?:\s*[-–—]\s*\d+(?:[\.,]\d+)?)?)", re.IGNORECASE)
@@ -32,8 +33,12 @@ SL_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 TP_LINE_RE = re.compile(
-    r"\b(?:TP\d*|TAKE[ \t]+PROFIT\d*|TARGET\d*)\b"
-    r"\s*[:\-]?\s*(?P<value>\d+(?:[\.,]\d+)?)",
+    r"\b(?:"
+    r"TP[ \t]+\d+[ \t]*:|TP\d*+(?![ \t]+\d+[ \t]*:)[ \t]*:?"
+    r"|TAKE[ \t]+PROFIT[ \t]+\d+[ \t]*:"
+    r"|TAKE[ \t]+PROFIT\d*+(?![ \t]+\d+[ \t]*:)[ \t]*:?"
+    r"|TARGET[ \t]+\d+[ \t]*:|TARGET\d*+(?![ \t]+\d+[ \t]*:)[ \t]*:?"
+    r")[ \t]*(?P<value>\d+(?:[\.,]\d+)?)",
     re.IGNORECASE,
 )
 
