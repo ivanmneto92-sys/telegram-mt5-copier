@@ -277,7 +277,7 @@ O script `scripts/setup_windows.ps1` instala o pacote `MetaTrader5` somente no W
 
 Cada conta cadastrada recebe uma pasta isolada em `MT5_BASE_DIR\<mt5_account_id>\`, com `terminal64.exe`, `data\`, `logs\`, `worker.lock` e `heartbeat.txt`. A chamada ao MetaTrader usa modo portable, mantendo os dados junto da cópia isolada do terminal e evitando alternar contas dentro de um mesmo terminal.
 
-Ao criar uma pasta a partir de `MT5_TEMPLATE_PATH`, o provisionamento remove `config\accounts.dat`, configurações com login, bases e logs herdados antes da primeira inicialização. Uma configuração limpa usa `KeepPrivate=0`, habilita negociação algorítmica e não contém login ou senha. A conexão Python inicia o terminal diretamente com a conta do cliente. Falhas transitórias `IPC timeout`/`IPC send failed`, comuns durante o primeiro LiveUpdate, recebem apenas uma nova tentativa controlada. Se o cliente repetir um cadastro que falhou, o registro e a pasta existentes são reutilizados em vez de consumir outro ID da VPS.
+Ao criar uma pasta a partir de `MT5_TEMPLATE_PATH`, o provisionamento remove `config\accounts.dat`, credenciais, bases e logs herdados antes da primeira inicialização. A configuração higienizada usa `KeepPrivate=0`, habilita negociação algorítmica, preserva as opções técnicas da API Python já validadas no template e não contém login ou senha. A conexão Python inicia o terminal diretamente com a conta do cliente. Falhas transitórias `IPC timeout`/`IPC send failed`, comuns durante o primeiro LiveUpdate, recebem apenas uma nova tentativa controlada. Se o cliente repetir um cadastro que falhou, o registro e a pasta existentes são reutilizados em vez de consumir outro ID da VPS.
 
 Para validar uma conta na VPS:
 

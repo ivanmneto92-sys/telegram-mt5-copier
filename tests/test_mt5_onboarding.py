@@ -207,7 +207,21 @@ class MT5OnboardingTests(unittest.TestCase):
         (template / "terminal64.exe").write_bytes(b"terminal")
         (template / "config" / "accounts.dat").write_bytes(b"admin-session")
         (template / "config" / "common.ini").write_text(
-            "[Common]\nLogin=87812436\nPassword=secret",
+            "\n".join(
+                (
+                    "[Common]",
+                    "Login=87812436",
+                    "Password=secret",
+                    "KeepPrivate=1",
+                    "",
+                    "[Experts]",
+                    "Enabled=1",
+                    "AllowLiveTrading=1",
+                    "Account=1",
+                    "Profile=1",
+                    "DisablePythonAPI=0",
+                )
+            ),
             encoding="utf-16",
         )
         (template / "config" / "terminal.ini").write_bytes(b"runtime")
@@ -224,6 +238,8 @@ class MT5OnboardingTests(unittest.TestCase):
             encoding="utf-16"
         )
         self.assertIn("KeepPrivate=0", safe_config)
+        self.assertIn("DisablePythonAPI=0", safe_config)
+        self.assertIn("Account=0", safe_config)
         self.assertNotIn("87812436", safe_config)
         self.assertNotIn("secret", safe_config)
         self.assertFalse((provisioned.account_dir / "bases").exists())

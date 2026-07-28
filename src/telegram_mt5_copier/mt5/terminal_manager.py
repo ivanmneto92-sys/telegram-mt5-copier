@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import configparser
 from dataclasses import dataclass
+import io
 from pathlib import Path
 import shutil
 
@@ -14,6 +16,16 @@ Account=0
 Profile=0
 """
 SANITIZATION_MARKER = ".telegram-mt5-sanitized"
+SENSITIVE_CONFIGURATION_KEYS = {
+    "auth",
+    "certpassword",
+    "login",
+    "mql5login",
+    "mql5password",
+    "password",
+    "proxylogin",
+    "proxypassword",
+}
 
 
 @dataclass(frozen=True)
@@ -77,7 +89,6 @@ def sanitize_copied_terminal(account_dir: Path) -> None:
     config_dir = account_dir / "config"
     for sensitive_file in (
         config_dir / "accounts.dat",
-        config_dir / "common.ini",
         config_dir / "terminal.ini",
     ):
         try:
@@ -104,11 +115,72 @@ def sanitize_copied_terminal(account_dir: Path) -> None:
                 ) from exc
 
     config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "common.ini").write_text(
-        SAFE_COMMON_CONFIGURATION,
-        encoding="utf-16",
-    )
+    sanitize_common_configuration(config_dir / "common.ini")
     (account_dir / SANITIZATION_MARKER).write_text(
         "sanitized\n",
         encoding="ascii",
     )
+
+
+def sanitize_common_configuration(path: Path) -> None:
+    parser = configparser.ConfigParser(
+        interpolation=None,
+        strict=False,
+    )
+    parser.optionxform = str
+    source = read_configuration_text(path)
+    if source:
+        try:
+            parser.read_string(source)
+        except configparser.Error:
+            parser = configparser.ConfigParser(interpolation=None, strict=False)
+            parser.optionxform = str
+
+    for section in parser.sections():
+        for option in tuple(parser[section]):
+            if option.strip().lower() in SENSITIVE_CONFIGURATION_KEYS:
+                parser.remove_option(section, option)
+
+    ensure_section(parser, "Common")
+    ensure_section(parser, "Experts")
+    set_case_insensitive(parser["Common"], "KeepPrivate", "0")
+    for option, setting in (
+        ("Enabled", "1"),
+        ("AllowLiveTrading", "1"),
+        ("Account", "0"),
+        ("Profile", "0"),
+    ):
+        set_case_insensitive(parser["Experts"], option, setting)
+
+    output = io.StringIO()
+    parser.write(output, space_around_delimiters=False)
+    text = output.getvalue() or SAFE_COMMON_CONFIGURATION
+    path.write_text(text, encoding="utf-16")
+
+
+def read_configuration_text(path: Path) -> str:
+    if not path.is_file():
+        return ""
+    for encoding in ("utf-16", "utf-8-sig", "utf-8"):
+        try:
+            return path.read_text(encoding=encoding)
+        except (UnicodeError, UnicodeDecodeError):
+            continue
+    return ""
+
+
+def ensure_section(parser: configparser.ConfigParser, name: str) -> None:
+    if not parser.has_section(name):
+        parser.add_section(name)
+
+
+def set_case_insensitive(
+    section: configparser.SectionProxy,
+    option: str,
+    value: str,
+) -> None:
+    for existing in tuple(section):
+        if existing.lower() == option.lower():
+            section[existing] = value
+            return
+    section[option] = value
