@@ -13,6 +13,7 @@ from typing import BinaryIO, Callable
 
 from .config import AppConfig
 from .mt5.ipc_lock import process_is_running
+from .telegram_notifier import TelegramAdminNotifier
 
 
 RESTART_DELAYS_SECONDS = (1, 2, 5, 10, 30, 60)
@@ -34,6 +35,7 @@ class ServiceState:
     next_start_at: float = 0
     consecutive_failures: int = 0
     log_handle: BinaryIO | None = None
+    failure_alerted: bool = False
 
 
 class SupervisorAlreadyRunningError(RuntimeError):
@@ -88,6 +90,7 @@ class PlatformSupervisor:
         popen_factory: Callable[..., object] = subprocess.Popen,
         clock: Callable[[], float] = time.monotonic,
         sleeper: Callable[[float], None] = time.sleep,
+        alert_callback: Callable[[str], bool] | None = None,
     ) -> None:
         self.project_root = project_root
         self.log_dir = log_dir
@@ -96,6 +99,7 @@ class PlatformSupervisor:
         self.popen_factory = popen_factory
         self.clock = clock
         self.sleeper = sleeper
+        self.alert_callback = alert_callback
         self.states = {spec.name: ServiceState(spec) for spec in services}
         self.stopping = False
 
@@ -118,6 +122,13 @@ class PlatformSupervisor:
                 continue
             return_code = state.process.poll()
             if return_code is None:
+                runtime = now - state.started_at if state.started_at is not None else 0
+                if state.failure_alerted and runtime >= STABLE_RUNTIME_SECONDS:
+                    self._alert(
+                        "✅ SERVIÇO RECUPERADO\n\n"
+                        f"{service_display_name(state.spec.name)} está estável novamente."
+                    )
+                    state.failure_alerted = False
                 continue
             self._handle_exit(state, int(return_code), now)
 
@@ -174,6 +185,14 @@ class PlatformSupervisor:
                 delay,
                 exc,
             )
+            if not state.failure_alerted:
+                self._alert(
+                    "🚨 ALERTA OPERACIONAL\n\n"
+                    f"Serviço: {service_display_name(state.spec.name)}\n"
+                    "Problema: não foi possível iniciar o processo.\n"
+                    f"Nova tentativa em {delay} segundo(s)."
+                )
+                state.failure_alerted = True
             return
         state.started_at = now
         self.logger.info(
@@ -195,10 +214,26 @@ class PlatformSupervisor:
             runtime,
             delay,
         )
+        if not state.failure_alerted:
+            self._alert(
+                "🚨 ALERTA OPERACIONAL\n\n"
+                f"Serviço: {service_display_name(state.spec.name)}\n"
+                f"Problema: processo encerrado com código {return_code}.\n"
+                f"Reinício automático em {delay} segundo(s)."
+            )
+            state.failure_alerted = True
         self._close_service_log(state)
         state.process = None
         state.started_at = None
         state.next_start_at = now + delay
+
+    def _alert(self, message: str) -> None:
+        if self.alert_callback is None:
+            return
+        try:
+            self.alert_callback(message)
+        except Exception as exc:
+            self.logger.error("Falha ao enviar alerta do supervisor: %s", exc)
 
     @staticmethod
     def _close_service_log(state: ServiceState) -> None:
@@ -212,16 +247,22 @@ def restart_delay(consecutive_failures: int) -> int:
     return RESTART_DELAYS_SECONDS[index]
 
 
-def default_service_specs(python_executable: Path | None = None) -> tuple[ServiceSpec, ...]:
+def default_service_specs(
+    python_executable: Path | None = None,
+    *,
+    include_health_monitor: bool = True,
+) -> tuple[ServiceSpec, ...]:
     python_path = python_executable or Path(sys.executable)
     scripts_dir = python_path.parent
     suffix = ".exe" if os.name == "nt" else ""
-    executable_names = (
+    executable_names: tuple[tuple[str, str], ...] = (
         ("mini-app", "telegram-mt5-onboarding"),
         ("management-bot", "telegram-management-bot"),
         ("signal-monitor", "telegram-copier"),
         ("mt5-worker", "telegram-mt5-worker"),
     )
+    if include_health_monitor:
+        executable_names += (("health-monitor", "telegram-mt5-health-monitor"),)
     specs: list[ServiceSpec] = []
     missing: list[str] = []
     for service_name, executable_name in executable_names:
@@ -235,6 +276,16 @@ def default_service_specs(python_executable: Path | None = None) -> tuple[Servic
             "Executaveis dos servicos nao encontrados: " + ", ".join(missing)
         )
     return tuple(specs)
+
+
+def service_display_name(service_name: str) -> str:
+    return {
+        "mini-app": "Mini App / cadastro MT5",
+        "management-bot": "Bot de gestão",
+        "signal-monitor": "Monitor de sinais",
+        "mt5-worker": "Worker MT5",
+        "health-monitor": "Monitor operacional",
+    }.get(service_name, service_name)
 
 
 def rotate_subprocess_log(log_path: Path, max_bytes: int = 10 * 1024 * 1024) -> None:
@@ -269,12 +320,22 @@ def main() -> int:
     try:
         config = AppConfig.load(create_dirs=True)
         logger = build_supervisor_logger(config.log_dir)
-        services = default_service_specs()
+        services = default_service_specs(
+            include_health_monitor=config.operational_alerts_enabled
+        )
+        notifier = TelegramAdminNotifier(
+            config.telegram_bot_token,
+            config.bot_admin_ids,
+            logger=logger,
+        )
         supervisor = PlatformSupervisor(
             project_root=config.project_root,
             log_dir=config.log_dir,
             services=services,
             logger=logger,
+            alert_callback=(
+                notifier.send if config.operational_alerts_enabled else None
+            ),
         )
         lock = SupervisorLock(config.data_dir / "telegram-mt5-supervisor.lock")
 

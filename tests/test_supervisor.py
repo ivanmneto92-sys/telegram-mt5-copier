@@ -121,3 +121,25 @@ class SupervisorTests(unittest.TestCase):
                 second.acquire()
         finally:
             first.close()
+
+    def test_alerta_falha_uma_vez_e_recuperacao_apos_estabilidade(self) -> None:
+        alerts: list[str] = []
+        self.supervisor.alert_callback = lambda message: not alerts.append(message)
+        self.supervisor.tick()
+        self.created[0].return_code = 2
+        self.supervisor.tick()
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("ALERTA OPERACIONAL", alerts[0])
+
+        self.now = 1
+        self.supervisor.tick()
+        self.created[1].return_code = 2
+        self.supervisor.tick()
+        self.assertEqual(len(alerts), 1)
+
+        self.now = 3
+        self.supervisor.tick()
+        self.now = 304
+        self.supervisor.tick()
+        self.assertEqual(len(alerts), 2)
+        self.assertIn("SERVIÇO RECUPERADO", alerts[1])

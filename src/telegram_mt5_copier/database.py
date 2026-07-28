@@ -545,6 +545,18 @@ def initialize_database(database_path: Path) -> None:
                 details TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS operational_alert_states (
+                alert_key TEXT PRIMARY KEY,
+                alert_type TEXT NOT NULL,
+                entity_id TEXT,
+                summary TEXT NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                opened_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                last_notified_at TEXT,
+                resolved_at TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS account_daily_performance (
                 mt5_account_id INTEGER NOT NULL,
                 performance_date TEXT NOT NULL,

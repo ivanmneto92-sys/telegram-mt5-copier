@@ -79,6 +79,10 @@ class AppConfig:
     allow_live_accounts: bool
     default_pending_expiration_minutes: int
     global_execution_kill_switch: bool
+    operational_alerts_enabled: bool
+    health_check_interval_seconds: int
+    health_stale_after_seconds: int
+    operational_alert_repeat_minutes: int
 
     @classmethod
     def load(
@@ -128,6 +132,22 @@ class AppConfig:
             global_execution_kill_switch=parse_bool(
                 _value("GLOBAL_EXECUTION_KILL_SWITCH", file_values, runtime_env, "true"),
                 default=True,
+            ),
+            operational_alerts_enabled=parse_bool(
+                _value("OPERATIONAL_ALERTS_ENABLED", file_values, runtime_env, "true"),
+                default=True,
+            ),
+            health_check_interval_seconds=parse_positive_int(
+                _value("HEALTH_CHECK_INTERVAL_SECONDS", file_values, runtime_env, "30"),
+                "HEALTH_CHECK_INTERVAL_SECONDS",
+            ),
+            health_stale_after_seconds=parse_positive_int(
+                _value("HEALTH_STALE_AFTER_SECONDS", file_values, runtime_env, "90"),
+                "HEALTH_STALE_AFTER_SECONDS",
+            ),
+            operational_alert_repeat_minutes=parse_positive_int(
+                _value("OPERATIONAL_ALERT_REPEAT_MINUTES", file_values, runtime_env, "360"),
+                "OPERATIONAL_ALERT_REPEAT_MINUTES",
             ),
         )
 

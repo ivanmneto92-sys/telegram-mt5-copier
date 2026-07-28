@@ -165,6 +165,10 @@ class ConfigTests(unittest.TestCase):
             self.assertFalse(config.allow_live_accounts)
             self.assertEqual(config.mt5_base_dir, project_root / "mt5_accounts")
             self.assertTrue(config.mt5_base_dir.is_dir())
+            self.assertTrue(config.operational_alerts_enabled)
+            self.assertEqual(config.health_check_interval_seconds, 30)
+            self.assertEqual(config.health_stale_after_seconds, 90)
+            self.assertEqual(config.operational_alert_repeat_minutes, 360)
 
 
 if __name__ == "__main__":

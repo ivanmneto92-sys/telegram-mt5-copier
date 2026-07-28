@@ -310,20 +310,43 @@ ignorados; os demais TPs numéricos continuam sendo executados normalmente.
 
 ## Supervisor e inicialização automática no Windows
 
-A partir da versão `0.11.0`, o comando `telegram-mt5-supervisor` inicia e
-acompanha estes quatro componentes:
+A partir da versão `0.12.0`, o comando `telegram-mt5-supervisor` inicia e
+acompanha estes cinco componentes:
 
 - Mini App / cadastro MT5;
 - Bot de gestão do Telegram;
 - Monitor dos sinais;
 - Worker MT5.
+- Monitor operacional e alertas administrativos.
 
 Se um processo encerrar, o supervisor reinicia com espera progressiva de
 1, 2, 5, 10, 30 e no máximo 60 segundos. Cada componente escreve em um
 arquivo separado dentro de `LOG_DIR`, com nomes
 `supervisor-mini-app.log`, `supervisor-management-bot.log`,
-`supervisor-signal-monitor.log` e `supervisor-mt5-worker.log`. O próprio
-supervisor usa `telegram-mt5-supervisor.log`.
+`supervisor-signal-monitor.log`, `supervisor-mt5-worker.log` e
+`supervisor-health-monitor.log`. O próprio supervisor usa
+`telegram-mt5-supervisor.log`.
+
+O monitor operacional verifica a cada 30 segundos o heartbeat do monitor de
+sinais e da conta MT5 mais recente habilitada de cada cliente. Quando uma
+conexão falha, o heartbeat fica atrasado ou um dos processos supervisionados
+encerra, os IDs configurados em `BOT_ADMIN_IDS` recebem um alerta pelo bot.
+O problema fica registrado no SQLite para não repetir mensagens; por padrão,
+um problema contínuo só é lembrado novamente depois de 360 minutos. Quando o
+estado normaliza, o administrador recebe uma confirmação de recuperação.
+
+As opções podem ser ajustadas no `.env`:
+
+```dotenv
+OPERATIONAL_ALERTS_ENABLED=true
+HEALTH_CHECK_INTERVAL_SECONDS=30
+HEALTH_STALE_AFTER_SECONDS=90
+OPERATIONAL_ALERT_REPEAT_MINUTES=360
+```
+
+Essas notificações usam o mesmo `TELEGRAM_BOT_TOKEN` do bot de gestão e são
+enviadas somente para `BOT_ADMIN_IDS`. Não existe conflito de `getUpdates`,
+pois o monitor apenas chama `sendMessage`.
 
 O Caddy não é iniciado pelo supervisor: ele continua usando a configuração
 HTTPS já existente.
@@ -333,7 +356,7 @@ tarefa no login do usuário da VPS, e não a conta `SYSTEM` da sessão 0. Depois
 do login, a conexão RDP pode ser apenas desconectada; não use **Sair**, pois
 isso encerra a sessão gráfica dos terminais MT5.
 
-Antes da primeira instalação, encerre as quatro instâncias iniciadas
+Antes da primeira instalação, encerre as instâncias iniciadas
 manualmente. Em um PowerShell como Administrador, execute:
 
 ```powershell
@@ -341,7 +364,7 @@ cd C:\Apps\telegram-mt5-copier-main\telegram-mt5-copier
 .\scripts\install_windows_startup.ps1
 ```
 
-Depois disso, não abra os quatro executáveis individualmente. Para consultar
+Depois disso, não abra os executáveis individualmente. Para consultar
 a tarefa:
 
 ```powershell
@@ -361,11 +384,6 @@ No bot de gestão, cada campo de risco possui valores rápidos e a opção `✍�
 
 `DRY_RUN` controla a republicação no Telegram e não substitui as travas específicas do MT5.
 
-Serviços sugeridos no Agendador de Tarefas ou serviço Windows dedicado:
-
-- `telegram-management-bot`
-- `telegram-mt5-onboarding`
-- `telegram-copier`
-- `telegram-mt5-worker`
-
-Cada serviço deve usar a pasta raiz do projeto como diretorio de trabalho. Configure reinício automático em caso de falha.
+Com o supervisor instalado, não cadastre cada executável separadamente no
+Agendador de Tarefas. A única tarefa automática deve iniciar
+`telegram-mt5-supervisor`.
