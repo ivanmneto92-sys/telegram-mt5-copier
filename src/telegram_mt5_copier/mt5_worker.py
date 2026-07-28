@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sys
 import time
 
@@ -12,11 +13,16 @@ from .mt5.client import MT5Client
 from .mt5.position_manager import PositionManager
 from .mt5.pending_order_monitor import PendingOrderMonitor
 
-POSITION_PROTECTION_POLL_SECONDS = 5
+POSITION_PROTECTION_POLL_SECONDS = 1
+ACCOUNT_HEARTBEAT_SECONDS = 15
 
 
 def main() -> int:
     try:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(message)s",
+        )
         config = AppConfig.load(create_dirs=True)
         if not config.mt5_credential_key:
             raise ValueError("MT5_CREDENTIAL_KEY nao configurada.")
@@ -32,6 +38,8 @@ def main() -> int:
         position_manager = PositionManager(config.database_path, accounts, MT5Client)
         pending_monitor = PendingOrderMonitor(config.database_path)
         workers: dict[int, MT5AccountWorker] = {}
+        last_account_checks: dict[int, float] = {}
+        account_connection_states: dict[int, bool] = {}
         try:
             while True:
                 active_accounts = {
@@ -41,6 +49,8 @@ def main() -> int:
                 for account_id in tuple(workers):
                     if account_id not in active_accounts:
                         workers.pop(account_id).close()
+                        last_account_checks.pop(account_id, None)
+                        account_connection_states.pop(account_id, None)
 
                 for account_id, (account, profile) in active_accounts.items():
                     worker = workers.get(account_id)
@@ -51,7 +61,12 @@ def main() -> int:
                             command_queue=command_queue,
                         )
                         workers[account_id] = worker
-                    if worker.process_once():
+                    now = time.monotonic()
+                    last_check = last_account_checks.get(account_id)
+                    if last_check is None or now - last_check >= ACCOUNT_HEARTBEAT_SECONDS:
+                        account_connection_states[account_id] = worker.process_once()
+                        last_account_checks[account_id] = time.monotonic()
+                    if account_connection_states.get(account_id, False):
                         try:
                             position_manager.manage_account(account, profile)
                         except Exception as exc:

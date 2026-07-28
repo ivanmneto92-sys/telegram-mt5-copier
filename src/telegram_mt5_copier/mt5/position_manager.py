@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
+import logging
 from pathlib import Path
 import re
 from typing import Callable
@@ -10,9 +11,15 @@ from ..database import connect_database, utc_now
 from .account_service import MT5AccountService
 from .models import ExecutionProfile, MT5Account
 from .ipc_lock import MT5OperationLock
-from .pending_order_executor import MT5_MAGIC_NUMBER, is_successful_mt5_result, mt5_constant
+from .pending_order_executor import (
+    MT5_MAGIC_NUMBER,
+    is_successful_mt5_result,
+    mt5_constant,
+    mt5_failure_message,
+)
 
 COMMENT_RE = re.compile(r"^tgcp (?P<signal>[0-9a-f]{8}) TP(?P<tp>\d+)$")
+LOGGER = logging.getLogger(__name__)
 
 
 class PositionManager:
@@ -206,18 +213,34 @@ class PositionManager:
         )
         if not improves:
             return False
-        result = client.order_send(
-            {
-                "action": mt5_constant(client, "TRADE_ACTION_SLTP", 6),
-                "position": int(value(position, "ticket", 0)),
-                "symbol": symbol,
-                "sl": float(proposed_sl),
-                "tp": float(take_profit),
-                "magic": MT5_MAGIC_NUMBER,
-                "comment": "tgcp protection",
-            }
-        )
-        return is_successful_mt5_result(client, result, check=False)
+        request = {
+            "action": mt5_constant(client, "TRADE_ACTION_SLTP", 6),
+            "position": int(value(position, "ticket", 0)),
+            "symbol": symbol,
+            "sl": float(proposed_sl),
+            "tp": float(take_profit),
+            "magic": MT5_MAGIC_NUMBER,
+            "comment": "tgcp protection",
+        }
+        result = client.order_send(request)
+        successful = is_successful_mt5_result(client, result, check=False)
+        if not successful:
+            LOGGER.warning(
+                "Protecao MT5 rejeitada. position=%s symbol=%s sl=%s motivo=%s last_error=%s",
+                request["position"],
+                symbol,
+                proposed_sl,
+                mt5_failure_message(client, result),
+                client.last_error(),
+            )
+        elif force_breakeven:
+            LOGGER.info(
+                "BE apos TP1 aplicado. position=%s symbol=%s sl=%s",
+                request["position"],
+                symbol,
+                proposed_sl,
+            )
+        return successful
 
     def _tp1_reached(
         self,
@@ -266,32 +289,15 @@ class PositionManager:
             if ticket is not None and str(ticket)
         }
         if not reached:
-            for deal in history_deals:
-                deal_tickets = {
-                    str(value(deal, field, ""))
-                    for field in ("position_id", "position", "order", "ticket")
-                    if value(deal, field, "")
-                }
-                comment_match = COMMENT_RE.match(str(value(deal, "comment", "")))
-                belongs_to_tp1 = bool(known_tickets.intersection(deal_tickets)) or bool(
-                    comment_match
-                    and comment_match.group("signal") == signal_prefix
-                    and int(comment_match.group("tp")) == 1
-                )
-                if not belongs_to_tp1:
-                    continue
-                try:
-                    deal_price = Decimal(str(value(deal, "price", "0")))
-                except Exception:
-                    continue
-                if price_reached_target(
-                    direction,
-                    deal_price,
-                    take_profit,
-                    tolerance,
-                ):
-                    reached = True
-                    break
+            reached = tp1_reached_in_history(
+                client=client,
+                history_deals=history_deals,
+                direction=direction,
+                signal_prefix=signal_prefix,
+                take_profit=take_profit,
+                tolerance=tolerance,
+                known_tickets=known_tickets,
+            )
 
         if reached:
             self._mark_tp1_reached(group_id)
@@ -426,3 +432,81 @@ def price_reached_target(
     if direction == "BUY":
         return price >= target - tolerance
     return price <= target + tolerance
+
+
+def tp1_reached_in_history(
+    *,
+    client: object,
+    history_deals: tuple[object, ...],
+    direction: str,
+    signal_prefix: str,
+    take_profit: Decimal,
+    tolerance: Decimal,
+    known_tickets: set[str],
+) -> bool:
+    tp1_position_ids: set[str] = set()
+    identified_deals: list[object] = []
+
+    for deal in history_deals:
+        deal_tickets = ticket_values(deal)
+        comment_match = COMMENT_RE.match(str(value(deal, "comment", "")))
+        belongs_to_tp1 = bool(known_tickets.intersection(deal_tickets)) or bool(
+            comment_match
+            and comment_match.group("signal") == signal_prefix
+            and int(comment_match.group("tp")) == 1
+        )
+        if not belongs_to_tp1:
+            continue
+        identified_deals.append(deal)
+        tp1_position_ids.update(position_values(deal))
+        if deal_reached_target(deal, direction, take_profit, tolerance):
+            return True
+
+    take_profit_reason = mt5_constant(client, "DEAL_REASON_TP", 5)
+    for deal in history_deals:
+        shares_position = bool(tp1_position_ids.intersection(position_values(deal)))
+        if not shares_position and deal not in identified_deals:
+            continue
+        try:
+            reason = int(value(deal, "reason", -1))
+        except (TypeError, ValueError):
+            reason = -1
+        if reason == take_profit_reason:
+            return True
+        if deal_reached_target(deal, direction, take_profit, tolerance):
+            return True
+    return False
+
+
+def ticket_values(item: object) -> set[str]:
+    return {
+        str(candidate)
+        for field in ("position_id", "position", "order", "ticket")
+        if (candidate := value(item, field, "")) not in ("", None, 0)
+    }
+
+
+def position_values(item: object) -> set[str]:
+    return {
+        str(candidate)
+        for field in ("position_id", "position")
+        if (candidate := value(item, field, "")) not in ("", None, 0)
+    }
+
+
+def deal_reached_target(
+    deal: object,
+    direction: str,
+    take_profit: Decimal,
+    tolerance: Decimal,
+) -> bool:
+    try:
+        deal_price = Decimal(str(value(deal, "price", "0")))
+    except Exception:
+        return False
+    return price_reached_target(
+        direction,
+        deal_price,
+        take_profit,
+        tolerance,
+    )

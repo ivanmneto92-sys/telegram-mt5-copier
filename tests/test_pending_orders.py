@@ -816,6 +816,49 @@ class PendingOrderTests(unittest.TestCase):
         self.assertEqual(client.order_send_requests[0]["position"], 9012)
         self.assertEqual(client.order_send_requests[0]["sl"], 4061.0)
 
+    def test_worker_liga_entrada_e_saida_tp1_pela_position_id(self) -> None:
+        signal = parse_signal_text(BUY_SIGNAL).signal
+        self.executor().execute_for_account(signal, self.account, self.profile())
+        client = SimulatedMT5Client(
+            tick=TickInfo(bid=Decimal("4062"), ask=Decimal("4062")),
+            positions=(
+                {
+                    "magic": 27071301,
+                    "comment": f"tgcp {signal.signature[:8]} TP2",
+                    "ticket": 9112,
+                    "symbol": "XAUUSD",
+                    "price_open": 4061,
+                    "sl": 4044,
+                    "tp": 4071,
+                },
+            ),
+            history_deals=(
+                {
+                    "magic": 27071301,
+                    "comment": f"tgcp {signal.signature[:8]} TP1",
+                    "position_id": 9111,
+                    "order": 8111,
+                    "price": 4061,
+                    "reason": 3,
+                },
+                {
+                    "magic": 27071301,
+                    "comment": "[tp 4066.00]",
+                    "position_id": 9111,
+                    "order": 8112,
+                    "price": 4066,
+                    "reason": 5,
+                },
+            ),
+        )
+        manager = PositionManager(self.database_path, self.accounts, lambda: client)
+
+        changed = manager.manage_account(self.account, self.profile())
+
+        self.assertEqual(changed, 1)
+        self.assertEqual(client.order_send_requests[0]["position"], 9112)
+        self.assertEqual(client.order_send_requests[0]["sl"], 4061.0)
+
     def test_worker_move_sell_restante_para_be_ao_atingir_tp1(self) -> None:
         signal = parse_signal_text(SELL_SIGNAL).signal
         self.executor().execute_for_account(signal, self.account, self.profile())
