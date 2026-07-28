@@ -12,6 +12,8 @@ from .mt5.client import MT5Client
 from .mt5.position_manager import PositionManager
 from .mt5.pending_order_monitor import PendingOrderMonitor
 
+POSITION_PROTECTION_POLL_SECONDS = 5
+
 
 def main() -> int:
     try:
@@ -57,7 +59,7 @@ def main() -> int:
 
                 pending_monitor.expire_orders()
 
-                time.sleep(15)
+                time.sleep(POSITION_PROTECTION_POLL_SECONDS)
         finally:
             for worker in workers.values():
                 worker.close()

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 import re
@@ -38,6 +38,7 @@ class PositionManager:
             password = self.accounts.decrypted_password_for_account(account)
             if not client.initialize(account.terminal_path, int(account.login), password, account.server_name):
                 return 0
+            managed_positions: list[tuple[object, tuple[int, int, int, str, Decimal, Decimal, str]]] = []
             for position in client.positions_get():
                 if int(value(position, "magic", 0) or 0) != MT5_MAGIC_NUMBER:
                     continue
@@ -51,13 +52,45 @@ class PositionManager:
                 )
                 if order_record is None:
                     continue
-                order_id, _group_id, direction, original_stop, _take_profit, _expiration_at = order_record
+                order_id, _group_id, _tp_index, _direction, _original_stop, _take_profit, _expiration_at = order_record
                 ticket = int(value(position, "ticket", 0) or 0)
                 self._mark_filled(order_id, ticket)
-                if not (profile.breakeven_enabled or profile.trailing_enabled):
+                managed_positions.append((position, order_record))
+
+            history_deals: tuple[object, ...] = ()
+            if managed_positions:
+                now = datetime.now(tz=timezone.utc)
+                history_deals = client.history_deals_get(now - timedelta(days=7), now)
+            managed_group_ids = {
+                order_record[1] for _position, order_record in managed_positions
+            }
+            tp1_reached_groups = {
+                group_id
+                for group_id in managed_group_ids
+                if self._tp1_reached(client, group_id, history_deals)
+            }
+            breakeven_changed_groups: set[int] = set()
+            for position, order_record in managed_positions:
+                _order_id, group_id, tp_index, direction, original_stop, _take_profit, _expiration_at = order_record
+                force_breakeven = group_id in tp1_reached_groups and tp_index > 1
+                if not force_breakeven and not (
+                    profile.breakeven_enabled or profile.trailing_enabled
+                ):
                     continue
-                if self._protect_position(client, position, direction, original_stop, profile):
+                if self._protect_position(
+                    client,
+                    position,
+                    direction,
+                    original_stop,
+                    profile,
+                    force_breakeven=force_breakeven,
+                ):
                     changed += 1
+                    if force_breakeven:
+                        breakeven_changed_groups.add(group_id)
+            for group_id in breakeven_changed_groups:
+                self._mark_breakeven_applied(group_id)
+
             for pending_order in client.orders_get():
                 if int(value(pending_order, "magic", 0) or 0) != MT5_MAGIC_NUMBER:
                     continue
@@ -71,12 +104,25 @@ class PositionManager:
                 )
                 if order_record is None:
                     continue
-                order_id, group_id, direction, stop_loss, take_profit, expiration_at = order_record
+                order_id, group_id, _tp_index, direction, stop_loss, take_profit, expiration_at = order_record
                 symbol = str(value(pending_order, "symbol", ""))
                 tick = client.symbol_info_tick(symbol)
                 if tick is None:
                     continue
                 ticket = int(value(pending_order, "ticket", value(pending_order, "order", 0)) or 0)
+                if group_id in tp1_reached_groups:
+                    result = client.order_send(
+                        {
+                            "action": mt5_constant(client, "TRADE_ACTION_REMOVE", 8),
+                            "order": ticket,
+                            "magic": MT5_MAGIC_NUMBER,
+                            "comment": "tgcp tp1 reached",
+                        }
+                    )
+                    if is_successful_mt5_result(client, result, check=False):
+                        self._mark_cancelled(order_id, group_id)
+                        changed += 1
+                    continue
                 if datetime.fromisoformat(expiration_at) <= datetime.now(tz=timezone.utc):
                     result = client.order_send(
                         {
@@ -122,6 +168,8 @@ class PositionManager:
         direction: str,
         original_stop: Decimal,
         profile: ExecutionProfile,
+        *,
+        force_breakeven: bool = False,
     ) -> bool:
         symbol = str(value(position, "symbol", ""))
         info = client.symbol_info(symbol)
@@ -137,11 +185,16 @@ class PositionManager:
 
         current_price = tick.bid if direction == "BUY" else tick.ask
         favorable_move = current_price - entry if direction == "BUY" else entry - current_price
-        if favorable_move < initial_risk:
+        if not force_breakeven and favorable_move < initial_risk:
+            return False
+        if force_breakeven and (
+            (direction == "BUY" and current_price <= entry)
+            or (direction == "SELL" and current_price >= entry)
+        ):
             return False
 
         proposed_sl = entry
-        if profile.trailing_enabled:
+        if profile.trailing_enabled and favorable_move >= initial_risk:
             trailing_sl = current_price - initial_risk if direction == "BUY" else current_price + initial_risk
             proposed_sl = max(entry, trailing_sl) if direction == "BUY" else min(entry, trailing_sl)
         proposed_sl = normalize_price(proposed_sl, info.trade_tick_size, info.digits)
@@ -166,13 +219,117 @@ class PositionManager:
         )
         return is_successful_mt5_result(client, result, check=False)
 
+    def _tp1_reached(
+        self,
+        client: object,
+        group_id: int,
+        history_deals: tuple[object, ...],
+    ) -> bool:
+        with connect_database(self.database_path) as connection:
+            row = connection.execute(
+                """
+                SELECT g.direction, g.symbol, g.signal_id, g.tp1_reached_at,
+                       o.take_profit, o.mt5_order_ticket, o.mt5_position_ticket
+                FROM execution_groups g
+                JOIN execution_orders o
+                  ON o.execution_group_id = g.id AND o.tp_index = 1
+                WHERE g.id = ?
+                """,
+                (group_id,),
+            ).fetchone()
+        if row is None:
+            return False
+        if row[3]:
+            return True
+
+        direction = str(row[0])
+        symbol = str(row[1])
+        signal_prefix = str(row[2])[:8]
+        take_profit = Decimal(str(row[4]))
+        info = client.symbol_info(symbol)
+        tolerance = info.trade_tick_size if info is not None else Decimal("0")
+
+        tick = client.symbol_info_tick(symbol)
+        reached = False
+        if tick is not None:
+            current_price = tick.bid if direction == "BUY" else tick.ask
+            reached = price_reached_target(
+                direction,
+                current_price,
+                take_profit,
+                tolerance,
+            )
+
+        known_tickets = {
+            str(ticket)
+            for ticket in (row[5], row[6])
+            if ticket is not None and str(ticket)
+        }
+        if not reached:
+            for deal in history_deals:
+                deal_tickets = {
+                    str(value(deal, field, ""))
+                    for field in ("position_id", "position", "order", "ticket")
+                    if value(deal, field, "")
+                }
+                comment_match = COMMENT_RE.match(str(value(deal, "comment", "")))
+                belongs_to_tp1 = bool(known_tickets.intersection(deal_tickets)) or bool(
+                    comment_match
+                    and comment_match.group("signal") == signal_prefix
+                    and int(comment_match.group("tp")) == 1
+                )
+                if not belongs_to_tp1:
+                    continue
+                try:
+                    deal_price = Decimal(str(value(deal, "price", "0")))
+                except Exception:
+                    continue
+                if price_reached_target(
+                    direction,
+                    deal_price,
+                    take_profit,
+                    tolerance,
+                ):
+                    reached = True
+                    break
+
+        if reached:
+            self._mark_tp1_reached(group_id)
+        return reached
+
+    def _mark_tp1_reached(self, group_id: int) -> None:
+        now = utc_now()
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                """
+                UPDATE execution_groups
+                SET tp1_reached_at = COALESCE(tp1_reached_at, ?), updated_at = ?
+                WHERE id = ?
+                """,
+                (now, now, group_id),
+            ).close()
+
+    def _mark_breakeven_applied(self, group_id: int) -> None:
+        now = utc_now()
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                """
+                UPDATE execution_groups
+                SET breakeven_applied_at = COALESCE(breakeven_applied_at, ?),
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (now, now, group_id),
+            ).close()
+
     def _find_order(
         self, account_id: int, signal_prefix: str, tp_index: int
-    ) -> tuple[int, int, str, Decimal, Decimal, str] | None:
+    ) -> tuple[int, int, int, str, Decimal, Decimal, str] | None:
         with connect_database(self.database_path) as connection:
             cursor = connection.execute(
                 """
-                SELECT o.id, g.id, g.direction, o.stop_loss, o.take_profit, g.expiration_at
+                SELECT o.id, g.id, o.tp_index, g.direction, o.stop_loss,
+                       o.take_profit, g.expiration_at
                 FROM execution_orders o
                 JOIN execution_groups g ON g.id = o.execution_group_id
                 WHERE g.mt5_account_id = ?
@@ -191,10 +348,11 @@ class PositionManager:
         return (
             int(row[0]),
             int(row[1]),
-            str(row[2]),
-            Decimal(str(row[3])),
+            int(row[2]),
+            str(row[3]),
             Decimal(str(row[4])),
-            str(row[5]),
+            Decimal(str(row[5])),
+            str(row[6]),
         )
 
     def _mark_filled(self, order_id: int, position_ticket: int) -> None:
@@ -257,3 +415,14 @@ def value(item: object, field: str, default: object) -> object:
 def normalize_price(price: Decimal, tick_size: Decimal, digits: int) -> Decimal:
     ticks = (price / tick_size).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
     return (ticks * tick_size).quantize(Decimal("1").scaleb(-digits))
+
+
+def price_reached_target(
+    direction: str,
+    price: Decimal,
+    target: Decimal,
+    tolerance: Decimal = Decimal("0"),
+) -> bool:
+    if direction == "BUY":
+        return price >= target - tolerance
+    return price <= target + tolerance

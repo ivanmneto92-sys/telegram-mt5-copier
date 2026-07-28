@@ -387,9 +387,9 @@ class MT5AccountService:
                     max_spread_points, max_slippage_points, daily_profit_target,
                     daily_loss_limit, max_open_signals, split_tps, breakeven_enabled,
                     trailing_enabled, entry_execution_mode, entry_price_mode,
-                    pending_expiration_minutes, updated_at
+                    pending_expiration_minutes, take_profit_limit, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user_id,
@@ -409,6 +409,7 @@ class MT5AccountService:
                     ENTRY_EXECUTION_PENDING_ORDER,
                     ENTRY_PRICE_FIRST_TOUCH,
                     120,
+                    0,
                     utc_now(),
                 ),
             )
@@ -423,7 +424,7 @@ class MT5AccountService:
                        max_spread_points, max_slippage_points, daily_profit_target,
                        daily_loss_limit, max_open_signals, split_tps, breakeven_enabled,
                        trailing_enabled, entry_execution_mode, entry_price_mode,
-                       pending_expiration_minutes
+                       pending_expiration_minutes, take_profit_limit
                 FROM execution_profiles
                 WHERE user_id = ? AND mt5_account_id = ?
                 """,
@@ -471,6 +472,7 @@ class MT5AccountService:
             "entry_execution_mode",
             "entry_price_mode",
             "pending_expiration_minutes",
+            "take_profit_limit",
             "split_tps",
             "risk_mode",
             "risk_percent",
@@ -484,6 +486,10 @@ class MT5AccountService:
         }
         if field_name not in allowed_fields:
             raise ValueError("Campo de execucao invalido.")
+        if field_name == "take_profit_limit":
+            value = int(value)
+            if value < 0 or value > 10:
+                raise ValueError("Quantidade de Take Profits deve ficar entre 1 e 10, ou 0 para todos.")
         self.ensure_execution_profile(user_id, account_id)
         with connect_database(self.database_path) as connection:
             cursor = connection.execute(
@@ -539,7 +545,7 @@ class MT5AccountService:
                        p.max_spread_points, p.max_slippage_points, p.daily_profit_target,
                        p.daily_loss_limit, p.max_open_signals, p.split_tps,
                        p.breakeven_enabled, p.trailing_enabled, p.entry_execution_mode,
-                       p.entry_price_mode, p.pending_expiration_minutes
+                       p.entry_price_mode, p.pending_expiration_minutes, p.take_profit_limit
                 FROM mt5_accounts a
                 JOIN users u ON u.id = a.user_id
                 JOIN execution_profiles p ON p.user_id = a.user_id AND p.mt5_account_id = a.id
@@ -593,7 +599,7 @@ class MT5AccountService:
                        p.max_spread_points, p.max_slippage_points, p.daily_profit_target,
                        p.daily_loss_limit, p.max_open_signals, p.split_tps,
                        p.breakeven_enabled, p.trailing_enabled, p.entry_execution_mode,
-                       p.entry_price_mode, p.pending_expiration_minutes
+                       p.entry_price_mode, p.pending_expiration_minutes, p.take_profit_limit
                 FROM mt5_accounts a
                 JOIN users u ON u.id = a.user_id
                 JOIN execution_profiles p ON p.user_id = a.user_id AND p.mt5_account_id = a.id
@@ -637,7 +643,7 @@ class MT5AccountService:
                        p.max_spread_points, p.max_slippage_points, p.daily_profit_target,
                        p.daily_loss_limit, p.max_open_signals, p.split_tps,
                        p.breakeven_enabled, p.trailing_enabled, p.entry_execution_mode,
-                       p.entry_price_mode, p.pending_expiration_minutes
+                       p.entry_price_mode, p.pending_expiration_minutes, p.take_profit_limit
                 FROM mt5_accounts a
                 JOIN users u ON u.id = a.user_id
                 JOIN execution_profiles p ON p.user_id = a.user_id AND p.mt5_account_id = a.id
@@ -751,6 +757,7 @@ def execution_profile_from_row(row: tuple[object, ...]) -> ExecutionProfile:
         entry_execution_mode=str(row[14]) if len(row) > 14 else ENTRY_EXECUTION_PENDING_ORDER,
         entry_price_mode=str(row[15]) if len(row) > 15 else ENTRY_PRICE_FIRST_TOUCH,
         pending_expiration_minutes=int(row[16]) if len(row) > 16 else 120,
+        take_profit_limit=int(row[17]) if len(row) > 17 else 0,
     )
 
 

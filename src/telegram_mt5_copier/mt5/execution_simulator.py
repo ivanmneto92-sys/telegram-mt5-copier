@@ -11,6 +11,7 @@ from .account_service import MT5AccountService
 from .client import SimulatedMT5Client
 from .models import EXECUTION_STATUS_SIMULATED, ExecutionProfile, MT5Account, SimulatedExecution, SymbolInfo
 from .symbol_resolver import SymbolResolver
+from .pending_order_planner import limit_take_profits
 
 
 @dataclass(frozen=True)
@@ -61,9 +62,18 @@ class ExecutionSimulator:
             if symbol_info is None:
                 raise ValueError("Simbolo indisponivel para simulacao.")
 
-            volumes = split_volume(profile, len(signal.take_profits), symbol_info)
+            selected_take_profits = limit_take_profits(
+                signal.take_profits,
+                profile.take_profit_limit,
+            )
+            take_profits = (
+                selected_take_profits
+                if profile.split_tps
+                else (selected_take_profits[-1],)
+            )
+            volumes = split_volume(profile, len(take_profits), symbol_info)
             executions = []
-            for volume, take_profit in zip(volumes, signal.take_profits):
+            for volume, take_profit in zip(volumes, take_profits):
                 execution = self.record_simulated_execution(
                     signal=signal,
                     account=account,

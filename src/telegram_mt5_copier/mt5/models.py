@@ -130,6 +130,7 @@ class ExecutionProfile:
     entry_execution_mode: str = ENTRY_EXECUTION_PENDING_ORDER
     entry_price_mode: str = ENTRY_PRICE_FIRST_TOUCH
     pending_expiration_minutes: int = 120
+    take_profit_limit: int = 0
 
 
 @dataclass(frozen=True)

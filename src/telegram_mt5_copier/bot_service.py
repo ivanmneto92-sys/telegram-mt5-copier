@@ -47,6 +47,12 @@ from .bot_keyboards import (
     CB_EXEC_PRICE_FIRST_TOUCH,
     CB_EXEC_PRICE_MIDDLE,
     CB_EXEC_SPLIT_TPS,
+    CB_EXEC_TP_MENU,
+    CB_EXEC_TP_ALL,
+    CB_EXEC_TP_1,
+    CB_EXEC_TP_2,
+    CB_EXEC_TP_3,
+    CB_EXEC_TP_4,
     CB_HISTORY,
     CB_MAIN,
     CB_MT5_ACCOUNTS,
@@ -86,6 +92,7 @@ from .bot_keyboards import (
     ENTRY_PRICE_MENU,
     EXPIRATION_MENU,
     SIGNAL_EXECUTION_MENU,
+    TAKE_PROFIT_COUNT_MENU,
     Button,
     extract_fixed_lot,
     extract_custom_value_field,
@@ -424,6 +431,22 @@ class BotService:
             return BotResponse("🎯 PREÇO DA FAIXA", ENTRY_PRICE_MENU, screen="signal_execution")
         if callback == CB_EXEC_EXPIRATION_MENU:
             return BotResponse("⏳ VALIDADE DAS ORDENS", EXPIRATION_MENU, screen="signal_execution")
+        if callback == CB_EXEC_TP_MENU:
+            return BotResponse(
+                "\n".join(
+                    [
+                        "🎯 QUANTIDADE DE TAKE PROFITS",
+                        "",
+                        "Escolha quantos alvos serão usados em cada sinal.",
+                        "Se o canal enviar menos TPs, serão usados somente os disponíveis.",
+                        "",
+                        "O lote total será dividido entre os alvos escolhidos.",
+                        "Quando TP1 for atingido, as posições restantes serão protegidas no breakeven.",
+                    ]
+                ),
+                TAKE_PROFIT_COUNT_MENU,
+                screen="signal_execution",
+            )
         if callback in {CB_EXEC_ENTRY_PENDING, CB_EXEC_ENTRY_MARKET_ZONE}:
             account = self.mt5_accounts.first_account(user.id)
             if account is None:
@@ -476,6 +499,36 @@ class BotService:
                 return self._connect_mt5_screen()
             profile = self.mt5_accounts.ensure_execution_profile(user.id, account.id)
             self.mt5_accounts.update_execution_profile_field(user.id, account.id, "split_tps", int(not profile.split_tps))
+            return self._signal_execution_screen(user)
+        if callback in {
+            CB_EXEC_TP_ALL,
+            CB_EXEC_TP_1,
+            CB_EXEC_TP_2,
+            CB_EXEC_TP_3,
+            CB_EXEC_TP_4,
+        }:
+            account = self.mt5_accounts.first_account(user.id)
+            if account is None:
+                return self._connect_mt5_screen()
+            limit = {
+                CB_EXEC_TP_ALL: 0,
+                CB_EXEC_TP_1: 1,
+                CB_EXEC_TP_2: 2,
+                CB_EXEC_TP_3: 3,
+                CB_EXEC_TP_4: 4,
+            }[callback]
+            self.mt5_accounts.update_execution_profile_field(
+                user.id,
+                account.id,
+                "take_profit_limit",
+                limit,
+            )
+            self.mt5_accounts.update_execution_profile_field(
+                user.id,
+                account.id,
+                "split_tps",
+                1,
+            )
             return self._signal_execution_screen(user)
         if callback == CB_MT5_TEST:
             account = self.mt5_accounts.first_account(user.id)
@@ -939,7 +992,10 @@ class BotService:
                 [
                     "🛡️ PROTEÇÕES",
                     "",
-                    "Breakeven:",
+                    "Breakeven: obrigatório após TP1",
+                    "🟢 Ativado",
+                    "",
+                    "BE antecipado ao avançar 1R:",
                     enabled_label(breakeven_enabled),
                     "",
                     "Trailing Stop:",
@@ -948,7 +1004,7 @@ class BotService:
                     "Limite diário:",
                     configured_label(daily_loss_limit > 0),
                     "",
-                    "Breakeven e trailing são avaliados após o preço avançar 1R. O trailing mantém distância de 1R e nunca afasta o stop.",
+                    "Ao atingir TP1, o Worker move as posições restantes do mesmo sinal para a entrada. O BE antecipado e o trailing são avaliados após avanço de 1R; o trailing nunca afasta o stop.",
                 ]
             ),
             PROTECTIONS_MENU,
@@ -1089,8 +1145,11 @@ class BotService:
                     "Validade:",
                     expiration_minutes_label(profile.pending_expiration_minutes),
                     "",
-                    "Divisão entre TPs:",
-                    enabled_label(profile.split_tps),
+                    "Take Profits utilizados:",
+                    take_profit_limit_label(profile.take_profit_limit),
+                    "",
+                    "Gestão após TP1:",
+                    "✅ Demais posições protegidas no breakeven",
                 ]
             ),
             SIGNAL_EXECUTION_MENU,
@@ -1213,6 +1272,14 @@ def expiration_minutes_label(value: int) -> str:
     if value >= 1440:
         return "Até o fim do dia"
     return f"{value} minutos"
+
+
+def take_profit_limit_label(value: int) -> str:
+    if value <= 0:
+        return "Todos os TPs enviados pelo canal"
+    if value == 1:
+        return "Somente TP1"
+    return f"TP1 até TP{value}"
 
 
 def financial_value(value: str | None) -> str:

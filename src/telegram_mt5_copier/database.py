@@ -318,6 +318,7 @@ def initialize_database(database_path: Path) -> None:
                 entry_execution_mode TEXT NOT NULL DEFAULT 'pending_order',
                 entry_price_mode TEXT NOT NULL DEFAULT 'first_touch',
                 pending_expiration_minutes INTEGER NOT NULL DEFAULT 120,
+                take_profit_limit INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(id),
                 FOREIGN KEY (mt5_account_id) REFERENCES mt5_accounts(id),
@@ -384,6 +385,8 @@ def initialize_database(database_path: Path) -> None:
                 updated_at TEXT NOT NULL,
                 error_code TEXT,
                 error_message TEXT,
+                tp1_reached_at TEXT,
+                breakeven_applied_at TEXT,
                 FOREIGN KEY (user_id) REFERENCES users(id),
                 FOREIGN KEY (mt5_account_id) REFERENCES mt5_accounts(id),
                 UNIQUE (signal_id, user_id, mt5_account_id)
@@ -711,6 +714,14 @@ def run_schema_migrations(connection: sqlite3.Connection) -> None:
         "pending_expiration_minutes",
         "INTEGER NOT NULL DEFAULT 120",
     )
+    ensure_column(
+        connection,
+        "execution_profiles",
+        "take_profit_limit",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    ensure_column(connection, "execution_groups", "tp1_reached_at", "TEXT")
+    ensure_column(connection, "execution_groups", "breakeven_applied_at", "TEXT")
 
 
 def ensure_column(connection: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:

@@ -42,7 +42,15 @@ class PendingOrderPlanner:
     ) -> PendingOrderPlan:
         planned_at = now or datetime.now(tz=timezone.utc)
         current_price = price_for_direction(signal.direction, tick)
-        take_profits = signal.take_profits if profile.split_tps else (signal.take_profits[-1],)
+        selected_take_profits = limit_take_profits(
+            signal.take_profits,
+            profile.take_profit_limit,
+        )
+        take_profits = (
+            selected_take_profits
+            if profile.split_tps
+            else (selected_take_profits[-1],)
+        )
         market_in_zone = (
             signal.entry_low <= current_price <= signal.entry_high
             and profile.entry_execution_mode == "market_on_zone"
@@ -153,6 +161,17 @@ class PendingOrderPlanner:
 
 def price_for_direction(direction: Direction, tick: TickInfo) -> Decimal:
     return tick.ask if direction == Direction.BUY else tick.bid
+
+
+def limit_take_profits(
+    take_profits: tuple[Decimal, ...],
+    limit: int,
+) -> tuple[Decimal, ...]:
+    if not take_profits:
+        raise PendingOrderPlanningError("Sinal sem Take Profit.")
+    if limit <= 0:
+        return take_profits
+    return take_profits[:limit]
 
 
 def select_entry_prices(

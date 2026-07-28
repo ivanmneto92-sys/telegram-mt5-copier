@@ -288,7 +288,13 @@ Para validar uma conta na VPS:
 7. Para envio em conta real, configure `MT5_EXECUTION_MODE=live_execution` e `ALLOW_LIVE_ACCOUNTS=true`.
 8. O envio só é liberado quando `GLOBAL_EXECUTION_KILL_SWITCH=false`, a conta está conectada, o usuário está ativo e o perfil operacional está habilitado.
 
-O modo real aplica antes do envio: lote fixo ou risco percentual, spread máximo, limite/meta diária, máximo de sinais, volume mínimo/step, distância mínima de stops e `order_check`. Ordens de múltiplos TPs são verificadas antes do primeiro envio; se uma submissão intermediária falhar, o serviço tenta remover as pendentes já criadas. Breakeven e trailing são administrados pelo `telegram-mt5-worker` após o preço avançar 1R.
+O modo real aplica antes do envio: lote fixo ou risco percentual, spread máximo, limite/meta diária, máximo de sinais, volume mínimo/step, distância mínima de stops e `order_check`. Ordens de múltiplos TPs são verificadas antes do primeiro envio; se uma submissão intermediária falhar, o serviço tenta remover as pendentes já criadas.
+
+Em `⚙️ Configurações > 🎯 Execução do sinal > Quantidade de TPs`, o usuário escolhe os primeiros 1, 2, 3 ou 4 alvos do sinal, ou todos os alvos disponíveis. O lote total configurado é dividido somente entre os TPs selecionados. A seleção não inventa alvos quando o sinal possui menos TPs.
+
+O `telegram-mt5-worker` protege automaticamente cada grupo: assim que o TP1 é atingido, move o Stop Loss das posições restantes para o preço real de entrada e cancela as ordens daquele grupo que ainda não foram ativadas. A detecção usa o preço atual e o histórico do MT5, permitindo recuperar o evento após uma breve reconexão. A proteção é aplicada apenas a posições do copiador, identificadas por `magic` e comentário; operações manuais não são alteradas. O BE antecipado em 1R e o trailing continuam opcionais e complementares.
+
+Para que a proteção após TP1 funcione, o Worker MT5 precisa permanecer ligado. Como a alteração do stop é executada pela API na VPS, indisponibilidade prolongada da VPS, do terminal ou da corretora pode impedir a proteção no instante exato; para garantia totalmente independente da VPS seria necessário também um Expert Advisor executado dentro do terminal.
 
 No bot de gestão, cada campo de risco possui valores rápidos e a opção `✍️ Personalizado`. Após tocar nessa opção, envie o número como mensagem: lote (`0,07`), risco (`0,75%`), meta/limite (`$ 150`) ou valores inteiros para operações, spread e slippage. Saldo, equity, meta e limite são exibidos com `$`; entrada, SL e TP permanecem sem símbolo monetário porque representam cotações do ativo.
 

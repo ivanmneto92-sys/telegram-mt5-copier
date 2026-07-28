@@ -49,6 +49,12 @@ CB_EXEC_EXPIRATION_120 = "v1:ex:exp:120"
 CB_EXEC_EXPIRATION_240 = "v1:ex:exp:240"
 CB_EXEC_EXPIRATION_DAY = "v1:ex:exp:day"
 CB_EXEC_SPLIT_TPS = "v1:ex:split"
+CB_EXEC_TP_MENU = "v1:ex:tp"
+CB_EXEC_TP_ALL = "v1:ex:tp:all"
+CB_EXEC_TP_1 = "v1:ex:tp:1"
+CB_EXEC_TP_2 = "v1:ex:tp:2"
+CB_EXEC_TP_3 = "v1:ex:tp:3"
+CB_EXEC_TP_4 = "v1:ex:tp:4"
 CB_CANCEL = "v1:x"
 CB_CONFIRM_ACTIVATE = "v1:act:ok"
 CB_CONFIRM_PAUSE = "v1:pause:ok"
@@ -188,7 +194,7 @@ CUSTOM_VALUE_MENU: tuple[tuple[Button, ...], ...] = (
 )
 
 PROTECTIONS_MENU: tuple[tuple[Button, ...], ...] = (
-    (Button("🛡️ Ativar/desativar Breakeven", "v1:p:be"),),
+    (Button("🛡️ BE antecipado em 1R", "v1:p:be"),),
     (Button("📈 Ativar/desativar Trailing Stop", "v1:p:tr"),),
     (Button("🛑 Configurar limite diário", "v1:p:loss"),),
     (Button("⬅️ Voltar ao menu", CB_MAIN),),
@@ -264,8 +270,22 @@ SIGNAL_EXECUTION_MENU: tuple[tuple[Button, ...], ...] = (
     (Button("📍 Modo de entrada", CB_EXEC_ENTRY_MENU),),
     (Button("🎯 Preço da faixa", CB_EXEC_PRICE_MENU),),
     (Button("⏳ Validade", CB_EXEC_EXPIRATION_MENU),),
-    (Button("🔢 Dividir entre TPs", CB_EXEC_SPLIT_TPS),),
+    (Button("🎯 Quantidade de TPs", CB_EXEC_TP_MENU),),
     (Button("⬅️ Voltar", CB_MT5_ACCOUNTS),),
+)
+
+
+TAKE_PROFIT_COUNT_MENU: tuple[tuple[Button, ...], ...] = (
+    (
+        Button("Somente TP1", CB_EXEC_TP_1),
+        Button("TP1 e TP2", CB_EXEC_TP_2),
+    ),
+    (
+        Button("Até TP3", CB_EXEC_TP_3),
+        Button("Até TP4", CB_EXEC_TP_4),
+    ),
+    (Button("Todos os TPs do sinal", CB_EXEC_TP_ALL),),
+    (Button("⬅️ Voltar", CB_SIGNAL_EXECUTION),),
 )
 
 
@@ -318,6 +338,7 @@ STATIC_CALLBACKS = {
         MT5_ACCOUNTS_MENU,
         CONFIRM_REMOVE_MT5,
         SIGNAL_EXECUTION_MENU,
+        TAKE_PROFIT_COUNT_MENU,
         ENTRY_MODE_MENU,
         ENTRY_PRICE_MENU,
         EXPIRATION_MENU,
@@ -332,6 +353,7 @@ STATIC_CALLBACKS.update(
         CB_MT5_SECURE,
         CB_MT5_ACCOUNTS,
         CB_SIGNAL_EXECUTION,
+        CB_EXEC_SPLIT_TPS,
         CB_ADMIN_BROWSER_ACCESS,
         CB_CHANNELS,
         CB_CHANNEL_ADD,

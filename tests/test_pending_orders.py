@@ -246,6 +246,26 @@ class PendingOrderTests(unittest.TestCase):
         self.assertEqual(distributed.orders[-1].entry_price, Decimal("4061.00"))
         self.assertEqual(len({order.entry_price for order in distributed.orders}), 4)
 
+    def test_cliente_escolhe_quantidade_de_take_profits(self) -> None:
+        self.accounts.update_execution_profile_field(
+            self.user.id,
+            self.account.id,
+            "take_profit_limit",
+            2,
+        )
+
+        plan = self.plan_buy(TickInfo(bid=Decimal("4062"), ask=Decimal("4062")))
+
+        self.assertEqual(len(plan.orders), 2)
+        self.assertEqual(
+            tuple(order.take_profit for order in plan.orders),
+            (Decimal("4066"), Decimal("4071")),
+        )
+        self.assertEqual(
+            tuple(order.normalized_volume for order in plan.orders),
+            (Decimal("0.02"), Decimal("0.02")),
+        )
+
     def test_divisao_004_em_quatro_ordens_de_001(self) -> None:
         volumes = allocate_volume(Decimal("0.04"), 4, SymbolInfo(name="XAUUSD"))
 
@@ -712,6 +732,160 @@ class PendingOrderTests(unittest.TestCase):
         self.assertEqual(client.order_send_requests[-1]["action"], 6)
         self.assertEqual(client.order_send_requests[-1]["position"], 9001)
         self.assertEqual(client.order_send_requests[-1]["sl"], 4063.0)
+
+    def test_worker_move_restantes_para_be_quando_tp1_e_atingido(self) -> None:
+        signal = parse_signal_text(BUY_SIGNAL).signal
+        result = self.executor().execute_for_account(signal, self.account, self.profile())
+        client = SimulatedMT5Client(
+            tick=TickInfo(bid=Decimal("4066"), ask=Decimal("4066")),
+            positions=(
+                {
+                    "magic": 27071301,
+                    "comment": f"tgcp {signal.signature[:8]} TP2",
+                    "ticket": 9002,
+                    "symbol": "XAUUSD",
+                    "price_open": 4061,
+                    "sl": 4044,
+                    "tp": 4071,
+                },
+                {
+                    "magic": 27071301,
+                    "comment": f"tgcp {signal.signature[:8]} TP3",
+                    "ticket": 9003,
+                    "symbol": "XAUUSD",
+                    "price_open": 4061,
+                    "sl": 4044,
+                    "tp": 4076,
+                },
+            ),
+        )
+        manager = PositionManager(self.database_path, self.accounts, lambda: client)
+
+        changed = manager.manage_account(self.account, self.profile())
+
+        self.assertEqual(changed, 2)
+        self.assertEqual(
+            [request["position"] for request in client.order_send_requests],
+            [9002, 9003],
+        )
+        self.assertEqual(
+            [request["sl"] for request in client.order_send_requests],
+            [4061.0, 4061.0],
+        )
+        with connect_database(self.database_path) as connection:
+            protection = connection.execute(
+                """
+                SELECT tp1_reached_at, breakeven_applied_at
+                FROM execution_groups WHERE id = ?
+                """,
+                (result.group_result.group.id,),
+            ).fetchone()
+        self.assertIsNotNone(protection[0])
+        self.assertIsNotNone(protection[1])
+
+    def test_worker_recupera_tp1_do_historico_apos_retracao(self) -> None:
+        signal = parse_signal_text(BUY_SIGNAL).signal
+        self.executor().execute_for_account(signal, self.account, self.profile())
+        client = SimulatedMT5Client(
+            tick=TickInfo(bid=Decimal("4062"), ask=Decimal("4062")),
+            positions=(
+                {
+                    "magic": 27071301,
+                    "comment": f"tgcp {signal.signature[:8]} TP2",
+                    "ticket": 9012,
+                    "symbol": "XAUUSD",
+                    "price_open": 4061,
+                    "sl": 4044,
+                    "tp": 4071,
+                },
+            ),
+            history_deals=(
+                {
+                    "magic": 27071301,
+                    "comment": f"tgcp {signal.signature[:8]} TP1",
+                    "position_id": 9011,
+                    "price": 4066,
+                },
+            ),
+        )
+        manager = PositionManager(self.database_path, self.accounts, lambda: client)
+
+        changed = manager.manage_account(self.account, self.profile())
+
+        self.assertEqual(changed, 1)
+        self.assertEqual(client.order_send_requests[0]["position"], 9012)
+        self.assertEqual(client.order_send_requests[0]["sl"], 4061.0)
+
+    def test_worker_move_sell_restante_para_be_ao_atingir_tp1(self) -> None:
+        signal = parse_signal_text(SELL_SIGNAL).signal
+        self.executor().execute_for_account(signal, self.account, self.profile())
+        client = SimulatedMT5Client(
+            tick=TickInfo(bid=Decimal("4054"), ask=Decimal("4054")),
+            positions=(
+                {
+                    "magic": 27071301,
+                    "comment": f"tgcp {signal.signature[:8]} TP2",
+                    "ticket": 9022,
+                    "symbol": "XAUUSD",
+                    "price_open": 4061,
+                    "sl": 4070,
+                    "tp": 4050,
+                },
+            ),
+        )
+        manager = PositionManager(self.database_path, self.accounts, lambda: client)
+
+        changed = manager.manage_account(self.account, self.profile())
+
+        self.assertEqual(changed, 1)
+        self.assertEqual(client.order_send_requests[0]["position"], 9022)
+        self.assertEqual(client.order_send_requests[0]["sl"], 4061.0)
+
+    def test_worker_cancela_entrada_pendente_restante_apos_tp1(self) -> None:
+        signal = parse_signal_text(BUY_SIGNAL).signal
+        result = self.executor().execute_for_account(signal, self.account, self.profile())
+        client = SimulatedMT5Client(
+            tick=TickInfo(bid=Decimal("4066"), ask=Decimal("4066")),
+            positions=(
+                {
+                    "magic": 27071301,
+                    "comment": f"tgcp {signal.signature[:8]} TP2",
+                    "ticket": 9032,
+                    "symbol": "XAUUSD",
+                    "price_open": 4061,
+                    "sl": 4044,
+                    "tp": 4071,
+                },
+            ),
+            orders=(
+                {
+                    "magic": 27071301,
+                    "comment": f"tgcp {signal.signature[:8]} TP3",
+                    "ticket": 7033,
+                    "symbol": "XAUUSD",
+                },
+            ),
+        )
+        manager = PositionManager(self.database_path, self.accounts, lambda: client)
+
+        changed = manager.manage_account(self.account, self.profile())
+
+        self.assertEqual(changed, 2)
+        self.assertEqual(
+            [request["action"] for request in client.order_send_requests],
+            [6, 8],
+        )
+        self.assertEqual(client.order_send_requests[0]["position"], 9032)
+        self.assertEqual(client.order_send_requests[1]["order"], 7033)
+        with connect_database(self.database_path) as connection:
+            status = connection.execute(
+                """
+                SELECT status FROM execution_orders
+                WHERE execution_group_id = ? AND tp_index = 3
+                """,
+                (result.group_result.group.id,),
+            ).fetchone()[0]
+        self.assertEqual(status, "cancelled")
 
     def test_worker_remove_pendente_invalidada_no_broker(self) -> None:
         signal = parse_signal_text(BUY_SIGNAL).signal

@@ -222,12 +222,17 @@ class BotManagementTests(unittest.TestCase):
             service.handle_callback(101, "alice", "v1:ex:price:middle")
             service.handle_callback(101, "alice", "v1:ex:exp:60")
             service.handle_callback(101, "alice", "v1:ex:split")
+            tp_menu = service.handle_callback(101, "alice", "v1:ex:tp")
+            tp_response = service.handle_callback(101, "alice", "v1:ex:tp:2")
             profile = accounts.get_execution_profile(user.id, account.id)
 
             self.assertIn("EXECUÇÃO DOS SINAIS", response.text)
+            self.assertIn("QUANTIDADE DE TAKE PROFITS", tp_menu.text)
+            self.assertIn("TP1 até TP2", tp_response.text)
             self.assertEqual(profile.entry_price_mode, ENTRY_PRICE_MIDDLE)
             self.assertEqual(profile.pending_expiration_minutes, 60)
-            self.assertFalse(profile.split_tps)
+            self.assertTrue(profile.split_tps)
+            self.assertEqual(profile.take_profit_limit, 2)
         finally:
             service.close()
             accounts.close()
