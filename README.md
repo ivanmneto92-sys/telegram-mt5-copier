@@ -308,6 +308,53 @@ O parser também reconhece entradas escritas no cabeçalho como
 `GOLD BUY NOW IN ZONE 4027-4020`. Alvos sem preço, como `TP 3: OPEN`, são
 ignorados; os demais TPs numéricos continuam sendo executados normalmente.
 
+## Supervisor e inicialização automática no Windows
+
+A partir da versão `0.11.0`, o comando `telegram-mt5-supervisor` inicia e
+acompanha estes quatro componentes:
+
+- Mini App / cadastro MT5;
+- Bot de gestão do Telegram;
+- Monitor dos sinais;
+- Worker MT5.
+
+Se um processo encerrar, o supervisor reinicia com espera progressiva de
+1, 2, 5, 10, 30 e no máximo 60 segundos. Cada componente escreve em um
+arquivo separado dentro de `LOG_DIR`, com nomes
+`supervisor-mini-app.log`, `supervisor-management-bot.log`,
+`supervisor-signal-monitor.log` e `supervisor-mt5-worker.log`. O próprio
+supervisor usa `telegram-mt5-supervisor.log`.
+
+O Caddy não é iniciado pelo supervisor: ele continua usando a configuração
+HTTPS já existente.
+
+Como o MetaTrader 5 precisa da sessão gráfica do Windows, a automação usa uma
+tarefa no login do usuário da VPS, e não a conta `SYSTEM` da sessão 0. Depois
+do login, a conexão RDP pode ser apenas desconectada; não use **Sair**, pois
+isso encerra a sessão gráfica dos terminais MT5.
+
+Antes da primeira instalação, encerre as quatro instâncias iniciadas
+manualmente. Em um PowerShell como Administrador, execute:
+
+```powershell
+cd C:\Apps\telegram-mt5-copier-main\telegram-mt5-copier
+.\scripts\install_windows_startup.ps1
+```
+
+Depois disso, não abra os quatro executáveis individualmente. Para consultar
+a tarefa:
+
+```powershell
+Get-ScheduledTask -TaskName 'Telegram MT5 Copier' |
+    Select-Object TaskName, State
+```
+
+Para remover somente a inicialização automática e parar o supervisor:
+
+```powershell
+.\scripts\uninstall_windows_startup.ps1
+```
+
 Para que a proteção após TP1 funcione, o Worker MT5 precisa permanecer ligado. Como a alteração do stop é executada pela API na VPS, indisponibilidade prolongada da VPS, do terminal ou da corretora pode impedir a proteção no instante exato; para garantia totalmente independente da VPS seria necessário também um Expert Advisor executado dentro do terminal.
 
 No bot de gestão, cada campo de risco possui valores rápidos e a opção `✍️ Personalizado`. Após tocar nessa opção, envie o número como mensagem: lote (`0,07`), risco (`0,75%`), meta/limite (`$ 150`) ou valores inteiros para operações, spread e slippage. Saldo, equity, meta e limite são exibidos com `$`; entrada, SL e TP permanecem sem símbolo monetário porque representam cotações do ativo.
