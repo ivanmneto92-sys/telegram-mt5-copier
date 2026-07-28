@@ -871,11 +871,15 @@ class BotService:
         connection_status = "⚪ Não conectado"
         balance = "Aguardando conexão"
         equity = "Aguardando conexão"
+        daily_result = "Aguardando atualização do Worker MT5"
         integration_message = "As informações financeiras serão exibidas após a integração com o MetaTrader 5."
         if account is not None:
             connection_status = mt5_account_connection_label(account.connection_status)
             balance = money_label(account.balance)
             equity = money_label(account.equity)
+            daily_result = daily_performance_label(
+                self.mt5_accounts.daily_performance(account.id)
+            )
             integration_message = "Informações atualizadas pela conexão com o MetaTrader 5."
         return BotResponse(
             "\n".join(
@@ -887,7 +891,7 @@ class BotService:
                     "",
                     f"Saldo: {balance}",
                     f"Equity: {equity}",
-                    "Resultado do dia: Aguardando cálculo",
+                    f"Resultado do dia: {daily_result}",
                     "",
                     integration_message,
                 ]
@@ -1247,6 +1251,18 @@ def money_label(value: Decimal | None) -> str:
     if value is None:
         return "Indisponível"
     return f"$ {format(value, '.2f')}"
+
+
+def daily_performance_label(performance: object | None) -> str:
+    if performance is None:
+        return "Aguardando atualização do Worker MT5"
+    profit = Decimal(str(getattr(performance, "realized_profit")))
+    percentage_value = getattr(performance, "return_percent")
+    percentage = Decimal(str(percentage_value)) if percentage_value is not None else None
+    marker = "🟢" if profit > 0 else "🔴" if profit < 0 else "⚪"
+    signed_profit = f"{profit:+.2f}"
+    signed_percentage = f"{percentage:+.2f}%" if percentage is not None else "percentual indisponível"
+    return f"{marker} $ {signed_profit} ({signed_percentage})"
 
 
 def entry_execution_label(value: str) -> str:

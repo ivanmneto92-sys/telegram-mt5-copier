@@ -75,7 +75,8 @@ O admin master pode:
 - consultar totais de clientes ativos, pausados e contas MT5 conectadas;
 - buscar clientes por username, ID Telegram, conta, servidor, nome, e-mail,
   telefone ou plano;
-- visualizar conta mascarada, saldo, equity, heartbeat e perfil operacional;
+- visualizar conta mascarada, saldo, equity, resultado realizado do dia em dólar
+  e percentual sobre a banca inicial, heartbeat e perfil operacional;
 - identificar contas que precisam de atenção;
 - ativar ou pausar clientes com confirmação;
 - cadastrar nome, contato, plano, mensalidade e data de vencimento;
@@ -295,6 +296,13 @@ O modo real aplica antes do envio: lote fixo ou risco percentual, spread máximo
 Em `⚙️ Configurações > 🎯 Execução do sinal > Quantidade de TPs`, o usuário escolhe os primeiros 1, 2, 3 ou 4 alvos do sinal, ou todos os alvos disponíveis. O lote total configurado é dividido somente entre os TPs selecionados. A seleção não inventa alvos quando o sinal possui menos TPs.
 
 O `telegram-mt5-worker` protege automaticamente cada grupo: assim que o TP1 é atingido, move o Stop Loss das posições restantes para o preço real de entrada e cancela as ordens daquele grupo que ainda não foram ativadas. A detecção usa o preço atual e o histórico do MT5, permitindo recuperar o evento após uma breve reconexão. A proteção é aplicada apenas a posições do copiador, identificadas por `magic` e comentário; operações manuais não são alteradas. O BE antecipado em 1R e o trailing continuam opcionais e complementares.
+
+Na tela `💼 Minha conta`, o resultado realizado do dia considera as operações
+fechadas da conta (incluindo custos, swap e comissões), ignora depósitos e
+saques e mostra `$ lucro/prejuízo (percentual)`. O percentual usa como base a
+banca estimada no início do dia, calculada por `saldo atual - resultado
+realizado`. O dia segue o horário de Brasília (UTC-3) e é atualizado pelo
+`telegram-mt5-worker`.
 
 Para que a proteção após TP1 funcione, o Worker MT5 precisa permanecer ligado. Como a alteração do stop é executada pela API na VPS, indisponibilidade prolongada da VPS, do terminal ou da corretora pode impedir a proteção no instante exato; para garantia totalmente independente da VPS seria necessário também um Expert Advisor executado dentro do terminal.
 

@@ -10,6 +10,11 @@ from typing import Callable
 from ..credential_service import CredentialService
 from ..database import connect_database, initialize_database, utc_now
 from .client import MT5Client
+from .daily_performance import (
+    DailyPerformance,
+    calculate_daily_performance,
+    current_performance_date,
+)
 from .models import (
     ACCOUNT_MODE_HEDGING,
     ACCOUNT_TYPE_DEMO,
@@ -257,6 +262,12 @@ class MT5AccountService:
             if info.account_type == ACCOUNT_TYPE_REAL and not self.allow_live_accounts:
                 raise MT5UnsafeAccountError("Contas reais estao bloqueadas nesta fase.")
 
+            performance: DailyPerformance | None = None
+            try:
+                performance = calculate_daily_performance(client, info.balance)
+            except Exception:
+                # A leitura do histórico não deve transformar uma conexão MT5 válida em falha.
+                performance = None
             self.update_connection_status(
                 user_id,
                 account_id,
@@ -269,6 +280,8 @@ class MT5AccountService:
                 balance=info.balance,
                 equity=info.equity,
             )
+            if performance is not None:
+                self.update_daily_performance(account_id, performance)
             self.record_audit(user_id, "mt5_connection_tested", {"account_id": account_id, "status": "connected"})
             return self.get_account(user_id, account_id)
         except Exception as exc:
@@ -449,7 +462,14 @@ class MT5AccountService:
                        worker_heartbeat_at
                 FROM mt5_accounts
                 WHERE user_id = ?
-                ORDER BY id ASC
+                ORDER BY COALESCE(
+                             (SELECT p.enabled FROM execution_profiles p
+                              WHERE p.user_id = mt5_accounts.user_id
+                                AND p.mt5_account_id = mt5_accounts.id),
+                             0
+                         ) DESC,
+                         CASE WHEN connection_status = 'connected' THEN 1 ELSE 0 END DESC,
+                         id DESC
                 """,
                 (user_id,),
             )
@@ -484,8 +504,66 @@ class MT5AccountService:
         accounts = self.list_accounts(user_id)
         return accounts[0] if accounts else None
 
+    def update_daily_performance(
+        self,
+        account_id: int,
+        performance: DailyPerformance,
+    ) -> None:
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO account_daily_performance (
+                    mt5_account_id, performance_date, realized_profit,
+                    starting_balance, return_percent, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(mt5_account_id, performance_date) DO UPDATE SET
+                    realized_profit = excluded.realized_profit,
+                    starting_balance = excluded.starting_balance,
+                    return_percent = excluded.return_percent,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    account_id,
+                    performance.performance_date,
+                    str(performance.realized_profit),
+                    str(performance.starting_balance)
+                    if performance.starting_balance is not None
+                    else None,
+                    str(performance.return_percent)
+                    if performance.return_percent is not None
+                    else None,
+                    performance.updated_at,
+                ),
+            )
+
+    def daily_performance(self, account_id: int) -> DailyPerformance | None:
+        with connect_database(self.database_path) as connection:
+            row = connection.execute(
+                """
+                SELECT performance_date, realized_profit, starting_balance,
+                       return_percent, updated_at
+                FROM account_daily_performance
+                WHERE mt5_account_id = ? AND performance_date = ?
+                """,
+                (account_id, current_performance_date()),
+            ).fetchone()
+        if row is None:
+            return None
+        return DailyPerformance(
+            performance_date=str(row[0]),
+            realized_profit=Decimal(str(row[1])),
+            starting_balance=Decimal(str(row[2])) if row[2] is not None else None,
+            return_percent=Decimal(str(row[3])) if row[3] is not None else None,
+            updated_at=str(row[4]),
+        )
+
     def remove_account(self, user_id: int, account_id: int) -> None:
         with connect_database(self.database_path) as connection:
+            connection.execute(
+                "DELETE FROM account_daily_performance WHERE mt5_account_id = ?",
+                (account_id,),
+            )
             for sql in (
                 """
                 DELETE FROM execution_notifications

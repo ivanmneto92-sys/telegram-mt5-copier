@@ -15,6 +15,10 @@ from telegram_mt5_copier.database import (
 )
 from telegram_mt5_copier.mt5.account_service import MT5AccountForm, MT5AccountService
 from telegram_mt5_copier.mt5.client import SimulatedMT5Client
+from telegram_mt5_copier.mt5.daily_performance import (
+    DailyPerformance,
+    current_performance_date,
+)
 from telegram_mt5_copier.mt5.models import ENTRY_PRICE_MIDDLE
 from telegram_mt5_copier.mt5.terminal_manager import TerminalManager
 from telegram_mt5_copier.settings_service import SettingsService
@@ -45,6 +49,39 @@ class BotManagementTests(unittest.TestCase):
         self.assertEqual(user.telegram_username, "alice")
         self.assertEqual(user.status, USER_STATUS_PAUSED)
         self.assertIsNotNone(self.settings.get_settings(user.id))
+
+    def test_minha_conta_mostra_resultado_diario_em_dolar_e_percentual(self) -> None:
+        accounts = MT5AccountService(
+            self.database_path,
+            credential_service=CredentialService(CredentialService.generate_key()),
+            terminal_manager=TerminalManager(Path(self.temp_dir.name) / "mt5-performance"),
+            client_factory=lambda: SimulatedMT5Client(),
+        )
+        service = BotService(self.database_path, mt5_account_service=accounts)
+        try:
+            service.start(101, "alice")
+            user = self.users.get_by_telegram_user_id(101)
+            account = accounts.register_account(
+                user.id,
+                MT5AccountForm("Broker", "Broker-Demo", "12345678", "secret", "Demo"),
+            )
+            accounts.update_daily_performance(
+                account.id,
+                DailyPerformance(
+                    current_performance_date(),
+                    Decimal("79"),
+                    Decimal("10000"),
+                    Decimal("0.79"),
+                    "2026-07-28T15:00:00+00:00",
+                ),
+            )
+
+            response = service.handle_callback(101, "alice", "v1:a")
+
+            self.assertIn("Resultado do dia: 🟢 $ +79.00 (+0.79%)", response.text)
+        finally:
+            service.close()
+            accounts.close()
 
     def test_cliente_nao_consegue_se_autoativar(self) -> None:
         self.service.start(101, "alice")

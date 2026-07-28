@@ -160,6 +160,27 @@ class MT5OnboardingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.accounts.get_account(bob.id, account.id)
 
+    def test_conta_habilitada_e_conectada_tem_prioridade_no_bot(self) -> None:
+        user = self.create_user()
+        old_account = self.accounts.register_account(
+            user.id,
+            MT5AccountForm("Broker", "Broker-Demo", "11111111", "secret", "Antiga"),
+        )
+        active_account = self.accounts.register_account(
+            user.id,
+            MT5AccountForm("Broker", "Broker-Demo", "22222222", "secret", "Ativa"),
+        )
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                "UPDATE execution_profiles SET enabled = 0 WHERE mt5_account_id = ?",
+                (old_account.id,),
+            )
+
+        selected = self.accounts.first_account(user.id)
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected.id, active_account.id)
+
     def test_remocao_de_conta_apaga_senha_criptografada(self) -> None:
         user = self.create_user()
         account = self.create_account(user.id)

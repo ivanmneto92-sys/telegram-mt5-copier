@@ -545,6 +545,17 @@ def initialize_database(database_path: Path) -> None:
                 details TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS account_daily_performance (
+                mt5_account_id INTEGER NOT NULL,
+                performance_date TEXT NOT NULL,
+                realized_profit TEXT NOT NULL,
+                starting_balance TEXT,
+                return_percent TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (mt5_account_id, performance_date),
+                FOREIGN KEY (mt5_account_id) REFERENCES mt5_accounts(id)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_signal_events_status
                 ON signal_events(status);
 
