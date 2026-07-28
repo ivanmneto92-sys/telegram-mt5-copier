@@ -535,7 +535,11 @@ class BotService:
             if account is None:
                 return self._connect_mt5_screen()
             try:
-                updated = self.mt5_accounts.test_connection(user.id, account.id)
+                updated = self.mt5_accounts.test_connection(
+                    user.id,
+                    account.id,
+                    startup_retry=True,
+                )
             except Exception as exc:
                 return BotResponse(f"Teste de conexao falhou: {exc}", MT5_ACCOUNTS_MENU, screen="mt5_accounts")
             return BotResponse(

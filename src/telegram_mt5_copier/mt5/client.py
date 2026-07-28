@@ -36,24 +36,15 @@ class MT5Client:
         terminal_initialized = bool(
             self._mt5.initialize(
                 path=str(terminal_path),
+                login=int(login),
+                password=password,
+                server=server,
                 portable=True,
                 timeout=timeout_ms,
             )
         )
         self._initialized = terminal_initialized
         if not terminal_initialized:
-            self._last_error = self.last_error()
-            return False
-
-        logged_in = bool(
-            self._mt5.login(
-                int(login),
-                password=password,
-                server=server,
-                timeout=timeout_ms,
-            )
-        )
-        if not logged_in:
             self._last_error = self.last_error()
             return False
         return True

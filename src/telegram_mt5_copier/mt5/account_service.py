@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 import json
 from pathlib import Path
+import time
 from typing import Callable
 
 from ..credential_service import CredentialService
@@ -95,75 +96,136 @@ class MT5AccountService:
         account_alias = require_text(form.account_alias, "account_alias")
         password = require_text(form.password, "password")
 
-        if self.count_accounts() >= self.max_accounts_per_vps:
-            raise ValueError("Limite de contas MT5 da VPS atingido.")
-
         encrypted_password = self.credential_service.encrypt_password(password)
         password = ""
         form.password = ""
+        if self._account_already_connected(user_id, login, server_name):
+            raise ValueError("Conta MT5 ja cadastrada. Use Testar conexao no bot.")
         now = utc_now()
-        with connect_database(self.database_path) as connection:
-            cursor = connection.execute(
-                """
-                INSERT INTO mt5_accounts (
-                    user_id,
-                    broker_name,
-                    server_name,
-                    login,
-                    encrypted_password,
-                    account_alias,
-                    account_mode,
-                    account_type,
-                    connection_status,
-                    created_at,
-                    updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    user_id,
-                    broker_name,
-                    server_name,
-                    login,
-                    encrypted_password,
-                    account_alias,
-                    ACCOUNT_MODE_HEDGING,
-                    ACCOUNT_TYPE_DEMO,
-                    CONNECTION_STATUS_DISCONNECTED,
-                    now,
-                    now,
-                ),
+        retry_account = self._account_for_registration_retry(user_id, login, server_name)
+        if retry_account is not None:
+            account_id = retry_account.id
+            with connect_database(self.database_path) as connection:
+                connection.execute(
+                    """
+                    UPDATE mt5_accounts
+                    SET broker_name = ?, server_name = ?, encrypted_password = ?,
+                        account_alias = ?, connection_status = ?,
+                        last_error = NULL, updated_at = ?
+                    WHERE id = ? AND user_id = ?
+                    """,
+                    (
+                        broker_name,
+                        server_name,
+                        encrypted_password,
+                        account_alias,
+                        CONNECTION_STATUS_DISCONNECTED,
+                        now,
+                        account_id,
+                        user_id,
+                    ),
+                ).close()
+            self.record_audit(
+                user_id,
+                "mt5_account_registration_retried",
+                {"account_id": account_id},
             )
-            try:
-                account_id = int(cursor.lastrowid)
-            finally:
-                cursor.close()
+        else:
+            if self.count_accounts() >= self.max_accounts_per_vps:
+                raise ValueError("Limite de contas MT5 da VPS atingido.")
+            with connect_database(self.database_path) as connection:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO mt5_accounts (
+                        user_id,
+                        broker_name,
+                        server_name,
+                        login,
+                        encrypted_password,
+                        account_alias,
+                        account_mode,
+                        account_type,
+                        connection_status,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        user_id,
+                        broker_name,
+                        server_name,
+                        login,
+                        encrypted_password,
+                        account_alias,
+                        ACCOUNT_MODE_HEDGING,
+                        ACCOUNT_TYPE_DEMO,
+                        CONNECTION_STATUS_DISCONNECTED,
+                        now,
+                        now,
+                    ),
+                )
+                try:
+                    account_id = int(cursor.lastrowid)
+                finally:
+                    cursor.close()
 
         try:
             if self.terminal_manager is not None:
-                provisioned = self.terminal_manager.provision_account(account_id)
+                provisioned = self.terminal_manager.provision_account(
+                    account_id,
+                    sanitize_legacy=retry_account is not None,
+                )
                 self.update_terminal_path(user_id, account_id, provisioned.terminal_path)
             self.ensure_execution_profile(user_id, account_id)
-            self.test_connection(user_id, account_id)
+            self.test_connection(user_id, account_id, startup_retry=True)
             self.record_audit(user_id, "mt5_account_registered", {"account_id": account_id})
         except Exception as exc:
             if keep_on_connection_failure and not isinstance(exc, MT5UnsafeAccountError):
+                failed_account = self.get_account(user_id, account_id)
+                if failed_account.connection_status != CONNECTION_STATUS_FAILED:
+                    self.update_connection_status(
+                        user_id,
+                        account_id,
+                        status=CONNECTION_STATUS_FAILED,
+                        account_type=failed_account.account_type,
+                        account_mode=failed_account.account_mode,
+                        last_error=str(exc),
+                        connected=False,
+                    )
                 self.record_audit(
                     user_id,
                     "mt5_account_registered_with_connection_failure",
                     {"account_id": account_id},
                 )
                 return self.get_account(user_id, account_id)
+            if retry_account is not None:
+                raise
             self.remove_account(user_id, account_id)
             raise
 
         return self.get_account(user_id, account_id)
 
-    def test_connection(self, user_id: int, account_id: int) -> MT5Account:
+    def test_connection(
+        self,
+        user_id: int,
+        account_id: int,
+        *,
+        startup_retry: bool = False,
+    ) -> MT5Account:
         self._require_credentials()
         account = self.get_account(user_id, account_id)
         if account.terminal_path is None:
             raise ValueError("Terminal MT5 ainda nao provisionado.")
+        if (
+            startup_retry
+            and account.connection_status == CONNECTION_STATUS_FAILED
+            and self.terminal_manager is not None
+        ):
+            self.terminal_manager.provision_account(
+                account.id,
+                sanitize_legacy=True,
+            )
 
         client = self.client_factory()
         operation_lock = MT5OperationLock(account.terminal_path.parent)
@@ -171,7 +233,12 @@ class MT5AccountService:
         try:
             operation_lock.acquire()
             password = self.credential_service.decrypt_password(account.encrypted_password)
-            if not client.initialize(account.terminal_path, int(account.login), password, account.server_name):
+            if not self._initialize_client(
+                client,
+                account,
+                password,
+                startup_retry=startup_retry,
+            ):
                 raise MT5ConnectionTestError(mt5_connection_error_message(client))
             terminal = client.terminal_info()
             if terminal is None or not terminal.connected:
@@ -219,6 +286,101 @@ class MT5AccountService:
             password = None
             client.shutdown()
             operation_lock.close()
+
+    def _initialize_client(
+        self,
+        client: object,
+        account: MT5Account,
+        password: str,
+        *,
+        startup_retry: bool,
+    ) -> bool:
+        attempts = 2 if startup_retry else 1
+        for attempt in range(attempts):
+            if client.initialize(
+                account.terminal_path,
+                int(account.login),
+                password,
+                account.server_name,
+            ):
+                return True
+            if attempt + 1 >= attempts or not is_transient_ipc_error(client):
+                return False
+            client.shutdown()
+            time.sleep(3)
+        return False
+
+    def _account_for_registration_retry(
+        self,
+        user_id: int,
+        login: str,
+        server_name: str,
+    ) -> MT5Account | None:
+        with connect_database(self.database_path) as connection:
+            row = connection.execute(
+                """
+                SELECT id, user_id, broker_name, server_name, login, encrypted_password,
+                       account_alias, terminal_path, account_type, connection_status,
+                       last_error, last_connected_at, account_mode, balance, equity,
+                       worker_heartbeat_at
+                FROM mt5_accounts
+                WHERE user_id = ? AND login = ?
+                  AND lower(server_name) = lower(?)
+                  AND connection_status IN (?, ?)
+                ORDER BY id DESC LIMIT 1
+                """,
+                (
+                    user_id,
+                    login,
+                    server_name,
+                    CONNECTION_STATUS_FAILED,
+                    CONNECTION_STATUS_DISCONNECTED,
+                ),
+            ).fetchone()
+            if row is None:
+                row = connection.execute(
+                    """
+                    SELECT id, user_id, broker_name, server_name, login, encrypted_password,
+                           account_alias, terminal_path, account_type, connection_status,
+                           last_error, last_connected_at, account_mode, balance, equity,
+                           worker_heartbeat_at
+                    FROM mt5_accounts
+                    WHERE user_id = ? AND login = ?
+                      AND connection_status IN (?, ?)
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (
+                        user_id,
+                        login,
+                        CONNECTION_STATUS_FAILED,
+                        CONNECTION_STATUS_DISCONNECTED,
+                    ),
+                ).fetchone()
+        return account_from_row(row) if row is not None else None
+
+    def _account_already_connected(
+        self,
+        user_id: int,
+        login: str,
+        server_name: str,
+    ) -> bool:
+        with connect_database(self.database_path) as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM mt5_accounts
+                WHERE user_id = ? AND login = ?
+                  AND lower(server_name) = lower(?)
+                  AND connection_status = ?
+                LIMIT 1
+                """,
+                (
+                    user_id,
+                    login,
+                    server_name,
+                    CONNECTION_STATUS_CONNECTED,
+                ),
+            ).fetchone()
+        return row is not None
 
     def update_terminal_path(self, user_id: int, account_id: int, terminal_path: Path) -> None:
         with connect_database(self.database_path) as connection:
@@ -786,6 +948,25 @@ def mt5_connection_error_message(client: object, fallback: str = "MT5 nao conseg
     if detail:
         return f"{fallback} Detalhe MT5: {detail}"
     return fallback
+
+
+def is_transient_ipc_error(client: object) -> bool:
+    if not hasattr(client, "last_error"):
+        return False
+    try:
+        last_error = client.last_error()
+    except Exception:
+        return False
+    normalized = str(last_error).lower()
+    return any(
+        marker in normalized
+        for marker in (
+            "-10005",
+            "ipc timeout",
+            "-10001",
+            "ipc send failed",
+        )
+    )
 
 
 def sanitize_mt5_error(value: object | None) -> str:

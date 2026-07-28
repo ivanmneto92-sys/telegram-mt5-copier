@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 from telegram_mt5_copier.credential_service import CredentialService
 from telegram_mt5_copier.command_queue import CommandQueue
@@ -197,6 +198,59 @@ class MT5OnboardingTests(unittest.TestCase):
         self.assertTrue(provisioned.data_dir.is_dir())
         self.assertTrue(provisioned.logs_dir.is_dir())
 
+    def test_template_copiado_nao_herda_sessao_bases_ou_logs(self) -> None:
+        template = self.root / "template"
+        (template / "config").mkdir(parents=True)
+        (template / "bases" / "Broker").mkdir(parents=True)
+        (template / "logs").mkdir(parents=True)
+        (template / "MQL5" / "Logs").mkdir(parents=True)
+        (template / "terminal64.exe").write_bytes(b"terminal")
+        (template / "config" / "accounts.dat").write_bytes(b"admin-session")
+        (template / "config" / "common.ini").write_text(
+            "[Common]\nLogin=87812436\nPassword=secret",
+            encoding="utf-16",
+        )
+        (template / "config" / "terminal.ini").write_bytes(b"runtime")
+        (template / "bases" / "Broker" / "history.dat").write_bytes(b"history")
+        (template / "logs" / "old.log").write_text("admin log", encoding="utf-8")
+        (template / "MQL5" / "Logs" / "old.log").write_text("expert log", encoding="utf-8")
+        manager = TerminalManager(self.root / "isolated", template)
+
+        provisioned = manager.provision_account(77)
+
+        self.assertFalse((provisioned.account_dir / "config" / "accounts.dat").exists())
+        self.assertFalse((provisioned.account_dir / "config" / "terminal.ini").exists())
+        safe_config = (provisioned.account_dir / "config" / "common.ini").read_text(
+            encoding="utf-16"
+        )
+        self.assertIn("KeepPrivate=0", safe_config)
+        self.assertNotIn("87812436", safe_config)
+        self.assertNotIn("secret", safe_config)
+        self.assertFalse((provisioned.account_dir / "bases").exists())
+        self.assertFalse((provisioned.logs_dir / "old.log").exists())
+        self.assertFalse((provisioned.account_dir / "MQL5" / "Logs").exists())
+        self.assertTrue((template / "config" / "accounts.dat").exists())
+
+    def test_higienizacao_de_legado_acontece_apenas_uma_vez(self) -> None:
+        account_dir = self.terminal_manager.account_dir(78)
+        (account_dir / "config").mkdir(parents=True)
+        (account_dir / "bases").mkdir()
+        (account_dir / "config" / "accounts.dat").write_bytes(b"legacy-session")
+        (account_dir / "bases" / "legacy.dat").write_bytes(b"legacy")
+
+        self.terminal_manager.provision_account(78, sanitize_legacy=True)
+
+        self.assertFalse((account_dir / "config" / "accounts.dat").exists())
+        self.assertFalse((account_dir / "bases").exists())
+        marker = account_dir / ".telegram-mt5-sanitized"
+        self.assertTrue(marker.exists())
+
+        (account_dir / "bases").mkdir()
+        (account_dir / "bases" / "new-account.dat").write_bytes(b"current")
+        self.terminal_manager.provision_account(78, sanitize_legacy=True)
+
+        self.assertTrue((account_dir / "bases" / "new-account.dat").exists())
+
     def test_mt5_client_inicializa_em_modo_portable(self) -> None:
         fake_mt5 = FakeMT5Module()
         client = MT5Client(fake_mt5)
@@ -205,20 +259,65 @@ class MT5OnboardingTests(unittest.TestCase):
 
         self.assertTrue(fake_mt5.initialize_kwargs["portable"])
         self.assertEqual(fake_mt5.initialize_kwargs["path"], "terminal64.exe")
-        self.assertNotIn("login", fake_mt5.initialize_kwargs)
-        self.assertEqual(fake_mt5.login_args[0], 1234)
-        self.assertEqual(fake_mt5.login_kwargs["server"], "Broker-Demo")
-        self.assertEqual(fake_mt5.call_order, ["initialize", "login"])
+        self.assertEqual(fake_mt5.initialize_kwargs["login"], 1234)
+        self.assertEqual(fake_mt5.initialize_kwargs["password"], "secret")
+        self.assertEqual(fake_mt5.initialize_kwargs["server"], "Broker-Demo")
+        self.assertEqual(fake_mt5.call_order, ["initialize"])
         client.shutdown()
 
     def test_mt5_client_registra_last_error_quando_login_falha(self) -> None:
-        fake_mt5 = FakeMT5Module(login_result=False, last_error=(10004, "server not found"))
+        fake_mt5 = FakeMT5Module(initialize_result=False, last_error=(10004, "server not found"))
         client = MT5Client(fake_mt5)
 
         self.assertFalse(client.initialize(Path("terminal64.exe"), 1234, "secret", "Broker-Demo"))
 
         self.assertEqual(client.last_error(), (10004, "server not found"))
         client.shutdown()
+
+    def test_cadastro_repete_initialize_apos_ipc_timeout_transitorio(self) -> None:
+        user = self.create_user()
+        client = TransientIPCClient()
+        self.accounts.client_factory = lambda: client
+
+        with patch("telegram_mt5_copier.mt5.account_service.time.sleep") as sleep:
+            account = self.create_account(user.id)
+
+        self.assertEqual(account.connection_status, "connected")
+        self.assertEqual(client.initialize_attempts, 2)
+        sleep.assert_called_once_with(3)
+
+    def test_nova_tentativa_reutiliza_conta_falha_sem_criar_duplicata(self) -> None:
+        user = self.create_user()
+        accounts = MT5AccountService(
+            self.database_path,
+            credential_service=self.credential_service,
+            terminal_manager=self.terminal_manager,
+            client_factory=FailingLoginClient,
+        )
+        try:
+            failed = accounts.register_account(
+                user.id,
+                MT5AccountForm("HFM", "Servidor digitado errado", "445566", "old", "Beatriz"),
+                keep_on_connection_failure=True,
+            )
+            accounts.client_factory = SimulatedMT5Client
+
+            connected = accounts.register_account(
+                user.id,
+                MT5AccountForm("HFM", "HFMarketsGlobal-Live3", "445566", "new", "Beatriz"),
+                keep_on_connection_failure=True,
+            )
+
+            self.assertEqual(connected.id, failed.id)
+            self.assertEqual(connected.connection_status, "connected")
+            self.assertEqual(connected.server_name, "HFMarketsGlobal-Live3")
+            self.assertEqual(accounts.count_accounts(), 1)
+            self.assertEqual(
+                self.credential_service.decrypt_password(connected.encrypted_password),
+                "new",
+            )
+        finally:
+            accounts.close()
 
     def test_falha_de_conexao_salva_last_error_sem_senha(self) -> None:
         user = self.create_user()
@@ -456,6 +555,33 @@ class FlakyConnectionClient(SimulatedMT5Client):
         if self.fail:
             return None
         return super().account_info()
+
+
+class TransientIPCClient(SimulatedMT5Client):
+    def __init__(self) -> None:
+        super().__init__()
+        self.initialize_attempts = 0
+
+    def initialize(
+        self,
+        terminal_path: Path,
+        login: int,
+        password: str,
+        server: str,
+        *,
+        timeout_ms: int = 60000,
+    ) -> bool:
+        self.initialize_attempts += 1
+        if self.initialize_attempts == 1:
+            self._last_error = (-10005, "IPC timeout")
+            return False
+        return super().initialize(
+            terminal_path,
+            login,
+            password,
+            server,
+            timeout_ms=timeout_ms,
+        )
 
 
 class FailingLoginClient(SimulatedMT5Client):
