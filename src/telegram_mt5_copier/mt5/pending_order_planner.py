@@ -6,6 +6,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from ..models import Direction, TradeSignal
 from ..database import utc_now
 from .models import (
+    ENTRY_EXECUTION_MARKET_IMMEDIATE,
     ENTRY_PRICE_DISTRIBUTED,
     ENTRY_PRICE_FIRST_TOUCH,
     ENTRY_PRICE_MIDDLE,
@@ -51,13 +52,16 @@ class PendingOrderPlanner:
             if profile.split_tps
             else (selected_take_profits[-1],)
         )
+        market_immediate = (
+            profile.entry_execution_mode == ENTRY_EXECUTION_MARKET_IMMEDIATE
+        )
         market_in_zone = (
             signal.entry_low <= current_price <= signal.entry_high
             and profile.entry_execution_mode == "market_on_zone"
         )
         entry_prices = (
             tuple(normalize_price(current_price, symbol_info) for _ in take_profits)
-            if market_in_zone
+            if market_immediate or market_in_zone
             else select_entry_prices(
                 direction=signal.direction,
                 entry_low=signal.entry_low,

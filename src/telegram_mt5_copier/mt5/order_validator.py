@@ -46,8 +46,6 @@ def validate_pending_order_plan(
         raise OrderValidationError("netting_multiple_tps_not_supported")
     if not plan.orders:
         raise OrderValidationError("missing_orders")
-    if len(plan.orders) > 1 and any(order.order_type.value in {"BUY", "SELL"} for order in plan.orders):
-        raise OrderValidationError("market_multiple_tps_not_supported")
     if not symbol_info.trade_allowed:
         raise OrderValidationError("symbol_trade_disabled")
     expiration = datetime.fromisoformat(plan.expiration_at)

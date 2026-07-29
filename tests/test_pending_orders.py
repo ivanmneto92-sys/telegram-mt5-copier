@@ -17,6 +17,7 @@ from telegram_mt5_copier.mt5.models import (
     ACCOUNT_MODE_NETTING,
     ACCOUNT_TYPE_REAL,
     CONNECTION_STATUS_DISCONNECTED,
+    ENTRY_EXECUTION_MARKET_IMMEDIATE,
     ENTRY_PRICE_DISTRIBUTED,
     ENTRY_PRICE_MIDDLE,
     PendingOrderType,
@@ -24,7 +25,10 @@ from telegram_mt5_copier.mt5.models import (
     TickInfo,
 )
 from telegram_mt5_copier.mt5.order_type_resolver import resolve_order_type
-from telegram_mt5_copier.mt5.pending_order_executor import PendingOrderExecutor
+from telegram_mt5_copier.mt5.pending_order_executor import (
+    MT5_MAGIC_NUMBER,
+    PendingOrderExecutor,
+)
 from telegram_mt5_copier.mt5.pending_order_monitor import PendingOrderMonitor
 from telegram_mt5_copier.mt5.position_manager import PositionManager
 from telegram_mt5_copier.mt5.pending_order_planner import PendingOrderPlanner
@@ -227,6 +231,73 @@ class PendingOrderTests(unittest.TestCase):
         self.assertEqual(plan.order_type, PendingOrderType.BUY)
         self.assertEqual(plan.selected_entry_price, Decimal("4060.00"))
         self.assertEqual(len(plan.orders), 1)
+
+    def test_entrada_imediata_usa_mercado_fora_da_zona_com_multiplos_tps(self) -> None:
+        signal = parse_signal_text(BUY_SIGNAL).signal
+        profile = replace(
+            self.profile(),
+            entry_execution_mode=ENTRY_EXECUTION_MARKET_IMMEDIATE,
+        )
+        plan = PendingOrderPlanner().plan(
+            signal=signal,
+            account=self.account,
+            profile=profile,
+            symbol_info=SymbolInfo(name="XAUUSD"),
+            tick=TickInfo(bid=Decimal("4062"), ask=Decimal("4062")),
+            execution_mode="live_execution",
+        )
+
+        self.assertEqual(plan.order_type, PendingOrderType.BUY)
+        self.assertEqual(plan.selected_entry_price, Decimal("4062.00"))
+        self.assertEqual(len(plan.orders), 4)
+        self.assertTrue(
+            all(order.order_type == PendingOrderType.BUY for order in plan.orders)
+        )
+        self.assertTrue(
+            all(order.entry_price == Decimal("4062.00") for order in plan.orders)
+        )
+
+    def test_entrada_imediata_sell_usa_bid_atual_fora_da_zona(self) -> None:
+        signal = parse_signal_text(SELL_SIGNAL).signal
+        profile = replace(
+            self.profile(),
+            entry_execution_mode=ENTRY_EXECUTION_MARKET_IMMEDIATE,
+        )
+        plan = PendingOrderPlanner().plan(
+            signal=signal,
+            account=self.account,
+            profile=profile,
+            symbol_info=SymbolInfo(name="XAUUSD"),
+            tick=TickInfo(bid=Decimal("4055"), ask=Decimal("4055.20")),
+            execution_mode="live_execution",
+        )
+
+        self.assertEqual(plan.order_type, PendingOrderType.SELL)
+        self.assertEqual(plan.selected_entry_price, Decimal("4055.00"))
+        self.assertTrue(
+            all(order.order_type == PendingOrderType.SELL for order in plan.orders)
+        )
+
+    def test_entrada_imediata_rejeita_quando_preco_ja_passou_tp1(self) -> None:
+        signal = parse_signal_text(BUY_SIGNAL).signal
+        profile = replace(
+            self.profile(),
+            entry_execution_mode=ENTRY_EXECUTION_MARKET_IMMEDIATE,
+        )
+        client = SimulatedMT5Client(
+            tick=TickInfo(bid=Decimal("4067"), ask=Decimal("4067"))
+        )
+
+        result = self.executor(client=client).execute_for_account(
+            signal,
+            self.account,
+            profile,
+        )
+
+        self.assertEqual(
+            result.group_result.rejected_reason,
+            "buy_take_profit_not_above_entry",
+        )
 
     def test_preco_first_touch_middle_e_distributed(self) -> None:
         first_touch = self.plan_buy(TickInfo(bid=Decimal("4062"), ask=Decimal("4062")))
@@ -600,6 +671,95 @@ class PendingOrderTests(unittest.TestCase):
         self.assertIn("order_send_failed", result.group_result.rejected_reason)
         self.assertEqual(client.order_send_requests[-1]["action"], 8)
         self.assertEqual(client.order_send_requests[-1]["order"], 501)
+
+    def test_entrada_imediata_envia_multiplos_tps_sem_expiracao(self) -> None:
+        signal = parse_signal_text(BUY_SIGNAL).signal
+        profile = replace(
+            self.profile(),
+            entry_execution_mode=ENTRY_EXECUTION_MARKET_IMMEDIATE,
+        )
+        client = SimulatedMT5Client(
+            tick=TickInfo(bid=Decimal("4062"), ask=Decimal("4062"))
+        )
+
+        result = self.executor(
+            client=client,
+            execution_mode="demo_execution",
+            global_kill_switch=False,
+        ).execute_for_account(signal, self.account, profile)
+
+        self.assertIsNone(result.group_result.rejected_reason)
+        self.assertEqual(len(client.order_send_requests), 4)
+        self.assertTrue(
+            all(request["action"] == 1 for request in client.order_send_requests)
+        )
+        self.assertTrue(
+            all("expiration" not in request for request in client.order_send_requests)
+        )
+        self.assertIn("ORDENS A MERCADO", result.message)
+
+    def test_falha_parcial_a_mercado_tenta_fechar_posicao_aberta(self) -> None:
+        signal = parse_signal_text(BUY_SIGNAL).signal
+        profile = replace(
+            self.profile(),
+            entry_execution_mode=ENTRY_EXECUTION_MARKET_IMMEDIATE,
+            max_open_signals=10,
+        )
+        client = SimulatedMT5Client(
+            tick=TickInfo(bid=Decimal("4062"), ask=Decimal("4062")),
+            positions=(
+                {
+                    "ticket": 9001,
+                    "symbol": "XAUUSD",
+                    "volume": 0.01,
+                    "type": 0,
+                    "magic": MT5_MAGIC_NUMBER,
+                    "comment": f"tgcp {signal.signature[:8]} TP1",
+                },
+            ),
+            order_send_results=[
+                {"retcode": 10009, "order": 501, "comment": "filled"},
+                {"retcode": 10030, "comment": "rejected"},
+                {"retcode": 10009, "order": 502, "comment": "closed"},
+            ],
+        )
+
+        result = self.executor(
+            client=client,
+            execution_mode="demo_execution",
+            global_kill_switch=False,
+        ).execute_for_account(signal, self.account, profile)
+
+        self.assertIn("order_send_failed", result.group_result.rejected_reason)
+        self.assertIn("partial_rollback_completed", result.group_result.rejected_reason)
+        self.assertIn("envio parcial foi revertido", result.message)
+        close_request = client.order_send_requests[-1]
+        self.assertEqual(close_request["action"], 1)
+        self.assertEqual(close_request["position"], 9001)
+        self.assertEqual(close_request["type"], 1)
+
+    def test_falha_no_rollback_a_mercado_gera_alerta_explicito(self) -> None:
+        signal = parse_signal_text(BUY_SIGNAL).signal
+        profile = replace(
+            self.profile(),
+            entry_execution_mode=ENTRY_EXECUTION_MARKET_IMMEDIATE,
+        )
+        client = SimulatedMT5Client(
+            tick=TickInfo(bid=Decimal("4062"), ask=Decimal("4062")),
+            order_send_results=[
+                {"retcode": 10009, "order": 501, "comment": "filled"},
+                {"retcode": 10030, "comment": "rejected"},
+            ],
+        )
+
+        result = self.executor(
+            client=client,
+            execution_mode="demo_execution",
+            global_kill_switch=False,
+        ).execute_for_account(signal, self.account, profile)
+
+        self.assertIn("rollback_failed:501", result.group_result.rejected_reason)
+        self.assertIn("pode existir posição aberta", result.message)
 
     def test_live_execution_exige_autorizacao_explicita(self) -> None:
         client = SimulatedMT5Client()

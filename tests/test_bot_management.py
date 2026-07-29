@@ -19,7 +19,10 @@ from telegram_mt5_copier.mt5.daily_performance import (
     DailyPerformance,
     current_performance_date,
 )
-from telegram_mt5_copier.mt5.models import ENTRY_PRICE_MIDDLE
+from telegram_mt5_copier.mt5.models import (
+    ENTRY_EXECUTION_MARKET_IMMEDIATE,
+    ENTRY_PRICE_MIDDLE,
+)
 from telegram_mt5_copier.mt5.terminal_manager import TerminalManager
 from telegram_mt5_copier.settings_service import SettingsService
 from telegram_mt5_copier.users import USER_STATUS_ACTIVE, USER_STATUS_PAUSED, UserRepository
@@ -256,6 +259,12 @@ class BotManagementTests(unittest.TestCase):
             )
 
             response = service.handle_callback(101, "alice", "v1:ex")
+            entry_menu = service.handle_callback(101, "alice", "v1:ex:entry")
+            entry_response = service.handle_callback(
+                101,
+                "alice",
+                "v1:ex:entry:now",
+            )
             service.handle_callback(101, "alice", "v1:ex:price:middle")
             service.handle_callback(101, "alice", "v1:ex:exp:60")
             service.handle_callback(101, "alice", "v1:ex:split")
@@ -264,9 +273,15 @@ class BotManagementTests(unittest.TestCase):
             profile = accounts.get_execution_profile(user.id, account.id)
 
             self.assertIn("EXECUÇÃO DOS SINAIS", response.text)
+            self.assertIn("Entrada imediata", entry_menu.text)
+            self.assertIn("Entrada imediata ao preço atual", entry_response.text)
             self.assertIn("QUANTIDADE DE TAKE PROFITS", tp_menu.text)
             self.assertIn("TP1 até TP2", tp_response.text)
             self.assertEqual(profile.entry_price_mode, ENTRY_PRICE_MIDDLE)
+            self.assertEqual(
+                profile.entry_execution_mode,
+                ENTRY_EXECUTION_MARKET_IMMEDIATE,
+            )
             self.assertEqual(profile.pending_expiration_minutes, 60)
             self.assertTrue(profile.split_tps)
             self.assertEqual(profile.take_profit_limit, 2)

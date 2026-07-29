@@ -22,6 +22,8 @@ from .models import (
     CONNECTION_STATUS_CONNECTED,
     CONNECTION_STATUS_DISCONNECTED,
     CONNECTION_STATUS_FAILED,
+    ENTRY_EXECUTION_MARKET_IMMEDIATE,
+    ENTRY_EXECUTION_MARKET_ON_ZONE,
     ENTRY_EXECUTION_PENDING_ORDER,
     ENTRY_PRICE_FIRST_TOUCH,
     ExecutionProfile,
@@ -726,6 +728,12 @@ class MT5AccountService:
         }
         if field_name not in allowed_fields:
             raise ValueError("Campo de execucao invalido.")
+        if field_name == "entry_execution_mode" and value not in {
+            ENTRY_EXECUTION_PENDING_ORDER,
+            ENTRY_EXECUTION_MARKET_ON_ZONE,
+            ENTRY_EXECUTION_MARKET_IMMEDIATE,
+        }:
+            raise ValueError("Modo de entrada invalido.")
         if field_name == "take_profit_limit":
             value = int(value)
             if value < 0 or value > 10:

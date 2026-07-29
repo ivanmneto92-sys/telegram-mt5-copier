@@ -308,6 +308,26 @@ O parser também reconhece entradas escritas no cabeçalho como
 `GOLD BUY NOW IN ZONE 4027-4020`. Alvos sem preço, como `TP 3: OPEN`, são
 ignorados; os demais TPs numéricos continuam sendo executados normalmente.
 
+## Modos de entrada por cliente
+
+A partir da versão `0.13.0`, cada cliente escolhe no bot em
+`Minhas contas > Configurar execução > Modo de entrada`:
+
+- `🚀 Entrar imediatamente`: envia ordens a mercado usando o ask atual para
+  BUY ou o bid atual para SELL, mesmo que a cotação esteja fora da zona;
+- `📍 Posicionar na entrada`: cria ordens pendentes nos preços indicados pelo
+  sinal;
+- `⚖️ Mercado somente na zona`: executa a mercado se a cotação já estiver
+  dentro da faixa e, caso contrário, posiciona as ordens.
+
+A entrada imediata continua respeitando spread, slippage, margem, lote,
+limites diários, SL e TPs. Se a cotação já tiver atingido o SL ou ultrapassado
+o primeiro TP, o sinal é rejeitado em vez de abrir uma operação sem estrutura
+válida. Vários TPs são enviados como posições separadas em contas hedging,
+preservando a proteção de breakeven após o TP1. Se houver falha durante um
+envio parcial a mercado, o executor tenta fechar imediatamente as posições
+daquele sinal que já foram abertas.
+
 ## Supervisor e inicialização automática no Windows
 
 A partir da versão `0.12.0`, o comando `telegram-mt5-supervisor` inicia e

@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+import time
 from typing import Callable
 
 from ..models import TradeSignal, decimal_to_text
@@ -351,8 +352,12 @@ class PendingOrderExecutor:
             metrics=metrics,
         )
         send_results = []
-        submitted_tickets: list[str] = []
-        for database_order, request in zip(orders, requests):
+        submitted_orders: list[tuple[str, PlannedOrder]] = []
+        for database_order, request, planned_order in zip(
+            orders,
+            requests,
+            plan.orders,
+        ):
             try:
                 send_result = client.order_send(request)
             except Exception as exc:
@@ -367,9 +372,17 @@ class PendingOrderExecutor:
                     if send_exception
                     else f"order_send_failed:{mt5_failure_message(client, send_result)}"
                 )
-                rollback_failures = cancel_submitted_pending_orders(client, submitted_tickets)
+                rollback_failures = rollback_submitted_orders(
+                    client=client,
+                    plan=plan,
+                    profile=profile,
+                    symbol_info=symbol_info,
+                    submitted_orders=submitted_orders,
+                )
                 if rollback_failures:
                     reason = f"{reason};rollback_failed:{','.join(rollback_failures)}"
+                elif submitted_orders:
+                    reason = f"{reason};partial_rollback_completed"
                 self.repository.mark_group_failed(group.id, reason)
                 return PendingExecutionResult(
                     account=account,
@@ -379,16 +392,24 @@ class PendingOrderExecutor:
             ticket = result_ticket(send_result)
             if not ticket:
                 reason = "order_send_failed:missing_ticket"
-                rollback_failures = cancel_submitted_pending_orders(client, submitted_tickets)
+                rollback_failures = rollback_submitted_orders(
+                    client=client,
+                    plan=plan,
+                    profile=profile,
+                    symbol_info=symbol_info,
+                    submitted_orders=submitted_orders,
+                )
                 if rollback_failures:
                     reason = f"{reason};rollback_failed:{','.join(rollback_failures)}"
+                elif submitted_orders:
+                    reason = f"{reason};partial_rollback_completed"
                 self.repository.mark_group_failed(group.id, reason)
                 return PendingExecutionResult(
                     account=account,
                     group_result=ExecutionGroupResult(group=group, orders=orders, rejected_reason=reason),
                     message=format_rejection_message(reason, account),
                 )
-            submitted_tickets.append(ticket)
+            submitted_orders.append((ticket, planned_order))
             self.repository.mark_order_submitted(
                 database_order.id,
                 ticket=ticket,
@@ -448,8 +469,13 @@ def validate_operational_limits(
 
 
 def format_pending_simulation_message(plan: PendingOrderPlan, account: MT5Account) -> str:
+    is_market = plan.order_type.value in {"BUY", "SELL"}
     lines = [
-        "🧪 ORDENS PENDENTES SIMULADAS",
+        (
+            "🧪 ENTRADAS A MERCADO SIMULADAS"
+            if is_market
+            else "🧪 ORDENS PENDENTES SIMULADAS"
+        ),
         "",
         f"{plan.symbol} — {order_type_label(plan.order_type.value)}",
         "",
@@ -457,11 +483,10 @@ def format_pending_simulation_message(plan: PendingOrderPlan, account: MT5Accoun
         f"Entrada selecionada: {decimal_to_text(plan.selected_entry_price)}",
         f"Faixa: {decimal_to_text(plan.entry_low)} até {decimal_to_text(plan.entry_high)}",
         f"Stop Loss: {decimal_to_text(plan.stop_loss)}",
-        f"Validade: {expiration_label(plan)}",
-        "",
-        "Ordens simuladas:",
-        "",
     ]
+    if not is_market:
+        lines.append(f"Validade: {expiration_label(plan)}")
+    lines.extend(["", "Ordens simuladas:", ""])
     for order in plan.orders:
         lines.append(
             f"TP{order.tp_index}: {decimal_to_text(order.take_profit)} | "
@@ -472,6 +497,14 @@ def format_pending_simulation_message(plan: PendingOrderPlan, account: MT5Accoun
 
 
 def format_rejection_message(reason: str, account: MT5Account) -> str:
+    if "rollback_failed:" in reason:
+        outcome = (
+            "ATENÇÃO: pode existir posição aberta. Verifique imediatamente o MetaTrader 5."
+        )
+    elif "partial_rollback_completed" in reason:
+        outcome = "O envio parcial foi revertido e as ordens abertas foram encerradas."
+    else:
+        outcome = "Nenhuma ordem foi enviada ao MetaTrader 5."
     return "\n".join(
         [
             "⚠️ EXECUÇÃO REJEITADA",
@@ -479,7 +512,7 @@ def format_rejection_message(reason: str, account: MT5Account) -> str:
             f"Conta: {account.masked_login}",
             f"Motivo: {reason}",
             "",
-            "Nenhuma ordem foi enviada ao MetaTrader 5.",
+            outcome,
         ]
     )
 
@@ -596,6 +629,92 @@ def cancel_submitted_pending_orders(client: object, tickets: list[str]) -> list[
             continue
         if not is_successful_mt5_result(client, result, check=False):
             failures.append(ticket)
+    return failures
+
+
+def rollback_submitted_orders(
+    *,
+    client: object,
+    plan: PendingOrderPlan,
+    profile: ExecutionProfile,
+    symbol_info: SymbolInfo,
+    submitted_orders: list[tuple[str, PlannedOrder]],
+) -> list[str]:
+    if not submitted_orders:
+        return []
+    if plan.order_type.value not in {"BUY", "SELL"}:
+        return cancel_submitted_pending_orders(
+            client,
+            [ticket for ticket, _order in submitted_orders],
+        )
+    return close_submitted_market_positions(
+        client=client,
+        plan=plan,
+        profile=profile,
+        symbol_info=symbol_info,
+        submitted_orders=submitted_orders,
+    )
+
+
+def close_submitted_market_positions(
+    *,
+    client: object,
+    plan: PendingOrderPlan,
+    profile: ExecutionProfile,
+    symbol_info: SymbolInfo,
+    submitted_orders: list[tuple[str, PlannedOrder]],
+) -> list[str]:
+    expected_comments = {
+        f"tgcp {plan.signal_id[:8]} TP{order.tp_index}": ticket
+        for ticket, order in submitted_orders
+    }
+    positions: dict[str, object] = {}
+    for attempt in range(3):
+        positions = {
+            str(result_value(position, "comment", "")): position
+            for position in client.positions_get()
+            if int(result_value(position, "magic", 0) or 0) == MT5_MAGIC_NUMBER
+            and str(result_value(position, "comment", "")) in expected_comments
+        }
+        if expected_comments.keys() <= positions.keys():
+            break
+        if attempt < 2:
+            time.sleep(0.1)
+    failures: list[str] = []
+    for comment, ticket in expected_comments.items():
+        position = positions.get(comment)
+        if position is None:
+            failures.append(ticket)
+            continue
+        position_ticket = str(result_value(position, "ticket", ticket))
+        symbol = str(result_value(position, "symbol", plan.symbol))
+        tick = client.symbol_info_tick(symbol)
+        if tick is None:
+            failures.append(position_ticket)
+            continue
+        position_type = int(result_value(position, "type", 0) or 0)
+        close_type = "SELL" if position_type == 0 else "BUY"
+        close_price = tick.bid if position_type == 0 else tick.ask
+        request = {
+            "action": mt5_constant(client, "TRADE_ACTION_DEAL", 1),
+            "position": int(position_ticket),
+            "symbol": symbol,
+            "volume": float(result_value(position, "volume", 0) or 0),
+            "type": pending_order_type_constant(client, close_type),
+            "price": decimal_to_float(close_price),
+            "deviation": int(profile.max_slippage_points),
+            "magic": MT5_MAGIC_NUMBER,
+            "comment": "tgcp rollback",
+            "type_time": mt5_constant(client, "ORDER_TIME_GTC", 0),
+            "type_filling": market_filling_constant(client, symbol_info),
+        }
+        try:
+            result = client.order_send(request)
+        except Exception:
+            failures.append(position_ticket)
+            continue
+        if not is_successful_mt5_result(client, result, check=False):
+            failures.append(position_ticket)
     return failures
 
 

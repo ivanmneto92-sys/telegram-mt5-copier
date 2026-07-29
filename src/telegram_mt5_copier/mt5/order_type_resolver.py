@@ -4,7 +4,11 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from ..models import Direction
-from .models import ENTRY_EXECUTION_MARKET_ON_ZONE, PendingOrderType
+from .models import (
+    ENTRY_EXECUTION_MARKET_IMMEDIATE,
+    ENTRY_EXECUTION_MARKET_ON_ZONE,
+    PendingOrderType,
+)
 
 
 @dataclass(frozen=True)
@@ -22,6 +26,8 @@ def resolve_order_type(
     entry_high: Decimal,
     entry_execution_mode: str,
 ) -> OrderTypeResolution:
+    if entry_execution_mode == ENTRY_EXECUTION_MARKET_IMMEDIATE:
+        return OrderTypeResolution(order_type=None, market_required=True)
     if entry_low <= current_price <= entry_high and entry_execution_mode == ENTRY_EXECUTION_MARKET_ON_ZONE:
         return OrderTypeResolution(order_type=None, market_required=True)
 

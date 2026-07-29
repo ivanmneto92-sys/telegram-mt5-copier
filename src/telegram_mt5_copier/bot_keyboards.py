@@ -38,6 +38,7 @@ CB_CHANNEL_INFO = "v1:ch:info"
 CB_EXEC_ENTRY_MENU = "v1:ex:entry"
 CB_EXEC_ENTRY_PENDING = "v1:ex:entry:pending"
 CB_EXEC_ENTRY_MARKET_ZONE = "v1:ex:entry:zone"
+CB_EXEC_ENTRY_MARKET_NOW = "v1:ex:entry:now"
 CB_EXEC_PRICE_MENU = "v1:ex:price"
 CB_EXEC_PRICE_FIRST_TOUCH = "v1:ex:price:first"
 CB_EXEC_PRICE_MIDDLE = "v1:ex:price:middle"
@@ -290,8 +291,9 @@ TAKE_PROFIT_COUNT_MENU: tuple[tuple[Button, ...], ...] = (
 
 
 ENTRY_MODE_MENU: tuple[tuple[Button, ...], ...] = (
-    (Button("Ordem pendente", CB_EXEC_ENTRY_PENDING),),
-    (Button("Mercado ao entrar na zona", CB_EXEC_ENTRY_MARKET_ZONE),),
+    (Button("🚀 Entrar imediatamente", CB_EXEC_ENTRY_MARKET_NOW),),
+    (Button("📍 Posicionar na entrada", CB_EXEC_ENTRY_PENDING),),
+    (Button("⚖️ Mercado somente na zona", CB_EXEC_ENTRY_MARKET_ZONE),),
     (Button("⬅️ Voltar", CB_SIGNAL_EXECUTION),),
 )
 

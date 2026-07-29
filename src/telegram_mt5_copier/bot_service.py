@@ -35,6 +35,7 @@ from .bot_keyboards import (
     CB_CONNECT_MT5,
     CB_EXEC_ENTRY_MENU,
     CB_EXEC_ENTRY_MARKET_ZONE,
+    CB_EXEC_ENTRY_MARKET_NOW,
     CB_EXEC_ENTRY_PENDING,
     CB_EXEC_EXPIRATION_MENU,
     CB_EXEC_EXPIRATION_120,
@@ -108,6 +109,7 @@ from .database import SIGNAL_MONITOR_SERVICE_NAME, connect_database, get_service
 from .mt5.account_service import MT5AccountService
 from .mt5.models import (
     CONNECTION_STATUS_CONNECTED,
+    ENTRY_EXECUTION_MARKET_IMMEDIATE,
     ENTRY_EXECUTION_MARKET_ON_ZONE,
     ENTRY_EXECUTION_PENDING_ORDER,
     ENTRY_PRICE_DISTRIBUTED,
@@ -426,7 +428,26 @@ class BotService:
         if callback == CB_SIGNAL_EXECUTION:
             return self._signal_execution_screen(user)
         if callback == CB_EXEC_ENTRY_MENU:
-            return BotResponse("📍 MODO DE ENTRADA", ENTRY_MODE_MENU, screen="signal_execution")
+            return BotResponse(
+                "\n".join(
+                    [
+                        "📍 MODO DE ENTRADA",
+                        "",
+                        "🚀 Entrada imediata:",
+                        "Executa ao preço disponível quando o sinal chegar, mesmo fora da zona.",
+                        "",
+                        "📍 Posicionar na entrada:",
+                        "Cria a ordem no preço indicado pelo canal e aguarda o mercado.",
+                        "",
+                        "⚖️ Mercado somente na zona:",
+                        "Entra imediatamente se já estiver na zona; fora dela, posiciona a ordem.",
+                        "",
+                        "SL, TP, spread, margem e limites de risco continuam sendo validados em todos os modos.",
+                    ]
+                ),
+                ENTRY_MODE_MENU,
+                screen="signal_execution",
+            )
         if callback == CB_EXEC_PRICE_MENU:
             return BotResponse("🎯 PREÇO DA FAIXA", ENTRY_PRICE_MENU, screen="signal_execution")
         if callback == CB_EXEC_EXPIRATION_MENU:
@@ -447,15 +468,19 @@ class BotService:
                 TAKE_PROFIT_COUNT_MENU,
                 screen="signal_execution",
             )
-        if callback in {CB_EXEC_ENTRY_PENDING, CB_EXEC_ENTRY_MARKET_ZONE}:
+        if callback in {
+            CB_EXEC_ENTRY_PENDING,
+            CB_EXEC_ENTRY_MARKET_ZONE,
+            CB_EXEC_ENTRY_MARKET_NOW,
+        }:
             account = self.mt5_accounts.first_account(user.id)
             if account is None:
                 return self._connect_mt5_screen()
-            value = (
-                ENTRY_EXECUTION_PENDING_ORDER
-                if callback == CB_EXEC_ENTRY_PENDING
-                else ENTRY_EXECUTION_MARKET_ON_ZONE
-            )
+            value = {
+                CB_EXEC_ENTRY_PENDING: ENTRY_EXECUTION_PENDING_ORDER,
+                CB_EXEC_ENTRY_MARKET_ZONE: ENTRY_EXECUTION_MARKET_ON_ZONE,
+                CB_EXEC_ENTRY_MARKET_NOW: ENTRY_EXECUTION_MARKET_IMMEDIATE,
+            }[callback]
             self.mt5_accounts.update_execution_profile_field(user.id, account.id, "entry_execution_mode", value)
             return self._signal_execution_screen(user)
         if callback in {CB_EXEC_PRICE_FIRST_TOUCH, CB_EXEC_PRICE_MIDDLE, CB_EXEC_PRICE_DISTRIBUTED}:
@@ -1148,7 +1173,12 @@ class BotService:
                     entry_execution_label(profile.entry_execution_mode),
                     "",
                     "Preço dentro da faixa:",
-                    entry_price_label(profile.entry_price_mode),
+                    (
+                        "Não se aplica à entrada imediata"
+                        if profile.entry_execution_mode
+                        == ENTRY_EXECUTION_MARKET_IMMEDIATE
+                        else entry_price_label(profile.entry_price_mode)
+                    ),
                     "",
                     "Validade:",
                     expiration_minutes_label(profile.pending_expiration_minutes),
@@ -1266,9 +1296,11 @@ def daily_performance_label(performance: object | None) -> str:
 
 
 def entry_execution_label(value: str) -> str:
+    if value == ENTRY_EXECUTION_MARKET_IMMEDIATE:
+        return "🚀 Entrada imediata ao preço atual"
     if value == ENTRY_EXECUTION_MARKET_ON_ZONE:
-        return "Mercado ao entrar na zona"
-    return "Ordem pendente"
+        return "⚖️ Mercado se estiver na zona; caso contrário, ordem posicionada"
+    return "📍 Ordem posicionada na entrada indicada"
 
 
 def entry_price_label(value: str) -> str:
