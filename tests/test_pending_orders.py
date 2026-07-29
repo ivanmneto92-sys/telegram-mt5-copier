@@ -943,6 +943,46 @@ class PendingOrderTests(unittest.TestCase):
         self.assertIsNotNone(protection[0])
         self.assertIsNotNone(protection[1])
 
+    def test_worker_nao_move_restantes_para_be_quando_cliente_desativa(self) -> None:
+        signal = parse_signal_text(BUY_SIGNAL).signal
+        result = self.executor().execute_for_account(signal, self.account, self.profile())
+        profile = self.accounts.update_execution_profile_field(
+            self.user.id,
+            self.account.id,
+            "tp1_breakeven_enabled",
+            0,
+        )
+        client = SimulatedMT5Client(
+            tick=TickInfo(bid=Decimal("4066"), ask=Decimal("4066")),
+            positions=(
+                {
+                    "magic": 27071301,
+                    "comment": f"tgcp {signal.signature[:8]} TP2",
+                    "ticket": 9002,
+                    "symbol": "XAUUSD",
+                    "price_open": 4061,
+                    "sl": 4044,
+                    "tp": 4071,
+                },
+            ),
+        )
+        manager = PositionManager(self.database_path, self.accounts, lambda: client)
+
+        changed = manager.manage_account(self.account, profile)
+
+        self.assertEqual(changed, 0)
+        self.assertEqual(client.order_send_requests, [])
+        with connect_database(self.database_path) as connection:
+            protection = connection.execute(
+                """
+                SELECT tp1_reached_at, breakeven_applied_at
+                FROM execution_groups WHERE id = ?
+                """,
+                (result.group_result.group.id,),
+            ).fetchone()
+        self.assertIsNotNone(protection[0])
+        self.assertIsNone(protection[1])
+
     def test_worker_recupera_tp1_do_historico_apos_retracao(self) -> None:
         signal = parse_signal_text(BUY_SIGNAL).signal
         self.executor().execute_for_account(signal, self.account, self.profile())

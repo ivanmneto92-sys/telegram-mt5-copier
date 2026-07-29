@@ -79,7 +79,11 @@ class PositionManager:
             breakeven_changed_groups: set[int] = set()
             for position, order_record in managed_positions:
                 _order_id, group_id, tp_index, direction, original_stop, _take_profit, _expiration_at = order_record
-                force_breakeven = group_id in tp1_reached_groups and tp_index > 1
+                force_breakeven = (
+                    profile.tp1_breakeven_enabled
+                    and group_id in tp1_reached_groups
+                    and tp_index > 1
+                )
                 if not force_breakeven and not (
                     profile.breakeven_enabled or profile.trailing_enabled
                 ):

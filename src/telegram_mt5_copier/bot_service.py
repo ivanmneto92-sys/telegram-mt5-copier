@@ -462,7 +462,7 @@ class BotService:
                         "Se o canal enviar menos TPs, serão usados somente os disponíveis.",
                         "",
                         "O lote total será dividido entre os alvos escolhidos.",
-                        "Quando TP1 for atingido, as posições restantes serão protegidas no breakeven.",
+                        "Se o BE após TP1 estiver ativado, as posições restantes serão protegidas no preço de entrada.",
                     ]
                 ),
                 TAKE_PROFIT_COUNT_MENU,
@@ -709,6 +709,23 @@ class BotService:
                 return BotResponse(str(exc), RISK_MENU, screen="risk")
             return self._risk_screen(user)
 
+        if callback == "v1:p:tp1be":
+            settings = self.settings.ensure_defaults(user.id)
+            account = self.mt5_accounts.first_account(user.id)
+            current = settings.tp1_breakeven_enabled
+            if account is not None:
+                current = self.mt5_accounts.ensure_execution_profile(
+                    user.id, account.id
+                ).tp1_breakeven_enabled
+            updated = self.settings.update_tp1_breakeven_enabled(user.id, not current)
+            if account is not None:
+                self.mt5_accounts.update_execution_profile_field(
+                    user.id,
+                    account.id,
+                    "tp1_breakeven_enabled",
+                    int(updated.tp1_breakeven_enabled),
+                )
+            return self._protections_screen(user)
         if callback == "v1:p:be":
             settings = self.settings.ensure_defaults(user.id)
             account = self.mt5_accounts.first_account(user.id)
@@ -1019,14 +1036,19 @@ class BotService:
         profile = self.mt5_accounts.ensure_execution_profile(user.id, account.id) if account else None
         breakeven_enabled = profile.breakeven_enabled if profile else settings.breakeven_enabled
         trailing_enabled = profile.trailing_enabled if profile else settings.trailing_enabled
+        tp1_breakeven_enabled = (
+            profile.tp1_breakeven_enabled
+            if profile
+            else settings.tp1_breakeven_enabled
+        )
         daily_loss_limit = profile.daily_loss_limit if profile else settings.daily_loss_limit
         return BotResponse(
             "\n".join(
                 [
                     "🛡️ PROTEÇÕES",
                     "",
-                    "Breakeven: obrigatório após TP1",
-                    "🟢 Ativado",
+                    "Breakeven após TP1:",
+                    enabled_label(tp1_breakeven_enabled),
                     "",
                     "BE antecipado ao avançar 1R:",
                     enabled_label(breakeven_enabled),
@@ -1037,7 +1059,7 @@ class BotService:
                     "Limite diário:",
                     configured_label(daily_loss_limit > 0),
                     "",
-                    "Ao atingir TP1, o Worker move as posições restantes do mesmo sinal para a entrada. O BE antecipado e o trailing são avaliados após avanço de 1R; o trailing nunca afasta o stop.",
+                    "Com o BE após TP1 ativado, o Worker move as posições restantes do mesmo sinal para a entrada. O BE antecipado e o trailing são avaliados após avanço de 1R; o trailing nunca afasta o stop.",
                 ]
             ),
             PROTECTIONS_MENU,
@@ -1187,7 +1209,7 @@ class BotService:
                     take_profit_limit_label(profile.take_profit_limit),
                     "",
                     "Gestão após TP1:",
-                    "✅ Demais posições protegidas no breakeven",
+                    enabled_label(profile.tp1_breakeven_enabled),
                 ]
             ),
             SIGNAL_EXECUTION_MENU,

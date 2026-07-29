@@ -605,7 +605,8 @@ class MT5AccountService:
             settings_cursor = connection.execute(
                 """
                 SELECT risk_mode, fixed_lot, risk_percent, daily_profit_target,
-                       daily_loss_limit, max_open_trades, breakeven_enabled, trailing_enabled
+                       daily_loss_limit, max_open_trades, breakeven_enabled,
+                       trailing_enabled, tp1_breakeven_enabled
                 FROM user_settings WHERE user_id = ?
                 """,
                 (user_id,),
@@ -622,6 +623,7 @@ class MT5AccountService:
             max_open_signals = int(legacy[5]) if legacy else 1
             breakeven_enabled = int(legacy[6]) if legacy else 0
             trailing_enabled = int(legacy[7]) if legacy else 0
+            tp1_breakeven_enabled = int(legacy[8]) if legacy else 1
             cursor = connection.execute(
                 """
                 INSERT INTO execution_profiles (
@@ -629,9 +631,10 @@ class MT5AccountService:
                     max_spread_points, max_slippage_points, daily_profit_target,
                     daily_loss_limit, max_open_signals, split_tps, breakeven_enabled,
                     trailing_enabled, entry_execution_mode, entry_price_mode,
-                    pending_expiration_minutes, take_profit_limit, updated_at
+                    pending_expiration_minutes, take_profit_limit,
+                    tp1_breakeven_enabled, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user_id,
@@ -652,6 +655,7 @@ class MT5AccountService:
                     ENTRY_PRICE_FIRST_TOUCH,
                     120,
                     0,
+                    tp1_breakeven_enabled,
                     utc_now(),
                 ),
             )
@@ -666,7 +670,8 @@ class MT5AccountService:
                        max_spread_points, max_slippage_points, daily_profit_target,
                        daily_loss_limit, max_open_signals, split_tps, breakeven_enabled,
                        trailing_enabled, entry_execution_mode, entry_price_mode,
-                       pending_expiration_minutes, take_profit_limit
+                       pending_expiration_minutes, take_profit_limit,
+                       tp1_breakeven_enabled
                 FROM execution_profiles
                 WHERE user_id = ? AND mt5_account_id = ?
                 """,
@@ -724,6 +729,7 @@ class MT5AccountService:
             "daily_loss_limit",
             "max_open_signals",
             "breakeven_enabled",
+            "tp1_breakeven_enabled",
             "trailing_enabled",
         }
         if field_name not in allowed_fields:
@@ -793,7 +799,8 @@ class MT5AccountService:
                        p.max_spread_points, p.max_slippage_points, p.daily_profit_target,
                        p.daily_loss_limit, p.max_open_signals, p.split_tps,
                        p.breakeven_enabled, p.trailing_enabled, p.entry_execution_mode,
-                       p.entry_price_mode, p.pending_expiration_minutes, p.take_profit_limit
+                       p.entry_price_mode, p.pending_expiration_minutes,
+                       p.take_profit_limit, p.tp1_breakeven_enabled
                 FROM mt5_accounts a
                 JOIN users u ON u.id = a.user_id
                 JOIN execution_profiles p ON p.user_id = a.user_id AND p.mt5_account_id = a.id
@@ -847,7 +854,8 @@ class MT5AccountService:
                        p.max_spread_points, p.max_slippage_points, p.daily_profit_target,
                        p.daily_loss_limit, p.max_open_signals, p.split_tps,
                        p.breakeven_enabled, p.trailing_enabled, p.entry_execution_mode,
-                       p.entry_price_mode, p.pending_expiration_minutes, p.take_profit_limit
+                       p.entry_price_mode, p.pending_expiration_minutes,
+                       p.take_profit_limit, p.tp1_breakeven_enabled
                 FROM mt5_accounts a
                 JOIN users u ON u.id = a.user_id
                 JOIN execution_profiles p ON p.user_id = a.user_id AND p.mt5_account_id = a.id
@@ -891,7 +899,8 @@ class MT5AccountService:
                        p.max_spread_points, p.max_slippage_points, p.daily_profit_target,
                        p.daily_loss_limit, p.max_open_signals, p.split_tps,
                        p.breakeven_enabled, p.trailing_enabled, p.entry_execution_mode,
-                       p.entry_price_mode, p.pending_expiration_minutes, p.take_profit_limit
+                       p.entry_price_mode, p.pending_expiration_minutes,
+                       p.take_profit_limit, p.tp1_breakeven_enabled
                 FROM mt5_accounts a
                 JOIN users u ON u.id = a.user_id
                 JOIN execution_profiles p ON p.user_id = a.user_id AND p.mt5_account_id = a.id
@@ -1006,6 +1015,7 @@ def execution_profile_from_row(row: tuple[object, ...]) -> ExecutionProfile:
         entry_price_mode=str(row[15]) if len(row) > 15 else ENTRY_PRICE_FIRST_TOUCH,
         pending_expiration_minutes=int(row[16]) if len(row) > 16 else 120,
         take_profit_limit=int(row[17]) if len(row) > 17 else 0,
+        tp1_breakeven_enabled=bool(row[18]) if len(row) > 18 else True,
     )
 
 

@@ -251,6 +251,7 @@ def initialize_database(database_path: Path) -> None:
                 tp_distribution_mode TEXT NOT NULL,
                 breakeven_enabled INTEGER NOT NULL,
                 trailing_enabled INTEGER NOT NULL,
+                tp1_breakeven_enabled INTEGER NOT NULL DEFAULT 1,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(id)
             );
@@ -319,6 +320,7 @@ def initialize_database(database_path: Path) -> None:
                 entry_price_mode TEXT NOT NULL DEFAULT 'first_touch',
                 pending_expiration_minutes INTEGER NOT NULL DEFAULT 120,
                 take_profit_limit INTEGER NOT NULL DEFAULT 0,
+                tp1_breakeven_enabled INTEGER NOT NULL DEFAULT 1,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(id),
                 FOREIGN KEY (mt5_account_id) REFERENCES mt5_accounts(id),
@@ -742,6 +744,18 @@ def run_schema_migrations(connection: sqlite3.Connection) -> None:
         "execution_profiles",
         "take_profit_limit",
         "INTEGER NOT NULL DEFAULT 0",
+    )
+    ensure_column(
+        connection,
+        "user_settings",
+        "tp1_breakeven_enabled",
+        "INTEGER NOT NULL DEFAULT 1",
+    )
+    ensure_column(
+        connection,
+        "execution_profiles",
+        "tp1_breakeven_enabled",
+        "INTEGER NOT NULL DEFAULT 1",
     )
     ensure_column(connection, "execution_groups", "tp1_reached_at", "TEXT")
     ensure_column(connection, "execution_groups", "breakeven_applied_at", "TEXT")

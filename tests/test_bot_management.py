@@ -498,8 +498,23 @@ class BotManagementTests(unittest.TestCase):
         response = self.service.handle_callback(101, "alice", "v1:p")
 
         self.assertIn("🛡️ PROTEÇÕES", response.text)
-        self.assertIn("Breakeven:", response.text)
+        self.assertIn("Breakeven após TP1:", response.text)
+        self.assertIn("🟢 Ativado", response.text)
         self.assertIn("Trailing Stop:", response.text)
+
+    def test_cliente_pode_desativar_e_reativar_be_apos_tp1(self) -> None:
+        self.service.start(101, "alice")
+        user = self.users.get_by_telegram_user_id(101)
+
+        disabled = self.service.handle_callback(101, "alice", "v1:p:tp1be")
+        disabled_settings = self.settings.get_settings(user.id)
+        enabled = self.service.handle_callback(101, "alice", "v1:p:tp1be")
+        enabled_settings = self.settings.get_settings(user.id)
+
+        self.assertIn("Breakeven após TP1:\n⚪ Desativado", disabled.text)
+        self.assertFalse(disabled_settings.tp1_breakeven_enabled)
+        self.assertIn("Breakeven após TP1:\n🟢 Ativado", enabled.text)
+        self.assertTrue(enabled_settings.tp1_breakeven_enabled)
 
     def test_historico(self) -> None:
         self.service.start(101, "alice")

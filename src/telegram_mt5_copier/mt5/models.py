@@ -132,6 +132,7 @@ class ExecutionProfile:
     entry_price_mode: str = ENTRY_PRICE_FIRST_TOUCH
     pending_expiration_minutes: int = 120
     take_profit_limit: int = 0
+    tp1_breakeven_enabled: bool = True
 
 
 @dataclass(frozen=True)

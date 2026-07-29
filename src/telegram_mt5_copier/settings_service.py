@@ -29,6 +29,7 @@ class UserSettings:
     tp_distribution_mode: str
     breakeven_enabled: bool
     trailing_enabled: bool
+    tp1_breakeven_enabled: bool
 
 
 class SettingsService:
@@ -65,9 +66,10 @@ class SettingsService:
                     tp_distribution_mode,
                     breakeven_enabled,
                     trailing_enabled,
+                    tp1_breakeven_enabled,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user_id,
@@ -80,6 +82,7 @@ class SettingsService:
                     "all",
                     0,
                     0,
+                    1,
                     utc_now(),
                 ),
             )
@@ -101,7 +104,8 @@ class SettingsService:
                     max_open_trades,
                     tp_distribution_mode,
                     breakeven_enabled,
-                    trailing_enabled
+                    trailing_enabled,
+                    tp1_breakeven_enabled
                 FROM user_settings
                 WHERE user_id = ?
                 """,
@@ -152,6 +156,9 @@ class SettingsService:
     def update_breakeven_enabled(self, user_id: int, enabled: bool) -> UserSettings:
         return self._update_field(user_id, "breakeven_enabled", int(enabled))
 
+    def update_tp1_breakeven_enabled(self, user_id: int, enabled: bool) -> UserSettings:
+        return self._update_field(user_id, "tp1_breakeven_enabled", int(enabled))
+
     def update_trailing_enabled(self, user_id: int, enabled: bool) -> UserSettings:
         return self._update_field(user_id, "trailing_enabled", int(enabled))
 
@@ -166,6 +173,7 @@ class SettingsService:
             "tp_distribution_mode",
             "breakeven_enabled",
             "trailing_enabled",
+            "tp1_breakeven_enabled",
         }
         if field_name not in allowed_fields:
             raise ValueError("Campo de configuracao invalido.")
@@ -193,6 +201,7 @@ def settings_from_row(row: tuple[object, ...]) -> UserSettings:
         tp_distribution_mode=str(row[7]),
         breakeven_enabled=bool(row[8]),
         trailing_enabled=bool(row[9]),
+        tp1_breakeven_enabled=bool(row[10]),
     )
 
 

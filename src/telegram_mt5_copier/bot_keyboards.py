@@ -195,6 +195,7 @@ CUSTOM_VALUE_MENU: tuple[tuple[Button, ...], ...] = (
 )
 
 PROTECTIONS_MENU: tuple[tuple[Button, ...], ...] = (
+    (Button("🎯 BE após TP1", "v1:p:tp1be"),),
     (Button("🛡️ BE antecipado em 1R", "v1:p:be"),),
     (Button("📈 Ativar/desativar Trailing Stop", "v1:p:tr"),),
     (Button("🛑 Configurar limite diário", "v1:p:loss"),),
