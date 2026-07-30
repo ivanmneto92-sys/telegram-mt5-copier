@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 import tempfile
 import unittest
 
-from telegram_mt5_copier.bot_service import BotService
+from telegram_mt5_copier.bot_service import BotService, next_daily_signal_resume_at
 from telegram_mt5_copier.command_queue import CommandQueue
 from telegram_mt5_copier.credential_service import CredentialService
 from telegram_mt5_copier.database import (
@@ -515,6 +516,60 @@ class BotManagementTests(unittest.TestCase):
         self.assertFalse(disabled_settings.tp1_breakeven_enabled)
         self.assertIn("Breakeven após TP1:\n🟢 Ativado", enabled.text)
         self.assertTrue(enabled_settings.tp1_breakeven_enabled)
+
+    def test_proxima_retomada_e_as_20h_de_brasilia(self) -> None:
+        before_open = next_daily_signal_resume_at(
+            datetime(2026, 7, 30, 18, 0, tzinfo=timezone.utc)
+        )
+        after_open = next_daily_signal_resume_at(
+            datetime(2026, 7, 30, 23, 30, tzinfo=timezone.utc)
+        )
+
+        self.assertEqual(
+            before_open,
+            datetime(2026, 7, 30, 23, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(
+            after_open,
+            datetime(2026, 8, 2, 23, 0, tzinfo=timezone.utc),
+        )
+
+    def test_retomada_pula_fechamento_do_fim_de_semana(self) -> None:
+        friday_before_open = next_daily_signal_resume_at(
+            datetime(2026, 7, 31, 18, 0, tzinfo=timezone.utc)
+        )
+        saturday = next_daily_signal_resume_at(
+            datetime(2026, 8, 1, 15, 0, tzinfo=timezone.utc)
+        )
+
+        expected_sunday_open = datetime(
+            2026,
+            8,
+            2,
+            23,
+            0,
+            tzinfo=timezone.utc,
+        )
+        self.assertEqual(friday_before_open, expected_sunday_open)
+        self.assertEqual(saturday, expected_sunday_open)
+
+    def test_cliente_para_sinais_ate_20h_e_pode_retomar_antes(self) -> None:
+        self.service.start(101, "alice")
+        user = self.users.get_by_telegram_user_id(101)
+        grant_paid_access(self.database_path, user.id)
+
+        confirmation = self.service.handle_callback(101, "alice", "v1:daystop")
+        stopped = self.service.handle_callback(101, "alice", "v1:daystop:ok")
+        paused_user = self.users.get_by_id(user.id)
+        resumed = self.service.handle_callback(101, "alice", "v1:daystop:resume")
+        resumed_user = self.users.get_by_id(user.id)
+
+        self.assertIn("PARAR SINAIS HOJE", confirmation.text)
+        self.assertIn("Operações e ordens já existentes", confirmation.text)
+        self.assertIn("SINAIS PARADOS POR HOJE", stopped.text)
+        self.assertIsNotNone(paused_user.daily_signal_pause_until)
+        self.assertIn("RECEBIMENTO RETOMADO", resumed.text)
+        self.assertIsNone(resumed_user.daily_signal_pause_until)
 
     def test_historico(self) -> None:
         self.service.start(101, "alice")

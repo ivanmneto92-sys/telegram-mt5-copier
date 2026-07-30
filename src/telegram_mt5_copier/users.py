@@ -17,6 +17,7 @@ class User:
     telegram_user_id: int
     telegram_username: str | None
     status: str
+    daily_signal_pause_until: str | None
 
 
 class UserRepository:
@@ -68,7 +69,8 @@ class UserRepository:
         with connect_database(self.database_path) as connection:
             cursor = connection.execute(
                 """
-                SELECT id, telegram_user_id, telegram_username, status
+                SELECT id, telegram_user_id, telegram_username, status,
+                       daily_signal_pause_until
                 FROM users
                 WHERE telegram_user_id = ?
                 """,
@@ -85,7 +87,8 @@ class UserRepository:
         with connect_database(self.database_path) as connection:
             cursor = connection.execute(
                 """
-                SELECT id, telegram_user_id, telegram_username, status
+                SELECT id, telegram_user_id, telegram_username, status,
+                       daily_signal_pause_until
                 FROM users
                 WHERE id = ?
                 """,
@@ -111,6 +114,23 @@ class UserRepository:
             )
             cursor.close()
 
+        return self.get_by_id(user_id)
+
+    def set_daily_signal_pause_until(
+        self,
+        user_id: int,
+        pause_until: str | None,
+    ) -> User:
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE users
+                SET daily_signal_pause_until = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (pause_until, utc_now(), user_id),
+            )
+            cursor.close()
         return self.get_by_id(user_id)
 
     def update_username(self, user_id: int, telegram_username: str | None) -> None:
@@ -151,10 +171,11 @@ class UserRepository:
             )
             cursor.close()
 
-def user_from_row(row: tuple[int, int, str | None, str]) -> User:
+def user_from_row(row: tuple[object, ...]) -> User:
     return User(
         id=int(row[0]),
         telegram_user_id=int(row[1]),
-        telegram_username=row[2],
-        status=row[3],
+        telegram_username=str(row[2]) if row[2] is not None else None,
+        status=str(row[3]),
+        daily_signal_pause_until=str(row[4]) if row[4] else None,
     )

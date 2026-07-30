@@ -16,6 +16,9 @@ CB_ACCOUNT = "v1:a"
 CB_OPERATIONS = "v1:o"
 CB_ACTIVATE = "v1:act"
 CB_PAUSE = "v1:pause"
+CB_DAILY_STOP = "v1:daystop"
+CB_CONFIRM_DAILY_STOP = "v1:daystop:ok"
+CB_RESUME_DAILY_SIGNALS = "v1:daystop:resume"
 CB_RISK = "v1:r"
 CB_PROTECTIONS = "v1:p"
 CB_HISTORY = "v1:h"
@@ -72,8 +75,9 @@ MAIN_MENU: tuple[tuple[Button, ...], ...] = (
     ),
     (
         Button("🔐 Solicitar ativação", CB_ACTIVATE),
-        Button("⏸️ Pausar", CB_PAUSE),
+        Button("⏸️ Pausar conta", CB_PAUSE),
     ),
+    (Button("🛑 Parar sinais hoje", CB_DAILY_STOP),),
     (
         Button("⚙️ Gestão de risco", CB_RISK),
         Button("🛡️ Proteções", CB_PROTECTIONS),
@@ -276,6 +280,16 @@ SIGNAL_EXECUTION_MENU: tuple[tuple[Button, ...], ...] = (
     (Button("⬅️ Voltar", CB_MT5_ACCOUNTS),),
 )
 
+CONFIRM_DAILY_STOP: tuple[tuple[Button, ...], ...] = (
+    (Button("🛑 Confirmar parada", CB_CONFIRM_DAILY_STOP),),
+    (Button("❌ Cancelar", CB_CANCEL),),
+)
+
+DAILY_STOPPED_MENU: tuple[tuple[Button, ...], ...] = (
+    (Button("▶️ Retomar sinais agora", CB_RESUME_DAILY_SIGNALS),),
+    (Button("⬅️ Voltar ao menu", CB_MAIN),),
+)
+
 
 TAKE_PROFIT_COUNT_MENU: tuple[tuple[Button, ...], ...] = (
     (
@@ -336,6 +350,8 @@ STATIC_CALLBACKS = {
         CONNECTION_MENU,
         CONFIRM_ACTIVATE,
         CONFIRM_PAUSE,
+        CONFIRM_DAILY_STOP,
+        DAILY_STOPPED_MENU,
         PAUSED_MENU,
         ACTIVATED_MENU,
         MT5_ACCOUNTS_MENU,

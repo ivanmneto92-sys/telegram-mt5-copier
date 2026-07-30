@@ -491,6 +491,22 @@ class PendingOrderTests(unittest.TestCase):
         self.assertEqual(len(self.accounts.accounts_for_approved_users()), 0)
         self.assertEqual(len(self.accounts.accounts_for_active_users()), 1)
 
+    def test_parada_diaria_bloqueia_novos_sinais_sem_desligar_worker(self) -> None:
+        future = (datetime.now(tz=timezone.utc) + timedelta(hours=2)).isoformat()
+        past = (datetime.now(tz=timezone.utc) - timedelta(minutes=1)).isoformat()
+
+        self.users.set_daily_signal_pause_until(self.user.id, future)
+        blocked = self.executor().execute_for_signal(
+            parse_signal_text(BUY_SIGNAL).signal
+        )
+
+        self.assertEqual(blocked, [])
+        self.assertEqual(len(self.accounts.accounts_for_approved_users()), 0)
+        self.assertEqual(len(self.accounts.accounts_for_active_users()), 1)
+
+        self.users.set_daily_signal_pause_until(self.user.id, past)
+        self.assertEqual(len(self.accounts.accounts_for_approved_users()), 1)
+
     def test_kill_switch_bloqueia_execucao_demo(self) -> None:
         client = SimulatedMT5Client()
         result = self.executor(

@@ -236,6 +236,7 @@ def initialize_database(database_path: Path) -> None:
                 telegram_user_id INTEGER NOT NULL UNIQUE,
                 telegram_username TEXT,
                 status TEXT NOT NULL,
+                daily_signal_pause_until TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -712,6 +713,7 @@ def as_text(value: int | str | None) -> str | None:
 
 
 def run_schema_migrations(connection: sqlite3.Connection) -> None:
+    ensure_column(connection, "users", "daily_signal_pause_until", "TEXT")
     ensure_column(connection, "mt5_accounts", "account_mode", "TEXT NOT NULL DEFAULT 'hedging'")
     ensure_column(connection, "mt5_accounts", "balance", "TEXT")
     ensure_column(connection, "mt5_accounts", "equity", "TEXT")

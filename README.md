@@ -304,6 +304,13 @@ banca estimada no início do dia, calculada por `saldo atual - resultado
 realizado`. O dia segue o horário de Brasília (UTC-3) e é atualizado pelo
 `telegram-mt5-worker`.
 
+O botão `🛑 Parar sinais hoje` bloqueia somente novas entradas do cliente e
+mantém o Worker MT5 gerenciando ordens e posições existentes. Após uma
+confirmação, a retomada ocorre automaticamente na próxima abertura das 20:00 no
+horário de Brasília. Acionamentos depois das 20:00 aguardam a abertura do dia
+seguinte; sexta-feira e sábado aguardam domingo às 20:00. O cliente também pode
+usar `▶️ Retomar sinais agora` para remover a parada antes desse horário.
+
 O parser também reconhece entradas escritas no cabeçalho como
 `GOLD BUY NOW IN ZONE 4027-4020`. Alvos sem preço, como `TP 3: OPEN`, são
 ignorados; os demais TPs numéricos continuam sendo executados normalmente.

@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import time
 from urllib.parse import urlsplit, urlunsplit
+from zoneinfo import ZoneInfo
 
 from .account_service import AccountService
 from .access_control import ACCESS_EXPIRED, paid_access_decision
@@ -33,6 +34,7 @@ from .bot_keyboards import (
     CB_CONFIRM_PAUSE,
     CB_CONNECTION,
     CB_CONNECT_MT5,
+    CB_CONFIRM_DAILY_STOP,
     CB_EXEC_ENTRY_MENU,
     CB_EXEC_ENTRY_MARKET_ZONE,
     CB_EXEC_ENTRY_MARKET_NOW,
@@ -56,6 +58,7 @@ from .bot_keyboards import (
     CB_EXEC_TP_4,
     CB_HISTORY,
     CB_MAIN,
+    CB_DAILY_STOP,
     CB_MT5_ACCOUNTS,
     CB_MT5_CONFIG,
     CB_MT5_CONFIRM_REMOVE,
@@ -65,16 +68,19 @@ from .bot_keyboards import (
     CB_MT5_VIEW,
     CB_OPERATIONS,
     CB_PAUSE,
+    CB_RESUME_DAILY_SIGNALS,
     CB_PROTECTIONS,
     CB_RISK,
     CB_SIGNAL_EXECUTION,
     CONFIRM_PAUSE,
+    CONFIRM_DAILY_STOP,
     CONFIRM_REMOVE_MT5,
     CHANNEL_MENU,
     CHANNEL_TEXT_INPUT_MENU,
     CONNECTION_MENU,
     CUSTOM_VALUE_MENU,
     DAILY_LOSS_MENU,
+    DAILY_STOPPED_MENU,
     DAILY_TARGET_MENU,
     FIXED_LOT_MENU,
     HISTORY_MENU,
@@ -625,6 +631,67 @@ class BotService:
                 CONFIRM_PAUSE,
                 screen="confirm_pause",
             )
+        if callback == CB_DAILY_STOP:
+            if user.status != USER_STATUS_ACTIVE or not paid_access_decision(
+                self.database_path, user.id
+            ).allowed:
+                return BotResponse(
+                    "Não há novas entradas liberadas para interromper neste momento.",
+                    MAIN_MENU,
+                    screen="main",
+                )
+            if daily_signal_pause_is_active(user):
+                return daily_stop_response(user)
+            resume_at = next_daily_signal_resume_at()
+            return BotResponse(
+                "\n".join(
+                    [
+                        "🛑 PARAR SINAIS HOJE",
+                        "",
+                        "Ao confirmar, nenhum novo sinal abrirá operações nesta conta.",
+                        "",
+                        "Operações e ordens já existentes continuarão sendo gerenciadas normalmente.",
+                        "",
+                        f"Retomada automática: {format_daily_resume(resume_at)}.",
+                        "",
+                        "Deseja continuar?",
+                    ]
+                ),
+                CONFIRM_DAILY_STOP,
+                screen="confirm_daily_stop",
+            )
+        if callback == CB_CONFIRM_DAILY_STOP:
+            if user.status != USER_STATUS_ACTIVE or not paid_access_decision(
+                self.database_path, user.id
+            ).allowed:
+                return BotResponse(
+                    "Não há novas entradas liberadas para interromper neste momento.",
+                    MAIN_MENU,
+                    screen="main",
+                )
+            resume_at = next_daily_signal_resume_at()
+            updated = self.users.set_daily_signal_pause_until(
+                user.id,
+                resume_at.isoformat(),
+            )
+            return daily_stop_response(updated)
+        if callback == CB_RESUME_DAILY_SIGNALS:
+            self.users.set_daily_signal_pause_until(user.id, None)
+            refreshed = self.users.get_by_id(user.id)
+            status_label, operations_label = self._status_labels(refreshed)
+            return BotResponse(
+                "\n".join(
+                    [
+                        "▶️ RECEBIMENTO RETOMADO",
+                        "",
+                        "A parada diária foi removida.",
+                        f"Status do copiador: {status_label}",
+                        f"Novas operações: {operations_label}",
+                    ]
+                ),
+                MAIN_MENU,
+                screen="main",
+            )
         if callback == CB_CANCEL:
             return BotResponse("Ação cancelada.", MAIN_MENU)
         if callback == CB_MT5_CONFIRM_REMOVE:
@@ -908,7 +975,7 @@ class BotService:
         )
 
     def _account_screen(self, user: User) -> BotResponse:
-        status_label, _operations_label = self._status_labels(user)
+        status_label, operations_label = self._status_labels(user)
         account = self.mt5_accounts.first_account(user.id)
         connection_status = "⚪ Não conectado"
         balance = "Aguardando conexão"
@@ -930,6 +997,7 @@ class BotService:
                     "",
                     f"Status do copiador: {status_label}",
                     f"MetaTrader 5: {connection_status}",
+                    f"Novas operações: {operations_label}",
                     "",
                     f"Saldo: {balance}",
                     f"Equity: {equity}",
@@ -1221,6 +1289,12 @@ class BotService:
             return "🟡 Aguardando aprovação", "⏸️ Bloqueadas"
         access = paid_access_decision(self.database_path, user.id)
         if access.allowed:
+            if daily_signal_pause_is_active(user):
+                resume_at = parse_daily_signal_pause(user.daily_signal_pause_until)
+                return (
+                    "🟢 Ativo",
+                    f"🛑 Paradas até {format_daily_resume(resume_at, include_date=False)}",
+                )
             return "🟢 Ativo", "▶️ Liberadas"
         if access.reason == ACCESS_EXPIRED:
             return "🔴 Acesso expirado", "⏸️ Bloqueadas"
@@ -1241,6 +1315,85 @@ def status_labels(status: str) -> tuple[str, str]:
     if status == USER_STATUS_ACTIVE:
         return "🟢 Ativo", "▶️ Liberadas"
     return "🟡 Pausado", "⏸️ Bloqueadas"
+
+
+SAO_PAULO_TIMEZONE = ZoneInfo("America/Sao_Paulo")
+DAILY_SIGNAL_RESUME_HOUR = 20
+
+
+def next_daily_signal_resume_at(now: datetime | None = None) -> datetime:
+    current = now or datetime.now(tz=timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    local_now = current.astimezone(SAO_PAULO_TIMEZONE)
+    resume_at = local_now.replace(
+        hour=DAILY_SIGNAL_RESUME_HOUR,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    if resume_at <= local_now:
+        resume_at += timedelta(days=1)
+    while resume_at.weekday() in {4, 5}:
+        resume_at += timedelta(days=1)
+    return resume_at.astimezone(timezone.utc)
+
+
+def parse_daily_signal_pause(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def daily_signal_pause_is_active(
+    user: User,
+    now: datetime | None = None,
+) -> bool:
+    pause_until = parse_daily_signal_pause(user.daily_signal_pause_until)
+    if pause_until is None:
+        return False
+    current = now or datetime.now(tz=timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return pause_until > current.astimezone(timezone.utc)
+
+
+def format_daily_resume(
+    resume_at: datetime | None,
+    *,
+    include_date: bool = True,
+) -> str:
+    if resume_at is None:
+        return "20:00 de Brasília"
+    local_resume = resume_at.astimezone(SAO_PAULO_TIMEZONE)
+    if include_date:
+        return local_resume.strftime("%d/%m/%Y às %H:%M (Brasília)")
+    return local_resume.strftime("%H:%M de Brasília")
+
+
+def daily_stop_response(user: User) -> BotResponse:
+    resume_at = parse_daily_signal_pause(user.daily_signal_pause_until)
+    return BotResponse(
+        "\n".join(
+            [
+                "🛑 SINAIS PARADOS POR HOJE",
+                "",
+                "Nenhum novo sinal criará operações.",
+                "",
+                "Operações e ordens já existentes continuam sendo gerenciadas.",
+                "",
+                f"Retomada automática: {format_daily_resume(resume_at)}.",
+            ]
+        ),
+        DAILY_STOPPED_MENU,
+        screen="daily_stopped",
+    )
 
 
 def admin_panel_url(onboarding_url: str | None) -> str | None:

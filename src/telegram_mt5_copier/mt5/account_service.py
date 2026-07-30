@@ -806,6 +806,10 @@ class MT5AccountService:
                 JOIN execution_profiles p ON p.user_id = a.user_id AND p.mt5_account_id = a.id
                 JOIN customer_billing b ON b.user_id = a.user_id
                 WHERE u.status = 'active'
+                  AND (
+                      u.daily_signal_pause_until IS NULL
+                      OR datetime(u.daily_signal_pause_until) <= datetime('now')
+                  )
                   AND b.billing_status = 'paid'
                   AND b.due_date IS NOT NULL
                   AND date(b.due_date) >= date('now')
@@ -861,6 +865,10 @@ class MT5AccountService:
                 JOIN execution_profiles p ON p.user_id = a.user_id AND p.mt5_account_id = a.id
                 JOIN customer_billing b ON b.user_id = a.user_id
                 WHERE u.status = 'active'
+                  AND (
+                      u.daily_signal_pause_until IS NULL
+                      OR datetime(u.daily_signal_pause_until) <= datetime('now')
+                  )
                   AND b.billing_status = 'paid'
                   AND b.due_date IS NOT NULL
                   AND date(b.due_date) >= date('now')
