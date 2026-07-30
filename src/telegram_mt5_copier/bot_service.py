@@ -6,7 +6,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import time
 from urllib.parse import urlsplit, urlunsplit
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .account_service import AccountService
 from .access_control import ACCESS_EXPIRED, paid_access_decision
@@ -1317,7 +1317,10 @@ def status_labels(status: str) -> tuple[str, str]:
     return "🟡 Pausado", "⏸️ Bloqueadas"
 
 
-SAO_PAULO_TIMEZONE = ZoneInfo("America/Sao_Paulo")
+try:
+    SAO_PAULO_TIMEZONE = ZoneInfo("America/Sao_Paulo")
+except ZoneInfoNotFoundError:
+    SAO_PAULO_TIMEZONE = timezone(timedelta(hours=-3), name="America/Sao_Paulo")
 DAILY_SIGNAL_RESUME_HOUR = 20
 
 
