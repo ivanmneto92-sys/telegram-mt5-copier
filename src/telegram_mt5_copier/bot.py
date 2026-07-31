@@ -44,7 +44,11 @@ def main() -> int:
         mt5_account_service = MT5AccountService(
             config.database_path,
             credential_service=CredentialService(config.mt5_credential_key),
-            terminal_manager=TerminalManager(config.mt5_base_dir, config.mt5_template_path),
+            terminal_manager=TerminalManager(
+                config.mt5_base_dir,
+                config.mt5_template_path,
+                config.mt5_broker_template_paths,
+            ),
             client_factory=MT5Client,
             allow_live_accounts=config.allow_live_accounts,
             max_accounts_per_vps=config.mt5_max_accounts_per_vps,

@@ -30,6 +30,7 @@ class OnboardingHandler(BaseHTTPRequestHandler):
     admin_browser_auth: AdminBrowserAuthService
     csrf: CSRFTokenService
     bot_token: str
+    broker_options: tuple[str, ...] = ()
 
     def log_message(self, format: str, *args: object) -> None:
         if self.command == "POST":
@@ -62,7 +63,10 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             return
         safe_log("page_loaded")
         script_nonce = generate_script_nonce()
-        self.send_html(render_onboarding_form(script_nonce), script_nonce=script_nonce)
+        self.send_html(
+            render_onboarding_form(script_nonce, broker_options=self.broker_options),
+            script_nonce=script_nonce,
+        )
 
     def do_HEAD(self) -> None:
         path = self.route_path()
@@ -89,7 +93,11 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             return
         safe_log("page_loaded")
         script_nonce = generate_script_nonce()
-        self.send_html(render_onboarding_form(script_nonce), script_nonce=script_nonce, head_only=True)
+        self.send_html(
+            render_onboarding_form(script_nonce, broker_options=self.broker_options),
+            script_nonce=script_nonce,
+            head_only=True,
+        )
 
     def do_POST(self) -> None:
         path = ""
@@ -446,7 +454,11 @@ def main() -> int:
 
         users = UserRepository(config.database_path)
         credential_service = CredentialService(config.mt5_credential_key)
-        terminal_manager = TerminalManager(config.mt5_base_dir, config.mt5_template_path)
+        terminal_manager = TerminalManager(
+            config.mt5_base_dir,
+            config.mt5_template_path,
+            config.mt5_broker_template_paths,
+        )
         accounts = MT5AccountService(
             config.database_path,
             credential_service=credential_service,
@@ -472,6 +484,7 @@ def main() -> int:
             admin_ids=config.bot_admin_ids,
         )
         OnboardingHandler.bot_token = config.telegram_bot_token
+        OnboardingHandler.broker_options = terminal_manager.available_brokers()
         OnboardingHandler.csrf = csrf
         OnboardingHandler.onboarding = onboarding
         OnboardingHandler.admin_panel = admin_panel

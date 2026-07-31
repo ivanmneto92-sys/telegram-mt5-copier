@@ -288,6 +288,35 @@ class MT5OnboardingTests(unittest.TestCase):
 
         self.assertTrue((account_dir / "bases" / "new-account.dat").exists())
 
+    def test_seleciona_template_oficial_da_corretora(self) -> None:
+        hfm = self.root / "template-hfm"
+        ftmo = self.root / "template-ftmo"
+        hfm.mkdir()
+        ftmo.mkdir()
+        (hfm / "terminal64.exe").write_bytes(b"hfm")
+        (ftmo / "terminal64.exe").write_bytes(b"ftmo")
+        manager = TerminalManager(
+            self.root / "multi-broker",
+            broker_template_paths={"HFM": hfm, "FTMO": ftmo},
+        )
+
+        provisioned = manager.provision_account(90, broker_name="FTMO")
+
+        self.assertEqual(provisioned.terminal_path.read_bytes(), b"ftmo")
+        self.assertEqual(manager.available_brokers(), ("FTMO", "HFM"))
+
+    def test_rejeita_corretora_sem_template_configurado(self) -> None:
+        hfm = self.root / "only-hfm"
+        hfm.mkdir()
+        (hfm / "terminal64.exe").write_bytes(b"hfm")
+        manager = TerminalManager(
+            self.root / "multi-broker-missing",
+            broker_template_paths={"HFM": hfm},
+        )
+
+        with self.assertRaisesRegex(ValueError, "Corretora sem template"):
+            manager.provision_account(91, broker_name="Exness")
+
     def test_mt5_client_inicializa_em_modo_portable(self) -> None:
         fake_mt5 = FakeMT5Module()
         client = MT5Client(fake_mt5)

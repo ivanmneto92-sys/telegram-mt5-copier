@@ -85,7 +85,11 @@ def run_mt5_provision(config: AppConfig, user_id: int, account_id: int) -> int:
         from .mt5.account_service import MT5AccountService
         from .mt5.terminal_manager import TerminalManager
 
-        terminal_manager = TerminalManager(config.mt5_base_dir, config.mt5_template_path)
+        terminal_manager = TerminalManager(
+            config.mt5_base_dir,
+            config.mt5_template_path,
+            config.mt5_broker_template_paths,
+        )
         provisioned = terminal_manager.provision_account(account_id)
         accounts = MT5AccountService(config.database_path)
         try:

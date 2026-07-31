@@ -6,6 +6,7 @@ import unittest
 
 from telegram_mt5_copier.config import (
     AppConfig,
+    parse_broker_template_paths,
     parse_bool,
     parse_source_chat_ids,
     project_path,
@@ -169,6 +170,33 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.health_check_interval_seconds, 30)
             self.assertEqual(config.health_stale_after_seconds, 90)
             self.assertEqual(config.operational_alert_repeat_minutes, 360)
+
+    def test_templates_mt5_por_corretora_sao_carregados(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = AppConfig.load(
+                project_root=root,
+                env={
+                    "MT5_BROKER_TEMPLATES": (
+                        r"HFM=C:\MT5TemplateHFM;FTMO=./templates/ftmo;"
+                        r"EXNESS=C:\MT5TemplateExness"
+                    )
+                },
+                create_dirs=False,
+            )
+
+            self.assertEqual(
+                config.mt5_broker_template_paths,
+                {
+                    "HFM": Path(r"C:\MT5TemplateHFM"),
+                    "FTMO": root / "templates" / "ftmo",
+                    "EXNESS": Path(r"C:\MT5TemplateExness"),
+                },
+            )
+
+    def test_templates_mt5_rejeitam_formato_invalido(self) -> None:
+        with self.assertRaisesRegex(ValueError, "CORRETORA=CAMINHO"):
+            parse_broker_template_paths("FTMO", Path.cwd())
 
 
 if __name__ == "__main__":

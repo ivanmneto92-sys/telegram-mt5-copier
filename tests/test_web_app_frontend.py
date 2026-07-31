@@ -64,6 +64,16 @@ class MiniAppFrontendTests(unittest.TestCase):
         self.assertIn('id="connect-form"', html)
         self.assertIn(OUTSIDE_TELEGRAM_MESSAGE, html)
 
+    def test_formulario_lista_apenas_corretoras_configuradas(self) -> None:
+        html = render_onboarding_form(
+            broker_options=("HFM", "FTMO", "FXGlobe", "Exness", "INFINOX")
+        )
+
+        self.assertIn('<select name="broker_name" required>', html)
+        self.assertIn('<option value="FTMO">FTMO</option>', html)
+        self.assertIn('<option value="INFINOX">INFINOX</option>', html)
+        self.assertNotIn('<input name="broker_name"', html)
+
     def test_init_data_vazio_gera_mensagem(self) -> None:
         script = render_miniapp_script()
 

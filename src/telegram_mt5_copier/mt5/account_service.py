@@ -181,6 +181,7 @@ class MT5AccountService:
             if self.terminal_manager is not None:
                 provisioned = self.terminal_manager.provision_account(
                     account_id,
+                    broker_name=broker_name,
                     sanitize_legacy=retry_account is not None,
                 )
                 self.update_terminal_path(user_id, account_id, provisioned.terminal_path)
@@ -231,6 +232,7 @@ class MT5AccountService:
         ):
             self.terminal_manager.provision_account(
                 account.id,
+                broker_name=account.broker_name,
                 sanitize_legacy=True,
             )
 

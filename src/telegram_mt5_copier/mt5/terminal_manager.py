@@ -4,7 +4,9 @@ import configparser
 from dataclasses import dataclass
 import io
 from pathlib import Path
+import re
 import shutil
+from typing import Mapping
 
 SAFE_COMMON_CONFIGURATION = """[Common]
 KeepPrivate=0
@@ -27,6 +29,24 @@ SENSITIVE_CONFIGURATION_KEYS = {
     "proxypassword",
 }
 
+BROKER_DISPLAY_NAMES = {
+    "HFM": "HFM",
+    "FTMO": "FTMO",
+    "FXGLOBE": "FXGlobe",
+    "EXNESS": "Exness",
+    "INFINOX": "INFINOX",
+}
+BROKER_ALIASES = {
+    "HF": "HFM",
+    "HFM": "HFM",
+    "HFMARKETS": "HFM",
+    "HOTFOREX": "HFM",
+    "FTMO": "FTMO",
+    "FXGLOBE": "FXGLOBE",
+    "EXNESS": "EXNESS",
+    "INFINOX": "INFINOX",
+}
+
 
 @dataclass(frozen=True)
 class ProvisionedTerminal:
@@ -38,10 +58,47 @@ class ProvisionedTerminal:
 
 
 class TerminalManager:
-    def __init__(self, base_dir: Path, template_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        base_dir: Path,
+        template_path: Path | None = None,
+        broker_template_paths: Mapping[str, Path] | None = None,
+    ) -> None:
         self.base_dir = base_dir
         self.template_path = template_path
+        self.broker_template_paths = {
+            canonical_broker_key(name): Path(path)
+            for name, path in (broker_template_paths or {}).items()
+        }
         self.base_dir.mkdir(parents=True, exist_ok=True)
+
+    def available_brokers(self) -> tuple[str, ...]:
+        keys = set(self.broker_template_paths)
+        if self.template_path is not None:
+            keys.add("HFM")
+        return tuple(
+            BROKER_DISPLAY_NAMES.get(key, key)
+            for key in sorted(keys, key=lambda item: BROKER_DISPLAY_NAMES.get(item, item))
+        )
+
+    def template_for_broker(self, broker_name: str | None) -> Path | None:
+        if not self.broker_template_paths:
+            return self.template_path
+        key = canonical_broker_key(broker_name or "")
+        template = self.broker_template_paths.get(key)
+        if template is None and key == "HFM":
+            template = self.template_path
+        if template is None:
+            supported = ", ".join(self.available_brokers())
+            raise ValueError(
+                f"Corretora sem template MT5 configurado. Disponiveis: {supported}."
+            )
+        if not (template / "terminal64.exe").is_file():
+            raise ValueError(
+                f"Template MT5 de {BROKER_DISPLAY_NAMES.get(key, key)} invalido: "
+                f"terminal64.exe nao encontrado em {template}."
+            )
+        return template
 
     def account_dir(self, account_id: int) -> Path:
         return self.base_dir / str(account_id)
@@ -53,11 +110,13 @@ class TerminalManager:
         self,
         account_id: int,
         *,
+        broker_name: str | None = None,
         sanitize_legacy: bool = False,
     ) -> ProvisionedTerminal:
         account_dir = self.account_dir(account_id)
-        if self.template_path and self.template_path.exists() and not account_dir.exists():
-            shutil.copytree(self.template_path, account_dir)
+        template_path = self.template_for_broker(broker_name)
+        if template_path and template_path.exists() and not account_dir.exists():
+            shutil.copytree(template_path, account_dir)
             sanitize_copied_terminal(account_dir)
         else:
             account_dir.mkdir(parents=True, exist_ok=True)
@@ -83,6 +142,11 @@ class TerminalManager:
             data_dir=data_dir,
             logs_dir=logs_dir,
         )
+
+
+def canonical_broker_key(value: str) -> str:
+    normalized = re.sub(r"[^A-Z0-9]+", "", value.upper())
+    return BROKER_ALIASES.get(normalized, normalized)
 
 
 def sanitize_copied_terminal(account_dir: Path) -> None:

@@ -215,8 +215,24 @@ VALIDATION_FAILED_MESSAGE = "Não foi possível validar sua sessão do Telegram.
 FRIENDLY_OPEN_ERROR_MESSAGE = "Não foi possível abrir a conexão segura. Feche esta tela e tente novamente pelo bot."
 
 
-def render_onboarding_form(script_nonce: str = "", csrf_token: str = "") -> str:
+def render_onboarding_form(
+    script_nonce: str = "",
+    csrf_token: str = "",
+    broker_options: tuple[str, ...] = (),
+) -> str:
     nonce_attribute = f' nonce="{escape(script_nonce, quote=True)}"' if script_nonce else ""
+    if broker_options:
+        options = "".join(
+            f'<option value="{escape(name, quote=True)}">{escape(name)}</option>'
+            for name in broker_options
+        )
+        broker_field = (
+            '<select name="broker_name" required>'
+            '<option value="" selected disabled>Selecione a corretora</option>'
+            f"{options}</select>"
+        )
+    else:
+        broker_field = '<input name="broker_name" required>'
     return f"""<!doctype html>
 <html lang="pt-BR">
 <head>
@@ -236,7 +252,7 @@ def render_onboarding_form(script_nonce: str = "", csrf_token: str = "") -> str:
     .message.notice {{ border-color: #b9cce8; background: #f4f8ff; color: #17406f; }}
     form {{ display: block; }}
     label {{ display: block; margin-top: 14px; font-weight: 600; }}
-    input {{ width: 100%; box-sizing: border-box; padding: 12px; border: 1px solid #c9ced6; border-radius: 8px; margin-top: 6px; }}
+    input, select {{ width: 100%; box-sizing: border-box; padding: 12px; border: 1px solid #c9ced6; border-radius: 8px; margin-top: 6px; background: #fff; }}
     button {{ margin-top: 20px; width: 100%; padding: 13px; border: 0; border-radius: 8px; background: #1473e6; color: white; font-weight: 700; }}
     button:disabled {{ opacity: .62; }}
   </style>
@@ -264,12 +280,12 @@ def render_onboarding_form(script_nonce: str = "", csrf_token: str = "") -> str:
   <main>
     <section class="panel">
       <h1>Conectar conta MT5</h1>
-      <p id="intro">Preencha os dados da sua conta de demonstração pelo ambiente seguro do Telegram.</p>
+      <p id="intro">Preencha os dados da sua conta MT5 pelo ambiente seguro do Telegram.</p>
       <div id="message" class="message error" role="alert">{OUTSIDE_TELEGRAM_MESSAGE}</div>
     <form id="connect-form" method="post" action="/api/connect" autocomplete="off">
       <input type="hidden" name="csrf_token" value="{csrf_token}">
       <input type="hidden" name="init_data" id="init_data">
-      <label>Corretora<input name="broker_name" required></label>
+      <label>Corretora{broker_field}</label>
       <label>Servidor<input name="server_name" required></label>
       <label>Login<input name="login" inputmode="numeric" required></label>
       <label>Senha<input name="password" type="password" required></label>
@@ -502,7 +518,7 @@ def render_miniapp_script() -> str:
       var fields = {
         csrf_token: csrfInput ? csrfInput.value : "",
         init_data: initDataInput ? initDataInput.value : "",
-        broker_name: document.querySelector("input[name='broker_name']").value,
+        broker_name: document.querySelector("[name='broker_name']").value,
         server_name: document.querySelector("input[name='server_name']").value,
         login: document.querySelector("input[name='login']").value,
         password: passwordInput ? passwordInput.value : "",
