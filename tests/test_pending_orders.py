@@ -10,6 +10,7 @@ import unittest
 
 from telegram_mt5_copier.credential_service import CredentialService
 from telegram_mt5_copier.database import connect_database
+from telegram_mt5_copier.daily_schedule import SAO_PAULO_TIMEZONE
 from telegram_mt5_copier.mt5.account_service import MT5AccountForm, MT5AccountService
 from telegram_mt5_copier.mt5.client import SimulatedMT5Client
 from telegram_mt5_copier.mt5.execution_repository import ExecutionRepository
@@ -383,6 +384,54 @@ class PendingOrderTests(unittest.TestCase):
         ).execute_for_account(parse_signal_text(BUY_SIGNAL).signal, self.account, loss_profile)
         self.assertEqual(loss_result.group_result.rejected_reason, "daily_loss_limit_reached")
         self.assertFalse(loss_client.order_send_called)
+
+    def test_meta_diaria_pausa_novos_sinais_ate_as_23h(self) -> None:
+        target_profile = replace(self.profile(), daily_profit_target=Decimal("50"))
+        target_client = SimulatedMT5Client(
+            history_deals=({"magic": MT5_MAGIC_NUMBER, "profit": 60},)
+        )
+
+        result = self.executor(
+            client=target_client,
+            execution_mode="demo_execution",
+            global_kill_switch=False,
+        ).execute_for_account(
+            parse_signal_text(BUY_SIGNAL).signal,
+            self.account,
+            target_profile,
+        )
+
+        paused_user = self.users.get_by_id(self.user.id)
+        pause_until = datetime.fromisoformat(paused_user.daily_signal_pause_until)
+        self.assertEqual(result.group_result.rejected_reason, "daily_profit_target_reached")
+        self.assertEqual(pause_until.astimezone(SAO_PAULO_TIMEZONE).hour, 23)
+        self.assertEqual(
+            self.executor().execute_for_signal(parse_signal_text(BUY_SIGNAL).signal),
+            [],
+        )
+
+    def test_meta_em_uma_conta_impede_outra_conta_do_mesmo_usuario(self) -> None:
+        self.create_extra_account("87654321")
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                "UPDATE execution_profiles SET daily_profit_target = 50 WHERE user_id = ?",
+                (self.user.id,),
+            )
+        target_client = SimulatedMT5Client(
+            history_deals=({"magic": MT5_MAGIC_NUMBER, "profit": 60},)
+        )
+
+        results = self.executor(
+            client=target_client,
+            execution_mode="demo_execution",
+            global_kill_switch=False,
+        ).execute_for_signal(parse_signal_text(BUY_SIGNAL).signal)
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(
+            results[0].group_result.rejected_reason,
+            "daily_profit_target_reached",
+        )
 
     def test_rejeicao_003_para_quatro_tps_quando_minimo_001(self) -> None:
         with self.assertRaises(VolumeAllocationError):

@@ -6,7 +6,6 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import time
 from urllib.parse import urlsplit, urlunsplit
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .account_service import AccountService
 from .access_control import ACCESS_EXPIRED, paid_access_decision
@@ -18,6 +17,11 @@ from .channel_catalog import (
     REQUEST_PENDING_ACCESS,
     REQUEST_READY_REVIEW,
     extract_channel_toggle,
+)
+from .daily_schedule import (
+    DAILY_SIGNAL_RESUME_HOUR,
+    SAO_PAULO_TIMEZONE,
+    next_daily_signal_resume_at,
 )
 from .bot_keyboards import (
     ACCOUNT_MENU,
@@ -1317,31 +1321,6 @@ def status_labels(status: str) -> tuple[str, str]:
     return "🟡 Pausado", "⏸️ Bloqueadas"
 
 
-try:
-    SAO_PAULO_TIMEZONE = ZoneInfo("America/Sao_Paulo")
-except ZoneInfoNotFoundError:
-    SAO_PAULO_TIMEZONE = timezone(timedelta(hours=-3), name="America/Sao_Paulo")
-DAILY_SIGNAL_RESUME_HOUR = 20
-
-
-def next_daily_signal_resume_at(now: datetime | None = None) -> datetime:
-    current = now or datetime.now(tz=timezone.utc)
-    if current.tzinfo is None:
-        current = current.replace(tzinfo=timezone.utc)
-    local_now = current.astimezone(SAO_PAULO_TIMEZONE)
-    resume_at = local_now.replace(
-        hour=DAILY_SIGNAL_RESUME_HOUR,
-        minute=0,
-        second=0,
-        microsecond=0,
-    )
-    if resume_at <= local_now:
-        resume_at += timedelta(days=1)
-    while resume_at.weekday() in {4, 5}:
-        resume_at += timedelta(days=1)
-    return resume_at.astimezone(timezone.utc)
-
-
 def parse_daily_signal_pause(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -1373,7 +1352,7 @@ def format_daily_resume(
     include_date: bool = True,
 ) -> str:
     if resume_at is None:
-        return "20:00 de Brasília"
+        return f"{DAILY_SIGNAL_RESUME_HOUR:02d}:00 de Brasília"
     local_resume = resume_at.astimezone(SAO_PAULO_TIMEZONE)
     if include_date:
         return local_resume.strftime("%d/%m/%Y às %H:%M (Brasília)")

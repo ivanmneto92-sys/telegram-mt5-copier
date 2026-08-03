@@ -8,6 +8,11 @@ import time
 from typing import Callable
 
 from ..models import TradeSignal, decimal_to_text
+from ..daily_schedule import (
+    current_daily_signal_session_start_at,
+    next_daily_signal_resume_at,
+)
+from ..database import connect_database, utc_now
 from .account_service import MT5AccountService
 from .client import SimulatedMT5Client
 from .execution_group_service import ExecutionGroupResult, ExecutionGroupService, build_latency_metrics
@@ -83,13 +88,22 @@ class PendingOrderExecutor:
 
     def execute_for_signal(self, signal: TradeSignal) -> list[PendingExecutionResult]:
         results: list[PendingExecutionResult] = []
+        paused_user_ids: set[int] = set()
         candidates = (
             self.accounts.accounts_for_approved_users(signal.source_chat_id)
             if self.execution_mode == "live_execution"
             else self.accounts.connected_demo_accounts_for_active_users(signal.source_chat_id)
         )
         for account, profile in candidates:
-            results.append(self.execute_for_account(signal, account, profile))
+            if account.user_id in paused_user_ids:
+                continue
+            result = self.execute_for_account(signal, account, profile)
+            results.append(result)
+            if result.group_result.rejected_reason in {
+                "daily_profit_target_reached",
+                "daily_loss_limit_reached",
+            }:
+                paused_user_ids.add(account.user_id)
         return results
 
     def execute_for_account(
@@ -179,6 +193,11 @@ class PendingOrderExecutor:
             )
         except Exception as exc:
             shutdown_if_needed()
+            if (
+                isinstance(exc, OrderValidationError)
+                and exc.reason in {"daily_profit_target_reached", "daily_loss_limit_reached"}
+            ):
+                self._pause_user_until_next_session(account.user_id, started_at)
             return PendingExecutionResult(
                 account=account,
                 group_result=ExecutionGroupResult(group=None, orders=(), rejected_reason=str(exc)),
@@ -246,6 +265,18 @@ class PendingOrderExecutor:
             group_result=group_result,
             message=format_rejection_message("execution_mode_not_enabled", account),
         )
+
+    def _pause_user_until_next_session(self, user_id: int, now: datetime) -> None:
+        pause_until = next_daily_signal_resume_at(now).isoformat()
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                """
+                UPDATE users
+                SET daily_signal_pause_until = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (pause_until, utc_now(), user_id),
+            ).close()
 
     def _validate_execution_mode(self, account: MT5Account, plan: PendingOrderPlan) -> None:
         if self.execution_mode == "live_execution":
@@ -455,7 +486,7 @@ def validate_operational_limits(
     if profile.daily_profit_target <= 0 and profile.daily_loss_limit <= 0:
         return
     now = datetime.now(tz=timezone.utc)
-    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_start = current_daily_signal_session_start_at(now)
     daily_result = Decimal("0")
     for deal in client.history_deals_get(day_start, now):
         if int(result_value(deal, "magic", 0) or 0) != MT5_MAGIC_NUMBER:

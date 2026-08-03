@@ -517,21 +517,21 @@ class BotManagementTests(unittest.TestCase):
         self.assertIn("Breakeven após TP1:\n🟢 Ativado", enabled.text)
         self.assertTrue(enabled_settings.tp1_breakeven_enabled)
 
-    def test_proxima_retomada_e_as_20h_de_brasilia(self) -> None:
+    def test_proxima_retomada_e_as_23h_de_brasilia(self) -> None:
         before_open = next_daily_signal_resume_at(
             datetime(2026, 7, 30, 18, 0, tzinfo=timezone.utc)
         )
         after_open = next_daily_signal_resume_at(
-            datetime(2026, 7, 30, 23, 30, tzinfo=timezone.utc)
+            datetime(2026, 7, 31, 2, 30, tzinfo=timezone.utc)
         )
 
         self.assertEqual(
             before_open,
-            datetime(2026, 7, 30, 23, 0, tzinfo=timezone.utc),
+            datetime(2026, 7, 31, 2, 0, tzinfo=timezone.utc),
         )
         self.assertEqual(
             after_open,
-            datetime(2026, 8, 2, 23, 0, tzinfo=timezone.utc),
+            datetime(2026, 8, 3, 2, 0, tzinfo=timezone.utc),
         )
 
     def test_retomada_pula_fechamento_do_fim_de_semana(self) -> None:
@@ -545,15 +545,15 @@ class BotManagementTests(unittest.TestCase):
         expected_sunday_open = datetime(
             2026,
             8,
+            3,
             2,
-            23,
             0,
             tzinfo=timezone.utc,
         )
         self.assertEqual(friday_before_open, expected_sunday_open)
         self.assertEqual(saturday, expected_sunday_open)
 
-    def test_cliente_para_sinais_ate_20h_e_pode_retomar_antes(self) -> None:
+    def test_cliente_para_sinais_ate_23h_e_pode_retomar_antes(self) -> None:
         self.service.start(101, "alice")
         user = self.users.get_by_telegram_user_id(101)
         grant_paid_access(self.database_path, user.id)
