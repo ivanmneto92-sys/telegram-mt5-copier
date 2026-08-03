@@ -46,6 +46,8 @@ def run_check(config: AppConfig) -> int:
     missing = config.missing_required_telegram_values()
 
     print("Configuracao carregada com sucesso.")
+    print(f"INSTANCE_ID={config.instance_id}")
+    print(f"BRAND_NAME={config.brand_name}")
     print(f"DRY_RUN={str(config.dry_run).lower()}")
     print(f"DATA_DIR={config.data_dir}")
     print(f"SESSION_DIR={config.session_dir}")
@@ -57,6 +59,7 @@ def run_check(config: AppConfig) -> int:
     print(f"ALLOW_LIVE_ACCOUNTS={str(config.allow_live_accounts).lower()}")
     print(f"DEFAULT_PENDING_EXPIRATION_MINUTES={config.default_pending_expiration_minutes}")
     print(f"GLOBAL_EXECUTION_KILL_SWITCH={str(config.global_execution_kill_switch).lower()}")
+    print(f"ONBOARDING_LOCAL_URL={config.local_onboarding_url}")
 
     if missing and not config.dry_run:
         print("Variaveis obrigatorias ausentes: " + ", ".join(missing), file=sys.stderr)
@@ -112,6 +115,7 @@ def run_service(config: AppConfig) -> int:
         return 2
 
     logger.info("Servico iniciado. DRY_RUN=%s", str(config.dry_run).lower())
+    logger.info("INSTANCE_ID=%s BRAND_NAME=%s", config.instance_id, config.brand_name)
     logger.info("DATA_DIR=%s", config.data_dir)
     logger.info("SESSION_DIR=%s", config.session_dir)
     logger.info("LOG_DIR=%s", config.log_dir)
@@ -136,7 +140,7 @@ def build_logger(config: AppConfig) -> logging.Logger:
     stream_handler.setFormatter(formatter)
     logger.addHandler(stream_handler)
 
-    log_file = config.log_dir / "telegram-mt5-copier.log"
+    log_file = config.signal_monitor_log_path
     file_handler = RotatingFileHandler(
         log_file,
         maxBytes=5 * 1024 * 1024,

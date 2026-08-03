@@ -320,6 +320,11 @@ def main() -> int:
     try:
         config = AppConfig.load(create_dirs=True)
         logger = build_supervisor_logger(config.log_dir)
+        logger.info(
+            "Instancia carregada. id=%s marca=%s",
+            config.instance_id,
+            config.brand_name,
+        )
         services = default_service_specs(
             include_health_monitor=config.operational_alerts_enabled
         )
@@ -337,7 +342,7 @@ def main() -> int:
                 notifier.send if config.operational_alerts_enabled else None
             ),
         )
-        lock = SupervisorLock(config.data_dir / "telegram-mt5-supervisor.lock")
+        lock = SupervisorLock(config.supervisor_lock_path)
 
         def request_stop(_signal_number: int, _frame: object) -> None:
             supervisor.stopping = True

@@ -166,6 +166,7 @@ class BotService:
         account_service: AccountService | None = None,
         mt5_account_service: MT5AccountService | None = None,
         mt5_onboarding_url: str | None = None,
+        brand_name: str = "Instituto Trader",
     ) -> None:
         self.users = UserRepository(database_path)
         self.settings = SettingsService(database_path)
@@ -175,6 +176,7 @@ class BotService:
         self.channels = ChannelCatalogService(database_path)
         self.database_path = database_path
         self.mt5_onboarding_url = mt5_onboarding_url
+        self.brand_name = brand_name.strip() or "Instituto Trader"
         self.admin_ids = set(admin_ids)
         self.admin_browser_auth = AdminBrowserAuthService(
             database_path,
@@ -962,7 +964,7 @@ class BotService:
         return BotResponse(
             "\n".join(
                 [
-                    "🤖 INSTITUTO TRADER",
+                    f"🤖 {self.brand_name.upper()}",
                     "",
                     f"Olá, {name}! 👋",
                     "",

@@ -673,15 +673,19 @@ def add_one_month(value: str) -> str:
     return date(year, month, day).isoformat()
 
 
-def render_admin_panel(script_nonce: str = "") -> str:
+def render_admin_panel(
+    script_nonce: str = "",
+    brand_name: str = "Instituto Trader",
+) -> str:
     nonce_attribute = f' nonce="{escape(script_nonce, quote=True)}"' if script_nonce else ""
+    safe_brand = escape(brand_name.strip() or "Instituto Trader")
     return f"""<!doctype html>
 <html lang="pt-BR">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#07111f">
-  <title>Painel Admin — Instituto Trader</title>
+  <title>Painel Admin — {safe_brand}</title>
   <style>
     :root {{
       color-scheme: dark;
@@ -805,7 +809,7 @@ def render_admin_panel(script_nonce: str = "") -> str:
   <main class="shell">
     <header>
       <div>
-        <div class="eyebrow">Instituto Trader · Master</div>
+        <div class="eyebrow">{safe_brand} · Master</div>
         <h1>Central de clientes</h1>
         <p class="subtitle">Acesso, conexão MT5 e atividade operacional em um único lugar.</p>
       </div>

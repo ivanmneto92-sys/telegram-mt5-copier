@@ -590,6 +590,16 @@ class BotManagementTests(unittest.TestCase):
         self.assertIn("Monitor de sinais:\n⚪ Aguardando inicialização", response.text)
         self.assertIn("MetaTrader 5:\n⚪ Não conectado", response.text)
 
+    def test_nome_white_label_aparece_no_menu_principal(self) -> None:
+        service = BotService(self.database_path, brand_name="Mesa Alpha")
+        try:
+            response = service.start(303, "carol")
+        finally:
+            service.close()
+
+        self.assertIn("🤖 MESA ALPHA", response.text)
+        self.assertNotIn("INSTITUTO TRADER", response.text)
+
     def test_atualizacao_de_telas(self) -> None:
         self.service.start(101, "alice")
 

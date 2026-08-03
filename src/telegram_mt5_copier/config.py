@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
+import re
 from typing import Mapping
 
 ENV_FILE = ".env"
@@ -58,6 +59,8 @@ def project_path(value: str, project_root: Path) -> Path:
 @dataclass(frozen=True)
 class AppConfig:
     project_root: Path
+    instance_id: str
+    brand_name: str
     telegram_api_id: str | None = field(repr=False)
     telegram_api_hash: str | None = field(repr=False)
     telegram_bot_token: str | None = field(repr=False)
@@ -77,6 +80,8 @@ class AppConfig:
     mt5_execution_mode: str
     mt5_max_accounts_per_vps: int
     mt5_onboarding_url: str | None = field(repr=False)
+    onboarding_host: str
+    onboarding_port: int
     allow_live_accounts: bool
     default_pending_expiration_minutes: int
     global_execution_kill_switch: bool
@@ -98,9 +103,24 @@ class AppConfig:
         file_values = load_env_file(env_path)
         runtime_env = os.environ if env is None else env
         source_chat_ids = configured_source_chat_ids(file_values, runtime_env)
+        instance_id = parse_instance_id(
+            _value("INSTANCE_ID", file_values, runtime_env, "main")
+        )
+        brand_name = _value(
+            "BRAND_NAME", file_values, runtime_env, "Instituto Trader"
+        ).strip()
+        if not brand_name:
+            raise ValueError("BRAND_NAME nao pode ficar vazio.")
+        onboarding_host = _value(
+            "ONBOARDING_HOST", file_values, runtime_env, "127.0.0.1"
+        ).strip()
+        if not onboarding_host:
+            raise ValueError("ONBOARDING_HOST nao pode ficar vazio.")
 
         config = cls(
             project_root=root,
+            instance_id=instance_id,
+            brand_name=brand_name,
             telegram_api_id=_optional_value("TELEGRAM_API_ID", file_values, runtime_env),
             telegram_api_hash=_optional_value("TELEGRAM_API_HASH", file_values, runtime_env),
             telegram_bot_token=_optional_value("TELEGRAM_BOT_TOKEN", file_values, runtime_env),
@@ -126,6 +146,10 @@ class AppConfig:
                 "MT5_MAX_ACCOUNTS_PER_VPS",
             ),
             mt5_onboarding_url=_optional_value("MT5_ONBOARDING_URL", file_values, runtime_env),
+            onboarding_host=onboarding_host,
+            onboarding_port=parse_port(
+                _value("ONBOARDING_PORT", file_values, runtime_env, "8080")
+            ),
             allow_live_accounts=parse_bool(
                 _value("ALLOW_LIVE_ACCOUNTS", file_values, runtime_env, "false"),
                 default=False,
@@ -167,11 +191,27 @@ class AppConfig:
 
     @property
     def database_path(self) -> Path:
-        return self.data_dir / "telegram_mt5_copier.sqlite3"
+        return self.data_dir / f"telegram_mt5_copier{self.instance_suffix}.sqlite3"
 
     @property
     def telegram_session_name(self) -> Path:
-        return self.session_dir / "telegram_mt5_copier"
+        return self.session_dir / f"telegram_mt5_copier{self.instance_suffix}"
+
+    @property
+    def instance_suffix(self) -> str:
+        return "" if self.instance_id == "main" else f"_{self.instance_id}"
+
+    @property
+    def supervisor_lock_path(self) -> Path:
+        return self.data_dir / f"telegram-mt5-supervisor{self.instance_suffix}.lock"
+
+    @property
+    def signal_monitor_log_path(self) -> Path:
+        return self.log_dir / f"telegram-mt5-copier{self.instance_suffix}.log"
+
+    @property
+    def local_onboarding_url(self) -> str:
+        return f"http://{self.onboarding_host}:{self.onboarding_port}"
 
     def missing_required_telegram_values(self) -> tuple[str, ...]:
         required = {
@@ -198,6 +238,25 @@ def parse_admin_ids(value: str | None) -> tuple[int, ...]:
             raise ValueError("BOT_ADMIN_IDS deve conter apenas IDs numericos separados por virgula.") from exc
 
     return tuple(admin_ids)
+
+
+def parse_instance_id(value: str) -> str:
+    normalized = value.strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,39}", normalized):
+        raise ValueError(
+            "INSTANCE_ID deve ter de 1 a 40 caracteres: letras, numeros, _ ou -."
+        )
+    return normalized
+
+
+def parse_port(value: str) -> int:
+    try:
+        port = int(value)
+    except ValueError as exc:
+        raise ValueError("ONBOARDING_PORT deve ser um numero inteiro.") from exc
+    if not 1 <= port <= 65535:
+        raise ValueError("ONBOARDING_PORT deve ficar entre 1 e 65535.")
+    return port
 
 
 def parse_source_chat_ids(value: str | None) -> tuple[str, ...]:

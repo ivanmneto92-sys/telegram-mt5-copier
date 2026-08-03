@@ -219,8 +219,10 @@ def render_onboarding_form(
     script_nonce: str = "",
     csrf_token: str = "",
     broker_options: tuple[str, ...] = (),
+    brand_name: str = "Instituto Trader",
 ) -> str:
     nonce_attribute = f' nonce="{escape(script_nonce, quote=True)}"' if script_nonce else ""
+    safe_brand = escape(brand_name.strip() or "Instituto Trader")
     if broker_options:
         options = "".join(
             f'<option value="{escape(name, quote=True)}">{escape(name)}</option>'
@@ -238,7 +240,7 @@ def render_onboarding_form(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Conectar MT5</title>
+  <title>Conectar MT5 — {safe_brand}</title>
   <style>
     :root {{ color-scheme: light; }}
     body {{ font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif; margin: 0; padding: 24px; background: #f6f7f9; color: #15171a; }}
@@ -280,6 +282,7 @@ def render_onboarding_form(
   <main>
     <section class="panel">
       <h1>Conectar conta MT5</h1>
+      <p><strong>{safe_brand}</strong></p>
       <p id="intro">Preencha os dados da sua conta MT5 pelo ambiente seguro do Telegram.</p>
       <div id="message" class="message error" role="alert">{OUTSIDE_TELEGRAM_MESSAGE}</div>
     <form id="connect-form" method="post" action="/api/connect" autocomplete="off">

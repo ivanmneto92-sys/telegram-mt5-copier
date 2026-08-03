@@ -81,7 +81,7 @@ def main() -> int:
     )
     print_probe_summary(summary)
     print()
-    show_recent_network_errors(config.log_dir / "telegram-mt5-copier.log")
+    show_recent_network_errors(config.signal_monitor_log_path)
     print()
 
     if summary.successes == summary.attempts:

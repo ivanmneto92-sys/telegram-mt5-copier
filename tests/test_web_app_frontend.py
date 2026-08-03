@@ -74,6 +74,14 @@ class MiniAppFrontendTests(unittest.TestCase):
         self.assertIn('<option value="INFINOX">INFINOX</option>', html)
         self.assertNotIn('<input name="broker_name"', html)
 
+    def test_identidade_white_label_aparece_sem_injetar_html(self) -> None:
+        onboarding = render_onboarding_form(brand_name="Mesa <Alpha>")
+        admin = render_admin_panel(brand_name="Mesa <Alpha>")
+
+        self.assertIn("Mesa &lt;Alpha&gt;", onboarding)
+        self.assertIn("Mesa &lt;Alpha&gt; · Master", admin)
+        self.assertNotIn("Mesa <Alpha>", onboarding + admin)
+
     def test_init_data_vazio_gera_mensagem(self) -> None:
         script = render_miniapp_script()
 
@@ -112,7 +120,10 @@ class MiniAppFrontendTests(unittest.TestCase):
                 body = json.loads(response.read().decode("utf-8"))
                 headers = response.headers
 
-        self.assertEqual(body, {"status": "ok"})
+        self.assertEqual(
+            body,
+            {"status": "ok", "instance": "main", "brand": "Instituto Trader"},
+        )
         self.assertIn("application/json", headers.get("Content-Type", ""))
         self.assertEqual(headers.get("Cache-Control"), "no-store")
 
@@ -197,7 +208,10 @@ class MiniAppFrontendTests(unittest.TestCase):
                 body = json.loads(response.read().decode("utf-8"))
 
         self.assertEqual(response.status, 200)
-        self.assertEqual(body, {"status": "ok"})
+        self.assertEqual(
+            body,
+            {"status": "ok", "instance": "main", "brand": "Instituto Trader"},
+        )
 
     def test_favicon_retorna_204(self) -> None:
         with mini_app_server() as base_url:

@@ -59,6 +59,7 @@ def main() -> int:
         admin_ids=config.bot_admin_ids,
         mt5_account_service=mt5_account_service,
         mt5_onboarding_url=config.mt5_onboarding_url,
+        brand_name=config.brand_name,
     )
     application = Application.builder().token(config.telegram_bot_token).build()
     application.add_handler(CommandHandler("start", functools.partial(start_handler, service=service)))

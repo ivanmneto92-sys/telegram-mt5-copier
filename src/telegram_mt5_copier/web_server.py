@@ -31,6 +31,8 @@ class OnboardingHandler(BaseHTTPRequestHandler):
     csrf: CSRFTokenService
     bot_token: str
     broker_options: tuple[str, ...] = ()
+    brand_name: str = "Instituto Trader"
+    instance_id: str = "main"
 
     def log_message(self, format: str, *args: object) -> None:
         if self.command == "POST":
@@ -42,7 +44,13 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         path = self.route_path()
         if path == "/health":
             safe_log("health_check")
-            self.send_json({"status": "ok"})
+            self.send_json(
+                {
+                    "status": "ok",
+                    "instance": self.instance_id,
+                    "brand": self.brand_name,
+                }
+            )
             return
         if path == "/favicon.ico":
             self.send_empty(status=204)
@@ -56,7 +64,10 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         if path == "/admin":
             safe_log("admin_page_loaded")
             script_nonce = generate_script_nonce()
-            self.send_html(render_admin_panel(script_nonce), script_nonce=script_nonce)
+            self.send_html(
+                render_admin_panel(script_nonce, self.brand_name),
+                script_nonce=script_nonce,
+            )
             return
         if path != "/":
             self.send_error(404)
@@ -64,7 +75,11 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         safe_log("page_loaded")
         script_nonce = generate_script_nonce()
         self.send_html(
-            render_onboarding_form(script_nonce, broker_options=self.broker_options),
+            render_onboarding_form(
+                script_nonce,
+                broker_options=self.broker_options,
+                brand_name=self.brand_name,
+            ),
             script_nonce=script_nonce,
         )
 
@@ -72,7 +87,14 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         path = self.route_path()
         if path == "/health":
             safe_log("health_check")
-            self.send_json({"status": "ok"}, head_only=True)
+            self.send_json(
+                {
+                    "status": "ok",
+                    "instance": self.instance_id,
+                    "brand": self.brand_name,
+                },
+                head_only=True,
+            )
             return
         if path == "/favicon.ico":
             self.send_empty(status=204)
@@ -86,7 +108,11 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         if path == "/admin":
             safe_log("admin_page_loaded")
             script_nonce = generate_script_nonce()
-            self.send_html(render_admin_panel(script_nonce), script_nonce=script_nonce, head_only=True)
+            self.send_html(
+                render_admin_panel(script_nonce, self.brand_name),
+                script_nonce=script_nonce,
+                head_only=True,
+            )
             return
         if path != "/":
             self.send_error(404)
@@ -94,7 +120,11 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         safe_log("page_loaded")
         script_nonce = generate_script_nonce()
         self.send_html(
-            render_onboarding_form(script_nonce, broker_options=self.broker_options),
+            render_onboarding_form(
+                script_nonce,
+                broker_options=self.broker_options,
+                brand_name=self.brand_name,
+            ),
             script_nonce=script_nonce,
             head_only=True,
         )
@@ -485,13 +515,21 @@ def main() -> int:
         )
         OnboardingHandler.bot_token = config.telegram_bot_token
         OnboardingHandler.broker_options = terminal_manager.available_brokers()
+        OnboardingHandler.brand_name = config.brand_name
+        OnboardingHandler.instance_id = config.instance_id
         OnboardingHandler.csrf = csrf
         OnboardingHandler.onboarding = onboarding
         OnboardingHandler.admin_panel = admin_panel
         OnboardingHandler.admin_browser_auth = admin_browser_auth
 
-        server = ThreadingHTTPServer(("127.0.0.1", 8080), OnboardingHandler)
-        print("Mini App MT5 ouvindo em http://127.0.0.1:8080. Publique atras de HTTPS.")
+        server = ThreadingHTTPServer(
+            (config.onboarding_host, config.onboarding_port),
+            OnboardingHandler,
+        )
+        print(
+            f"Mini App MT5 da instancia {config.instance_id} ouvindo em "
+            f"{config.local_onboarding_url}. Publique atras de HTTPS."
+        )
         server.serve_forever()
     except KeyboardInterrupt:
         return 0

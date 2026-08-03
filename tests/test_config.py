@@ -8,6 +8,8 @@ from telegram_mt5_copier.config import (
     AppConfig,
     parse_broker_template_paths,
     parse_bool,
+    parse_instance_id,
+    parse_port,
     parse_source_chat_ids,
     project_path,
 )
@@ -28,6 +30,9 @@ class ConfigTests(unittest.TestCase):
             self.assertTrue(config.data_dir.is_dir())
             self.assertTrue(config.session_dir.is_dir())
             self.assertTrue(config.log_dir.is_dir())
+            self.assertEqual(config.instance_id, "main")
+            self.assertEqual(config.brand_name, "Instituto Trader")
+            self.assertEqual(config.local_onboarding_url, "http://127.0.0.1:8080")
 
     def test_env_file_is_utf8_and_runtime_environment_wins(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -197,6 +202,43 @@ class ConfigTests(unittest.TestCase):
     def test_templates_mt5_rejeitam_formato_invalido(self) -> None:
         with self.assertRaisesRegex(ValueError, "CORRETORA=CAMINHO"):
             parse_broker_template_paths("FTMO", Path.cwd())
+
+    def test_instancia_white_label_isola_banco_sessao_porta_e_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = AppConfig.load(
+                project_root=root,
+                env={
+                    "INSTANCE_ID": "Mesa-Vip",
+                    "BRAND_NAME": "Mesa Alpha",
+                    "ONBOARDING_PORT": "8081",
+                },
+                create_dirs=False,
+            )
+
+            self.assertEqual(config.instance_id, "mesa-vip")
+            self.assertEqual(config.brand_name, "Mesa Alpha")
+            self.assertEqual(
+                config.database_path,
+                root / "data" / "telegram_mt5_copier_mesa-vip.sqlite3",
+            )
+            self.assertEqual(
+                config.telegram_session_name,
+                root / "sessions" / "telegram_mt5_copier_mesa-vip",
+            )
+            self.assertEqual(
+                config.supervisor_lock_path,
+                root / "data" / "telegram-mt5-supervisor_mesa-vip.lock",
+            )
+            self.assertEqual(config.local_onboarding_url, "http://127.0.0.1:8081")
+
+    def test_identificador_e_porta_da_instancia_sao_validados(self) -> None:
+        self.assertEqual(parse_instance_id(" Marca_2 "), "marca_2")
+        self.assertEqual(parse_port("8082"), 8082)
+        with self.assertRaises(ValueError):
+            parse_instance_id("marca com espaco")
+        with self.assertRaises(ValueError):
+            parse_port("70000")
 
 
 if __name__ == "__main__":

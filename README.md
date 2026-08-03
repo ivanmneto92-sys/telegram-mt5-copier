@@ -253,7 +253,11 @@ Confirme que o diretorio de trabalho e a raiz do projeto, pois o script resolve 
 
 ## Fluxo MT5 completo na VPS Windows
 
-A Mini App de conexão deve ficar publicada atrás de HTTPS. Na VPS, execute `telegram-mt5-onboarding` em `127.0.0.1:8080` e publique essa porta com IIS, Nginx ou outro proxy HTTPS. Configure a URL HTTPS final em `MT5_ONBOARDING_URL` e também no BotFather como Web App do botão de conexão.
+A Mini App de conexão deve ficar publicada atrás de HTTPS. `ONBOARDING_HOST` e
+`ONBOARDING_PORT` definem o endereço local (por padrão `127.0.0.1:8080`).
+Publique essa porta com Caddy, IIS, Nginx ou outro proxy HTTPS. Configure a URL
+HTTPS final em `MT5_ONBOARDING_URL` e também no BotFather como Web App do botão
+de conexão.
 
 Gere a chave de criptografia diretamente na VPS:
 
@@ -337,6 +341,51 @@ válida. Vários TPs são enviados como posições separadas em contas hedging,
 preservando a proteção de breakeven após o TP1. Se houver falha durante um
 envio parcial a mercado, o executor tenta fechar imediatamente as posições
 daquele sinal que já foram abertas.
+
+## Instâncias white-label na mesma VPS
+
+A versão `0.18.0` permite executar cópias independentes para marcas diferentes.
+Cada cópia usa o mesmo código, os mesmos IDs de canais de origem e os mesmos
+templates MT5, mas deve possuir bot, banco, sessão Telegram, porta HTTP, domínio,
+diretório de contas e tarefa agendada próprios.
+
+Exemplo da instância principal:
+
+```env
+INSTANCE_ID=main
+BRAND_NAME=Instituto Trader
+DATA_DIR=./data
+SESSION_DIR=./sessions
+LOG_DIR=./logs
+ONBOARDING_HOST=127.0.0.1
+ONBOARDING_PORT=8080
+MT5_BASE_DIR=C:\MT5Accounts\principal
+MT5_ONBOARDING_URL=https://institutotrader.online
+```
+
+Exemplo de uma segunda marca, em outra cópia do projeto:
+
+```env
+INSTANCE_ID=mesa_alpha
+BRAND_NAME=Mesa Alpha
+DATA_DIR=./data
+SESSION_DIR=./sessions
+LOG_DIR=./logs
+ONBOARDING_HOST=127.0.0.1
+ONBOARDING_PORT=8081
+MT5_BASE_DIR=C:\MT5Accounts\mesa_alpha
+MT5_ONBOARDING_URL=https://app.mesaalpha.com
+```
+
+`SOURCE_CHAT_IDS` e `MT5_BROKER_TEMPLATES` podem ter os mesmos valores nas duas
+instâncias. `TELEGRAM_BOT_TOKEN` deve ser de outro bot e a segunda instância deve
+executar `telegram-login`, criando sua própria sessão de monitoramento. Nunca
+aponte duas instâncias para o mesmo `MT5_BASE_DIR`, banco ou `SESSION_DIR`.
+
+O script `install_windows_startup.ps1` lê `INSTANCE_ID`: a instância `main`
+mantém a tarefa `Telegram MT5 Copier`; as demais recebem automaticamente nomes
+como `Telegram MT5 Copier - mesa_alpha`. Cada porta local precisa de uma rota
+HTTPS própria no proxy reverso.
 
 ## Supervisor e inicialização automática no Windows
 
