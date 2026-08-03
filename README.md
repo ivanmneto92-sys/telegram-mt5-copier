@@ -134,6 +134,13 @@ O analisador também reconhece mensagens em português como `Moeda: XAU-USD`,
 `XAU-USD` continua sendo resolvido para o símbolo específico da corretora, como
 `XAUUSDb` na HFM.
 
+Os nomes técnicos dos fornecedores não são exibidos aos clientes. O menu do bot
+usa aliases estáveis como `Sala de Sinais 01`, mantendo seleção e execução
+vinculadas ao ID numérico real do Telegram. No painel administrativo, o admin
+continua vendo título, username e chat ID verdadeiros e pode definir um nome
+público personalizado para cada sala. Alterar ou remover o alias não modifica o
+monitoramento, as assinaturas dos clientes nem o histórico de sinais.
+
 Uma conta MT5 recém-conectada permanece aguardando aprovação. O cliente não
 consegue se autoativar pelo bot. Somente o admin pode liberar sinais, registrando
 o pagamento e definindo a data final do acesso. Depois do vencimento, a conta é

@@ -175,6 +175,9 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             if path == "/api/admin/channel-revalidate":
                 self.handle_admin_channel_action(fields, "revalidate")
                 return
+            if path == "/api/admin/channel-display-name":
+                self.handle_admin_channel_display_name(fields)
+                return
             self.send_error(404)
         except WebAppValidationError as exc:
             safe_log("validation_rejected", reason=safe_reason(str(exc)))
@@ -384,6 +387,24 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             request_id=str(request_id),
         )
         self.send_json({"ok": True, "channel_request": result})
+
+    def handle_admin_channel_display_name(self, fields: dict[str, str]) -> None:
+        identity = self.authenticate_admin_mutation(fields)
+        try:
+            channel_id = int(fields.get("channel_id", ""))
+        except ValueError as exc:
+            raise ValueError("Canal inválido.") from exc
+        result = self.admin_panel.update_channel_display_name(
+            admin_telegram_user_id=identity.telegram_user_id,
+            channel_id=channel_id,
+            display_name=fields.get("display_name", ""),
+        )
+        safe_log(
+            "admin_channel_display_name_changed",
+            admin_id=str(identity.telegram_user_id),
+            channel_id=str(channel_id),
+        )
+        self.send_json({"ok": True, "channel": result})
 
     def authenticate_admin_mutation(self, fields: dict[str, str]) -> AdminIdentity:
         identity = self.authenticate_admin(fields)
@@ -611,6 +632,7 @@ def safe_endpoint(value: str) -> str:
         "/api/admin/channel-approve",
         "/api/admin/channel-reject",
         "/api/admin/channel-revalidate",
+        "/api/admin/channel-display-name",
     }
     return value if value in allowed else ""
 

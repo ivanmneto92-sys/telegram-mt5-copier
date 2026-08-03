@@ -123,6 +123,51 @@ class ChannelCatalogTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(enabled)
         self.assertFalse(self.catalog.user_overview(self.user.id)["channels"][0]["enabled"])
 
+    def test_nome_real_do_canal_fica_mascarado_para_o_cliente(self) -> None:
+        channel_id = self.catalog.register_configured_channel(
+            telegram_chat_id="-1001234567890",
+            title="Fornecedor Secreto Gold",
+            username="FornecedorSecreto",
+            content_protected=True,
+            history_accessible=True,
+            last_message_id=10,
+        )
+
+        overview = self.catalog.user_overview(self.user.id)
+        self.assertEqual(overview["channels"][0]["title"], f"Sala de Sinais {channel_id:02d}")
+        self.assertNotIn("Fornecedor Secreto Gold", str(overview))
+
+        admin_channel = self.catalog.admin_channels()["channels"][0]
+        self.assertEqual(admin_channel["title"], "Fornecedor Secreto Gold")
+        self.assertEqual(admin_channel["display_name"], f"Sala de Sinais {channel_id:02d}")
+
+    def test_admin_define_apelido_publico_sem_alterar_identidade_tecnica(self) -> None:
+        channel_id = self.catalog.register_configured_channel(
+            telegram_chat_id="-1001234567890",
+            title="Fornecedor Secreto Gold",
+            username="FornecedorSecreto",
+            content_protected=False,
+            history_accessible=True,
+            last_message_id=10,
+        )
+
+        self.assertEqual(
+            self.catalog.set_display_name(channel_id, "  Sala Ouro Premium  "),
+            "Sala Ouro Premium",
+        )
+        overview = self.catalog.user_overview(self.user.id)
+        self.assertEqual(overview["channels"][0]["title"], "Sala Ouro Premium")
+        admin_channel = self.catalog.admin_channels()["channels"][0]
+        self.assertEqual(admin_channel["telegram_chat_id"], "-1001234567890")
+        self.assertEqual(admin_channel["title"], "Fornecedor Secreto Gold")
+
+        self.assertEqual(
+            self.catalog.set_display_name(channel_id, ""),
+            f"Sala de Sinais {channel_id:02d}",
+        )
+        with self.assertRaisesRegex(ValueError, "60"):
+            self.catalog.set_display_name(channel_id, "x" * 61)
+
     def test_bot_recebe_sugestao_e_mostra_submenu(self) -> None:
         service = BotService(self.database_path)
         try:
@@ -214,6 +259,17 @@ class ChannelCatalogTests(unittest.IsolatedAsyncioTestCase):
             request_id=int(request.request_id),
         )
         self.assertEqual(result["status"], "approved")
+        alias_result = panel.update_channel_display_name(
+            admin_telegram_user_id=9001,
+            channel_id=int(result["channel_id"]),
+            display_name="Sala Premium A",
+        )
+        self.assertEqual(alias_result["display_name"], "Sala Premium A")
+        self.assertEqual(
+            self.catalog.user_overview(self.user.id)["channels"][0]["title"],
+            "Sala Premium A",
+        )
         self.assertEqual(panel.dashboard()["summary"]["active_channels"], 1)
         self.assertIn("Canais de sinais", render_admin_panel())
         self.assertIn("/api/admin/channel-", render_admin_script())
+        self.assertIn("/api/admin/channel-display-name", render_admin_script())

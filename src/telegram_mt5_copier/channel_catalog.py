@@ -19,6 +19,7 @@ REQUEST_REJECTED = "rejected"
 
 USERNAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{3,31}$")
 TOGGLE_CALLBACK_RE = re.compile(r"^v1:ch:t:(?P<channel_id>\d+)$")
+DEFAULT_CHANNEL_DISPLAY_PREFIX = "Sala de Sinais"
 
 
 @dataclass(frozen=True)
@@ -48,7 +49,7 @@ class ChannelCatalogService:
         with connect_database(self.database_path) as connection:
             channel = connection.execute(
                 """
-                SELECT id, title, status FROM source_channels
+                SELECT id, display_name, status FROM source_channels
                 WHERE username = ? COLLATE NOCASE
                 """,
                 (normalized.username,),
@@ -59,7 +60,7 @@ class ChannelCatalogService:
                     None,
                     int(channel[0]),
                     REQUEST_APPROVED,
-                    str(channel[1]),
+                    public_channel_title(int(channel[0]), channel[1]),
                     normalized.canonical_link,
                 )
             duplicate = connection.execute(
@@ -117,13 +118,12 @@ class ChannelCatalogService:
             ).fetchone()
             channels = connection.execute(
                 """
-                SELECT c.id, c.title, c.username, c.telegram_chat_id,
-                       COALESCE(s.enabled, 1)
+                SELECT c.id, c.display_name, COALESCE(s.enabled, 1)
                 FROM source_channels c
                 LEFT JOIN user_channel_subscriptions s
                     ON s.source_channel_id = c.id AND s.user_id = ?
                 WHERE c.status = 'active'
-                ORDER BY c.title COLLATE NOCASE
+                ORDER BY c.id
                 """,
                 (user_id,),
             ).fetchall()
@@ -141,10 +141,8 @@ class ChannelCatalogService:
             "channels": [
                 {
                     "id": int(row[0]),
-                    "title": str(row[1]),
-                    "username": str(row[2]) if row[2] else None,
-                    "telegram_chat_id": str(row[3]) if row[3] else None,
-                    "enabled": bool(row[4]),
+                    "title": public_channel_title(int(row[0]), row[1]),
+                    "enabled": bool(row[2]),
                 }
                 for row in channels
             ],
@@ -217,6 +215,21 @@ class ChannelCatalogService:
                 (user_id, channel_id, int(enabled), now, now),
             )
         return enabled
+
+    def set_display_name(self, channel_id: int, display_name: str) -> str:
+        normalized = normalize_channel_display_name(display_name)
+        with connect_database(self.database_path) as connection:
+            row = connection.execute(
+                "SELECT id FROM source_channels WHERE id = ?",
+                (channel_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("Canal não encontrado.")
+            connection.execute(
+                "UPDATE source_channels SET display_name = ?, updated_at = ? WHERE id = ?",
+                (normalized, utc_now(), channel_id),
+            )
+        return public_channel_title(channel_id, normalized)
 
     def register_configured_channel(
         self,
@@ -438,7 +451,7 @@ class ChannelCatalogService:
             ).fetchall()
             channels = connection.execute(
                 """
-                SELECT c.id, c.telegram_chat_id, c.username, c.title, c.status,
+                SELECT c.id, c.telegram_chat_id, c.username, c.title, c.display_name, c.status,
                        c.access_status, c.content_protected, c.history_accessible,
                        c.last_message_id,
                        (SELECT COUNT(*) FROM user_channel_subscriptions s
@@ -472,12 +485,13 @@ class ChannelCatalogService:
                     "telegram_chat_id": str(c[1]) if c[1] else None,
                     "username": str(c[2]) if c[2] else None,
                     "title": str(c[3]),
-                    "status": str(c[4]),
-                    "access_status": str(c[5]),
-                    "content_protected": bool(c[6]),
-                    "history_accessible": bool(c[7]),
-                    "last_message_id": str(c[8]) if c[8] else None,
-                    "subscriber_count": int(c[9] or 0),
+                    "display_name": public_channel_title(int(c[0]), c[4]),
+                    "status": str(c[5]),
+                    "access_status": str(c[6]),
+                    "content_protected": bool(c[7]),
+                    "history_accessible": bool(c[8]),
+                    "last_message_id": str(c[9]) if c[9] else None,
+                    "subscriber_count": int(c[10] or 0),
                 }
                 for c in channels
             ],
@@ -669,3 +683,20 @@ def normalize_channel_link(raw_link: str) -> NormalizedChannelLink:
 def extract_channel_toggle(callback_data: str) -> int | None:
     match = TOGGLE_CALLBACK_RE.fullmatch(callback_data)
     return int(match.group("channel_id")) if match else None
+
+
+def public_channel_title(channel_id: int, display_name: object | None) -> str:
+    if display_name is not None and str(display_name).strip():
+        return str(display_name).strip()
+    return f"{DEFAULT_CHANNEL_DISPLAY_PREFIX} {channel_id:02d}"
+
+
+def normalize_channel_display_name(value: str) -> str | None:
+    normalized = " ".join(value.strip().split())
+    if not normalized:
+        return None
+    if len(normalized) > 60:
+        raise ValueError("Nome exibido deve ter no máximo 60 caracteres.")
+    if any(ord(character) < 32 for character in normalized):
+        raise ValueError("Nome exibido contém caracteres inválidos.")
+    return normalized

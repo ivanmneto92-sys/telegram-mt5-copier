@@ -494,6 +494,7 @@ def initialize_database(database_path: Path) -> None:
                 telegram_chat_id TEXT UNIQUE,
                 username TEXT,
                 title TEXT NOT NULL,
+                display_name TEXT,
                 canonical_link TEXT,
                 status TEXT NOT NULL DEFAULT 'pending_review',
                 access_status TEXT NOT NULL DEFAULT 'pending',
@@ -761,6 +762,7 @@ def run_schema_migrations(connection: sqlite3.Connection) -> None:
     )
     ensure_column(connection, "execution_groups", "tp1_reached_at", "TEXT")
     ensure_column(connection, "execution_groups", "breakeven_applied_at", "TEXT")
+    ensure_column(connection, "source_channels", "display_name", "TEXT")
 
 
 def ensure_column(connection: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:

@@ -254,6 +254,22 @@ class AdminPanelService:
         )
         return {"request_id": request_id, "status": "pending_access"}
 
+    def update_channel_display_name(
+        self,
+        *,
+        admin_telegram_user_id: int,
+        channel_id: int,
+        display_name: str,
+    ) -> dict[str, object]:
+        public_name = self.channels.set_display_name(channel_id, display_name)
+        self._log_admin_action(
+            admin_telegram_user_id,
+            None,
+            "admin_panel_channel_display_name",
+            {"channel_id": channel_id, "display_name": public_name},
+        )
+        return {"channel_id": channel_id, "display_name": public_name}
+
     def _channel_request_user_id(self, request_id: int) -> int:
         with connect_database(self.database_path) as connection:
             row = connection.execute(
@@ -526,7 +542,7 @@ class AdminPanelService:
     def _log_admin_action(
         self,
         admin_telegram_user_id: int,
-        target_user_id: int,
+        target_user_id: int | None,
         action_type: str,
         payload: dict[str, object],
     ) -> None:
@@ -1097,7 +1113,10 @@ def render_admin_script() -> str:
     var activeHtml = approved.filter(function (channel) { return channel.status === "active"; }).map(function (channel) {
       return '<article class="channel-card"><div class="identity"><h2>✅ ' + esc(channel.title) + '</h2>' +
         '<div class="meta">@' + esc(channel.username || "sem username") + ' · ID ' + esc(channel.telegram_chat_id) + '</div></div>' +
-        '<div class="detail">Monitoramento confirmado<br>' + esc(channel.subscriber_count) + ' seleção(ões) personalizadas</div>' +
+        '<div class="detail">Cliente vê: <strong>' + esc(channel.display_name) + '</strong><br>' +
+        'Monitoramento confirmado · ' + esc(channel.subscriber_count) + ' seleção(ões) personalizadas</div>' +
+        '<div class="actions"><button class="action finance" data-channel-action="display-name" ' +
+        'data-channel-id="' + esc(channel.id) + '" data-display-name="' + esc(channel.display_name) + '">Alterar nome exibido</button></div>' +
         '<div class="status active">Ativo</div></article>';
     }).join("");
     channelList.innerHTML = requestHtml + activeHtml ||
@@ -1269,6 +1288,24 @@ def render_admin_script() -> str:
     var button = event.target.closest("[data-channel-action]");
     if (!button || state.busy) { return; }
     var action = button.getAttribute("data-channel-action");
+    if (action === "display-name") {
+      var currentName = button.getAttribute("data-display-name") || "";
+      var displayName = window.prompt(
+        "Nome que os clientes verão. Deixe vazio para usar Sala de Sinais + número:",
+        currentName
+      );
+      if (displayName === null) { return; }
+      state.busy = true;
+      button.disabled = true;
+      post("/api/admin/channel-display-name", authFields({
+        csrf_token: state.csrf,
+        channel_id: button.getAttribute("data-channel-id"),
+        display_name: displayName
+      })).then(reloadDashboard)
+        .catch(function (error) { showError(error.message || "Não foi possível alterar o nome exibido."); })
+        .finally(function () { state.busy = false; button.disabled = false; });
+      return;
+    }
     var requestId = button.getAttribute("data-request-id");
     var question = action === "approve"
       ? "Você já analisou o formato dos sinais e deseja aprovar este canal?"
