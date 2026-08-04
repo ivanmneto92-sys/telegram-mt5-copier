@@ -51,6 +51,57 @@ class SignalDatabase:
             finally:
                 cursor.close()
 
+    def claim_signal(
+        self,
+        content_signature: str,
+        source_chat_id: int | str | None = None,
+    ) -> bool:
+        """Reserva atomicamente um sinal antes de publicar ou executar.
+
+        A reserva fecha a janela entre consultar a duplicidade e gravar o sinal,
+        inclusive quando mensagem nova/edicao ou dois monitores chegam juntos.
+        """
+        now = datetime.now(tz=timezone.utc)
+        cutoff = (now - timedelta(minutes=DUPLICATE_WINDOW_MINUTES)).isoformat()
+        source_key = str(source_chat_id) if source_chat_id is not None else ""
+        with connect_database(self.database_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                "DELETE FROM signal_processing_claims WHERE claimed_at < ?",
+                (cutoff,),
+            )
+            cursor.close()
+            cursor = connection.execute(
+                """
+                SELECT 1 FROM signals
+                WHERE content_signature = ?
+                  AND (
+                      source_chat_id = ?
+                      OR (source_chat_id IS NULL AND ? = '')
+                  )
+                  AND created_at >= ?
+                LIMIT 1
+                """,
+                (content_signature, source_key, source_key, cutoff),
+            )
+            try:
+                if cursor.fetchone() is not None:
+                    return False
+            finally:
+                cursor.close()
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO signal_processing_claims (
+                    source_chat_id, content_signature, claimed_at
+                ) VALUES (?, ?, ?)
+                """,
+                (source_key, content_signature, now.isoformat()),
+            )
+            try:
+                return cursor.rowcount == 1
+            finally:
+                cursor.close()
+
     def has_accepted_source_message(
         self,
         source_chat_id: int | str | None,
@@ -437,6 +488,13 @@ def initialize_database(database_path: Path) -> None:
                 payload TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS signal_processing_claims (
+                source_chat_id TEXT NOT NULL,
+                content_signature TEXT NOT NULL,
+                claimed_at TEXT NOT NULL,
+                PRIMARY KEY (source_chat_id, content_signature)
             );
 
             CREATE TABLE IF NOT EXISTS customer_billing (

@@ -98,7 +98,7 @@ class SignalProcessor:
             return validation_decision
 
         signal = validation_decision.signal
-        if self.database.has_duplicate(signal.content_signature, signal.source_chat_id):
+        if not self.database.claim_signal(signal.content_signature, signal.source_chat_id):
             duplicate_decision = ProcessingDecision(DecisionStatus.IGNORED, "duplicate_signal", signal=signal)
             self.database.record_event(duplicate_decision.status, duplicate_decision.reason, signal=signal)
             self.logger.info("%s: %s", duplicate_decision.status.value, duplicate_decision.reason)

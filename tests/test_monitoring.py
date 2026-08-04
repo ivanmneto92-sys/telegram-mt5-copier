@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -105,6 +106,12 @@ class FakePublisher:
 
     async def publish(self, signal, formatted_message: str, client=None) -> None:
         self.messages.append(formatted_message)
+
+
+class SlowFakePublisher(FakePublisher):
+    async def publish(self, signal, formatted_message: str, client=None) -> None:
+        await asyncio.sleep(0.02)
+        await super().publish(signal, formatted_message, client=client)
 
 
 class FakeSourceEntity:
@@ -365,6 +372,26 @@ class MonitorPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second.status, DecisionStatus.IGNORED)
         self.assertEqual(second.reason, "duplicate_signal")
         self.assertEqual(len(self.publisher.messages), 1)
+
+    async def test_duplicidade_simultanea_e_reservada_antes_da_publicacao(self) -> None:
+        publisher = SlowFakePublisher()
+        first_processor = SignalProcessor(self.database, publisher, logger=NullLogger())
+        second_processor = SignalProcessor(self.database, publisher, logger=NullLogger())
+
+        first, second = await asyncio.gather(
+            first_processor.process(
+                IncomingMessage(source_chat_id="source", source_message_id=101, text=BUY_VALID)
+            ),
+            second_processor.process(
+                IncomingMessage(source_chat_id="source", source_message_id=102, text=BUY_VALID)
+            ),
+        )
+
+        self.assertEqual(
+            sorted((first.status, second.status)),
+            [DecisionStatus.ACCEPTED, DecisionStatus.IGNORED],
+        )
+        self.assertEqual(len(publisher.messages), 1)
 
     async def test_ativo_diferente_de_xauusd(self) -> None:
         decision = await self.processor.process(
