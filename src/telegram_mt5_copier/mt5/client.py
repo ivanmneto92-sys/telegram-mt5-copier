@@ -192,6 +192,7 @@ class SimulatedMT5Client:
         self.order_send_called = False
         self.order_check_requests: list[dict[str, object]] = []
         self.order_send_requests: list[dict[str, object]] = []
+        self.history_deal_queries: list[tuple[datetime, datetime]] = []
         self.order_check_results = list(order_check_results or [])
         self.order_send_results = list(order_send_results or [])
         self._positions = positions
@@ -261,8 +262,7 @@ class SimulatedMT5Client:
         return self._orders
 
     def history_deals_get(self, date_from: datetime, date_to: datetime) -> tuple[object, ...]:
-        _ = date_from
-        _ = date_to
+        self.history_deal_queries.append((date_from, date_to))
         return self._history_deals
 
     def symbol_select(self, symbol: str, enable: bool = True) -> bool:

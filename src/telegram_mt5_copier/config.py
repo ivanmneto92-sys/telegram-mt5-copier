@@ -89,6 +89,7 @@ class AppConfig:
     health_check_interval_seconds: int
     health_stale_after_seconds: int
     operational_alert_repeat_minutes: int
+    daily_performance_timezone: str
 
     @classmethod
     def load(
@@ -178,6 +179,12 @@ class AppConfig:
                 _value("OPERATIONAL_ALERT_REPEAT_MINUTES", file_values, runtime_env, "360"),
                 "OPERATIONAL_ALERT_REPEAT_MINUTES",
             ),
+            daily_performance_timezone=_value(
+                "DAILY_PERFORMANCE_TIMEZONE",
+                file_values,
+                runtime_env,
+                "Europe/Athens",
+            ).strip(),
         )
 
         if create_dirs:

@@ -177,6 +177,7 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
             credential_service=credential_service,
             allow_live_accounts=config.allow_live_accounts,
             max_accounts_per_vps=config.mt5_max_accounts_per_vps,
+            daily_performance_timezone=config.daily_performance_timezone,
         )
         pending_order_executor = PendingOrderExecutor(
             config.database_path,

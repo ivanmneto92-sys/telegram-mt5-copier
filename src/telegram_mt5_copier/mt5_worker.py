@@ -33,6 +33,7 @@ def main() -> int:
             client_factory=MT5Client,
             allow_live_accounts=config.allow_live_accounts,
             max_accounts_per_vps=config.mt5_max_accounts_per_vps,
+            daily_performance_timezone=config.daily_performance_timezone,
         )
         command_queue = CommandQueue(config.database_path)
         position_manager = PositionManager(config.database_path, accounts, MT5Client)

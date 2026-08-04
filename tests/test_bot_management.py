@@ -77,12 +77,16 @@ class BotManagementTests(unittest.TestCase):
                     Decimal("10000"),
                     Decimal("0.79"),
                     "2026-07-28T15:00:00+00:00",
+                    Decimal("90"),
+                    Decimal("-11"),
                 ),
             )
 
             response = service.handle_callback(101, "alice", "v1:a")
 
             self.assertIn("Resultado do dia: 🟢 $ +79.00 (+0.79%)", response.text)
+            self.assertIn("Lucro bruto: $ +90.00", response.text)
+            self.assertIn("Custos: $ -11.00", response.text)
         finally:
             service.close()
             accounts.close()

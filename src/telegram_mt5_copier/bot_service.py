@@ -1451,7 +1451,20 @@ def daily_performance_label(performance: object | None) -> str:
     marker = "🟢" if profit > 0 else "🔴" if profit < 0 else "⚪"
     signed_profit = f"{profit:+.2f}"
     signed_percentage = f"{percentage:+.2f}%" if percentage is not None else "percentual indisponível"
-    return f"{marker} $ {signed_profit} ({signed_percentage})"
+    result = f"{marker} $ {signed_profit} ({signed_percentage})"
+    gross_value = getattr(performance, "gross_profit", None)
+    costs_value = getattr(performance, "trading_costs", None)
+    if gross_value is None or costs_value is None:
+        return result
+    gross_profit = Decimal(str(gross_value))
+    trading_costs = Decimal(str(costs_value))
+    return "\n".join(
+        [
+            result,
+            f"Lucro bruto: $ {gross_profit:+.2f}",
+            f"Custos: $ {trading_costs:+.2f}",
+        ]
+    )
 
 
 def entry_execution_label(value: str) -> str:

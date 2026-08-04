@@ -11,6 +11,7 @@ from ..credential_service import CredentialService
 from ..database import connect_database, initialize_database, utc_now
 from .client import MT5Client
 from .daily_performance import (
+    DEFAULT_BROKER_TIMEZONE,
     DailyPerformance,
     calculate_daily_performance,
     current_performance_date,
@@ -70,6 +71,7 @@ class MT5AccountService:
         client_factory: Callable[[], object] | None = None,
         allow_live_accounts: bool = False,
         max_accounts_per_vps: int = 10,
+        daily_performance_timezone: str = DEFAULT_BROKER_TIMEZONE,
     ) -> None:
         self.database_path = database_path
         self.credential_service = credential_service
@@ -77,6 +79,7 @@ class MT5AccountService:
         self.client_factory = client_factory or MT5Client
         self.allow_live_accounts = allow_live_accounts
         self.max_accounts_per_vps = max_accounts_per_vps
+        self.daily_performance_timezone = daily_performance_timezone
         self._closed = False
         initialize_database(database_path)
 
@@ -268,7 +271,11 @@ class MT5AccountService:
 
             performance: DailyPerformance | None = None
             try:
-                performance = calculate_daily_performance(client, info.balance)
+                performance = calculate_daily_performance(
+                    client,
+                    info.balance,
+                    timezone_name=self.daily_performance_timezone,
+                )
             except Exception:
                 # A leitura do histórico não deve transformar uma conexão MT5 válida em falha.
                 performance = None
@@ -518,11 +525,14 @@ class MT5AccountService:
                 """
                 INSERT INTO account_daily_performance (
                     mt5_account_id, performance_date, realized_profit,
+                    gross_profit, trading_costs,
                     starting_balance, return_percent, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(mt5_account_id, performance_date) DO UPDATE SET
                     realized_profit = excluded.realized_profit,
+                    gross_profit = excluded.gross_profit,
+                    trading_costs = excluded.trading_costs,
                     starting_balance = excluded.starting_balance,
                     return_percent = excluded.return_percent,
                     updated_at = excluded.updated_at
@@ -531,6 +541,12 @@ class MT5AccountService:
                     account_id,
                     performance.performance_date,
                     str(performance.realized_profit),
+                    str(performance.gross_profit)
+                    if performance.gross_profit is not None
+                    else None,
+                    str(performance.trading_costs)
+                    if performance.trading_costs is not None
+                    else None,
                     str(performance.starting_balance)
                     if performance.starting_balance is not None
                     else None,
@@ -546,11 +562,16 @@ class MT5AccountService:
             row = connection.execute(
                 """
                 SELECT performance_date, realized_profit, starting_balance,
-                       return_percent, updated_at
+                       return_percent, updated_at, gross_profit, trading_costs
                 FROM account_daily_performance
                 WHERE mt5_account_id = ? AND performance_date = ?
                 """,
-                (account_id, current_performance_date()),
+                (
+                    account_id,
+                    current_performance_date(
+                        timezone_name=self.daily_performance_timezone
+                    ),
+                ),
             ).fetchone()
         if row is None:
             return None
@@ -560,6 +581,8 @@ class MT5AccountService:
             starting_balance=Decimal(str(row[2])) if row[2] is not None else None,
             return_percent=Decimal(str(row[3])) if row[3] is not None else None,
             updated_at=str(row[4]),
+            gross_profit=Decimal(str(row[5])) if row[5] is not None else None,
+            trading_costs=Decimal(str(row[6])) if row[6] is not None else None,
         )
 
     def remove_account(self, user_id: int, account_id: int) -> None:

@@ -565,6 +565,8 @@ def initialize_database(database_path: Path) -> None:
                 mt5_account_id INTEGER NOT NULL,
                 performance_date TEXT NOT NULL,
                 realized_profit TEXT NOT NULL,
+                gross_profit TEXT,
+                trading_costs TEXT,
                 starting_balance TEXT,
                 return_percent TEXT,
                 updated_at TEXT NOT NULL,
@@ -763,6 +765,8 @@ def run_schema_migrations(connection: sqlite3.Connection) -> None:
     ensure_column(connection, "execution_groups", "tp1_reached_at", "TEXT")
     ensure_column(connection, "execution_groups", "breakeven_applied_at", "TEXT")
     ensure_column(connection, "source_channels", "display_name", "TEXT")
+    ensure_column(connection, "account_daily_performance", "gross_profit", "TEXT")
+    ensure_column(connection, "account_daily_performance", "trading_costs", "TEXT")
 
 
 def ensure_column(connection: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:

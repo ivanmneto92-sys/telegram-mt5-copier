@@ -516,6 +516,7 @@ def main() -> int:
             terminal_manager=terminal_manager,
             allow_live_accounts=config.allow_live_accounts,
             max_accounts_per_vps=config.mt5_max_accounts_per_vps,
+            daily_performance_timezone=config.daily_performance_timezone,
         )
         csrf = CSRFTokenService(config.mt5_credential_key)
         onboarding = MT5OnboardingService(
