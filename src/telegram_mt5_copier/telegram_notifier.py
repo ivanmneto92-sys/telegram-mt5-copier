@@ -56,3 +56,43 @@ class TelegramAdminNotifier:
                     type(exc).__name__,
                 )
         return delivered
+
+
+class TelegramUserNotifier:
+    """Small synchronous Bot API client used by the MT5 worker outbox."""
+
+    def __init__(
+        self,
+        bot_token: str | None,
+        *,
+        logger: logging.Logger,
+        timeout_seconds: int = 10,
+    ) -> None:
+        self.bot_token = bot_token
+        self.logger = logger
+        self.timeout_seconds = timeout_seconds
+
+    def send(self, telegram_user_id: int, message: str) -> bool:
+        if not self.bot_token:
+            return False
+        try:
+            payload = parse.urlencode(
+                {"chat_id": str(telegram_user_id), "text": message}
+            ).encode("utf-8")
+            api_request = request.Request(
+                f"https://api.telegram.org/bot{self.bot_token}/sendMessage",
+                data=payload,
+                method="POST",
+            )
+            with request.urlopen(api_request, timeout=self.timeout_seconds) as response:
+                body = json.loads(response.read().decode("utf-8"))
+            if not body.get("ok"):
+                raise RuntimeError("telegram_notification_rejected")
+            return True
+        except Exception as exc:
+            self.logger.warning(
+                "Falha ao notificar resultado. user_id=%s tipo=%s",
+                telegram_user_id,
+                type(exc).__name__,
+            )
+            return False

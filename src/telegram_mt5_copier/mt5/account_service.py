@@ -522,6 +522,10 @@ class MT5AccountService:
     ) -> None:
         with connect_database(self.database_path) as connection:
             connection.execute(
+                "DELETE FROM mt5_settlement_state WHERE mt5_account_id = ?",
+                (account_id,),
+            )
+            connection.execute(
                 """
                 INSERT INTO account_daily_performance (
                     mt5_account_id, performance_date, realized_profit,
@@ -592,6 +596,10 @@ class MT5AccountService:
                 (account_id,),
             )
             for sql in (
+                """
+                DELETE FROM execution_close_events
+                WHERE user_id = ? AND mt5_account_id = ?
+                """,
                 """
                 DELETE FROM execution_notifications
                 WHERE execution_group_id IN (

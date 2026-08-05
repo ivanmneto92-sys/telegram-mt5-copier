@@ -490,6 +490,45 @@ def initialize_database(database_path: Path) -> None:
                 FOREIGN KEY (user_id) REFERENCES users(id)
             );
 
+            CREATE TABLE IF NOT EXISTS user_notification_settings (
+                user_id INTEGER PRIMARY KEY,
+                result_mode TEXT NOT NULL DEFAULT 'all',
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS execution_close_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                mt5_account_id INTEGER NOT NULL,
+                execution_group_id INTEGER NOT NULL,
+                execution_order_id INTEGER NOT NULL,
+                mt5_deal_ticket TEXT NOT NULL UNIQUE,
+                close_reason TEXT NOT NULL,
+                close_price TEXT NOT NULL,
+                gross_profit TEXT NOT NULL,
+                commission TEXT NOT NULL,
+                swap TEXT NOT NULL,
+                fee TEXT NOT NULL,
+                net_profit TEXT NOT NULL,
+                closed_at TEXT NOT NULL,
+                notification_status TEXT NOT NULL DEFAULT 'pending',
+                notification_attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (mt5_account_id) REFERENCES mt5_accounts(id),
+                FOREIGN KEY (execution_group_id) REFERENCES execution_groups(id),
+                FOREIGN KEY (execution_order_id) REFERENCES execution_orders(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS mt5_settlement_state (
+                mt5_account_id INTEGER PRIMARY KEY,
+                last_reconciled_at TEXT NOT NULL,
+                FOREIGN KEY (mt5_account_id) REFERENCES mt5_accounts(id)
+            );
+
             CREATE TABLE IF NOT EXISTS signal_processing_claims (
                 source_chat_id TEXT NOT NULL,
                 content_signature TEXT NOT NULL,
@@ -671,6 +710,9 @@ def initialize_database(database_path: Path) -> None:
             CREATE INDEX IF NOT EXISTS idx_execution_orders_status
                 ON execution_orders(status);
 
+            CREATE INDEX IF NOT EXISTS idx_execution_close_events_delivery
+                ON execution_close_events(notification_status, mt5_account_id);
+
             CREATE INDEX IF NOT EXISTS idx_audit_events_user
                 ON audit_events(user_id);
 
@@ -825,6 +867,14 @@ def run_schema_migrations(connection: sqlite3.Connection) -> None:
     ensure_column(connection, "source_channels", "display_name", "TEXT")
     ensure_column(connection, "account_daily_performance", "gross_profit", "TEXT")
     ensure_column(connection, "account_daily_performance", "trading_costs", "TEXT")
+    ensure_column(connection, "execution_orders", "close_reason", "TEXT")
+    ensure_column(connection, "execution_orders", "close_price", "TEXT")
+    ensure_column(connection, "execution_orders", "gross_profit", "TEXT")
+    ensure_column(connection, "execution_orders", "commission", "TEXT")
+    ensure_column(connection, "execution_orders", "swap", "TEXT")
+    ensure_column(connection, "execution_orders", "fee", "TEXT")
+    ensure_column(connection, "execution_orders", "net_profit", "TEXT")
+    ensure_column(connection, "execution_orders", "mt5_close_deal_ticket", "TEXT")
 
 
 def ensure_column(connection: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:

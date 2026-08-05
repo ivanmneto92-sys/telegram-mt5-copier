@@ -61,6 +61,10 @@ from .bot_keyboards import (
     CB_EXEC_TP_3,
     CB_EXEC_TP_4,
     CB_HISTORY,
+    CB_SETTINGS,
+    CB_RESULT_ALERTS,
+    CB_RESULT_ALERTS_ALL,
+    CB_RESULT_ALERTS_OFF,
     CB_MAIN,
     CB_DAILY_STOP,
     CB_MT5_ACCOUNTS,
@@ -103,6 +107,8 @@ from .bot_keyboards import (
     ENTRY_PRICE_MENU,
     EXPIRATION_MENU,
     SIGNAL_EXECUTION_MENU,
+    SETTINGS_MENU,
+    RESULT_ALERTS_MENU,
     TAKE_PROFIT_COUNT_MENU,
     Button,
     extract_fixed_lot,
@@ -128,6 +134,7 @@ from .mt5.models import (
     MT5Account,
 )
 from .settings_service import SettingsService, UserSettings, decimal_to_storage
+from .mt5.settlement_monitor import get_result_mode, set_result_mode
 from .users import USER_STATUS_ACTIVE, USER_STATUS_PAUSED, User, UserRepository
 
 
@@ -415,6 +422,17 @@ class BotService:
             return self._account_screen(user)
         if callback == CB_OPERATIONS:
             return self._operations_screen(user)
+        if callback == CB_SETTINGS:
+            return self._settings_screen(user)
+        if callback == CB_RESULT_ALERTS:
+            return self._result_alerts_screen(user)
+        if callback in {CB_RESULT_ALERTS_ALL, CB_RESULT_ALERTS_OFF}:
+            set_result_mode(
+                self.database_path,
+                user.id,
+                "all" if callback == CB_RESULT_ALERTS_ALL else "off",
+            )
+            return self._result_alerts_screen(user)
         if callback == CB_RISK:
             return self._risk_screen(user)
         if callback == CB_PROTECTIONS:
@@ -894,7 +912,44 @@ class BotService:
             return self._mt5_accounts_screen(user)
         if screen == "channels":
             return self._channels_screen(user)
+        if screen == "settings":
+            return self._settings_screen(user)
         return self._main_panel(user, first_name=first_name)
+
+    def _settings_screen(self, user: User) -> BotResponse:
+        account = self.mt5_accounts.first_account(user.id)
+        account_label = account.masked_login if account is not None else "não conectada"
+        return BotResponse(
+            "\n".join(
+                [
+                    "⚙️ CONFIGURAÇÕES",
+                    "",
+                    f"Conta MT5: {account_label}",
+                    "",
+                    "Ajuste em um só lugar a gestão de risco, execução, proteções, alertas e contas MT5.",
+                ]
+            ),
+            SETTINGS_MENU,
+            screen="settings",
+        )
+
+    def _result_alerts_screen(self, user: User) -> BotResponse:
+        enabled = get_result_mode(self.database_path, user.id) == "all"
+        return BotResponse(
+            "\n".join(
+                [
+                    "🔔 ALERTAS DE RESULTADOS",
+                    "",
+                    f"Avisar cada fechamento: {'✅ Ativado' if enabled else '⚪ Desativado'}",
+                    "",
+                    "Quando uma ordem do copiador fechar, você pode receber o motivo (TP, Stop ou BE), o resultado líquido da ordem e os resultados do dia.",
+                    "",
+                    "Os valores incluem lucro/prejuízo, comissão, swap e taxas informadas pelo MT5.",
+                ]
+            ),
+            RESULT_ALERTS_MENU,
+            screen="result_alerts",
+        )
 
     def _channels_screen(self, user: User) -> BotResponse:
         overview = self.channels.user_overview(user.id)
@@ -1142,6 +1197,16 @@ class BotService:
 
     def _history_screen(self, user: User) -> BotResponse:
         with connect_database(self.mt5_accounts.database_path) as database:
+            close_rows = database.execute(
+                """
+                SELECT e.closed_at,g.symbol,g.direction,o.tp_index,e.close_reason,e.net_profit
+                FROM execution_close_events e
+                JOIN execution_groups g ON g.id=e.execution_group_id
+                JOIN execution_orders o ON o.id=e.execution_order_id
+                WHERE e.user_id=? ORDER BY e.id DESC LIMIT 10
+                """,
+                (user.id,),
+            ).fetchall()
             cursor = database.execute(
                 """
                 SELECT created_at, symbol, direction, total_volume, status,
@@ -1155,8 +1220,20 @@ class BotService:
                 rows = cursor.fetchall()
             finally:
                 cursor.close()
-        lines = ["Nenhuma execução registrada até agora."]
-        if rows:
+        lines = ["Nenhum resultado registrado até agora."]
+        if close_rows:
+            labels = {
+                "take_profit": "TP",
+                "stop_loss": "Stop",
+                "breakeven": "BE",
+                "stop_out": "Stop out",
+                "manual_or_other": "Fechamento",
+            }
+            lines = [
+                f"• {row[0]} | {row[1]} {row[2]} | {labels.get(row[4], row[4])}{row[3] if row[4] == 'take_profit' else ''} | {money_label(Decimal(str(row[5])))}"
+                for row in close_rows
+            ]
+        elif rows:
             lines = [
                 f"• {row[0]} | {row[1]} {row[2]} | lote {row[3]} | {row[4]}"
                 + (f" | {row[5]}" if row[5] else "")
@@ -1173,7 +1250,7 @@ class BotService:
         return BotResponse(
             "\n".join(
                 [
-                    "📋 HISTÓRICO",
+                    "📊 RESULTADOS",
                     "",
                     *lines,
                 ]

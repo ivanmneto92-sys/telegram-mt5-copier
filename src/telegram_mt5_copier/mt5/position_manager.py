@@ -5,6 +5,7 @@ from decimal import Decimal, ROUND_HALF_UP
 import logging
 from pathlib import Path
 import re
+import time
 from typing import Callable
 
 from ..database import connect_database, utc_now
@@ -17,6 +18,7 @@ from .pending_order_executor import (
     mt5_constant,
     mt5_failure_message,
 )
+from .settlement_monitor import SettlementMonitor
 
 COMMENT_RE = re.compile(r"^tgcp (?P<signal>[0-9a-f]{8}) TP(?P<tp>\d+)$")
 LOGGER = logging.getLogger(__name__)
@@ -28,10 +30,13 @@ class PositionManager:
         database_path: Path,
         accounts: MT5AccountService,
         client_factory: Callable[[], object],
+        settlement_monitor: SettlementMonitor | None = None,
     ) -> None:
         self.database_path = database_path
         self.accounts = accounts
         self.client_factory = client_factory
+        self.settlement_monitor = settlement_monitor
+        self._last_settlement_check: dict[int, float] = {}
 
     def manage_account(self, account: MT5Account, profile: ExecutionProfile) -> int:
         if account.terminal_path is None:
@@ -166,6 +171,11 @@ class PositionManager:
                 if is_successful_mt5_result(client, result, check=False):
                     self._mark_cancelled(order_id, group_id)
                     changed += 1
+            if self.settlement_monitor is not None:
+                last_check = self._last_settlement_check.get(account.id, 0.0)
+                if time.monotonic() - last_check >= 3:
+                    changed += self.settlement_monitor.reconcile(client, account)
+                    self._last_settlement_check[account.id] = time.monotonic()
             return changed
         finally:
             password = None

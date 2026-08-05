@@ -11,7 +11,9 @@ from .mt5.account_service import MT5AccountService
 from .mt5.account_worker import MT5AccountWorker
 from .mt5.client import MT5Client
 from .mt5.position_manager import PositionManager
+from .mt5.settlement_monitor import SettlementMonitor
 from .mt5.pending_order_monitor import PendingOrderMonitor
+from .telegram_notifier import TelegramUserNotifier
 
 POSITION_PROTECTION_POLL_SECONDS = 1
 ACCOUNT_HEARTBEAT_SECONDS = 15
@@ -36,7 +38,21 @@ def main() -> int:
             daily_performance_timezone=config.daily_performance_timezone,
         )
         command_queue = CommandQueue(config.database_path)
-        position_manager = PositionManager(config.database_path, accounts, MT5Client)
+        user_notifier = TelegramUserNotifier(
+            config.telegram_bot_token,
+            logger=logging.getLogger("mt5-result-notifier"),
+        )
+        settlement_monitor = SettlementMonitor(
+            config.database_path,
+            user_notifier,
+            timezone_name=config.daily_performance_timezone,
+        )
+        position_manager = PositionManager(
+            config.database_path,
+            accounts,
+            MT5Client,
+            settlement_monitor,
+        )
         pending_monitor = PendingOrderMonitor(config.database_path)
         workers: dict[int, MT5AccountWorker] = {}
         last_account_checks: dict[int, float] = {}
@@ -70,6 +86,7 @@ def main() -> int:
                     if account_connection_states.get(account_id, False):
                         try:
                             position_manager.manage_account(account, profile)
+                            settlement_monitor.deliver_pending(account)
                         except Exception as exc:
                             print(f"Falha ao gerenciar posicoes da conta {account.id}: {exc}", file=sys.stderr)
 
