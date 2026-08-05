@@ -22,6 +22,10 @@ CB_RESUME_DAILY_SIGNALS = "v1:daystop:resume"
 CB_RISK = "v1:r"
 CB_PROTECTIONS = "v1:p"
 CB_HISTORY = "v1:h"
+CB_SETTINGS = "v1:set"
+CB_RESULT_ALERTS = "v1:set:alerts"
+CB_RESULT_ALERTS_ALL = "v1:set:alerts:all"
+CB_RESULT_ALERTS_OFF = "v1:set:alerts:off"
 CB_CONNECTION = "v1:c"
 CB_CONNECT_MT5 = "v1:mt5:connect"
 CB_MT5_ACCOUNTS = "v1:mt5:accounts"
@@ -74,29 +78,31 @@ MAIN_MENU: tuple[tuple[Button, ...], ...] = (
         Button("📈 Operações", CB_OPERATIONS),
     ),
     (
-        Button("🔐 Solicitar ativação", CB_ACTIVATE),
-        Button("⏸️ Pausar conta", CB_PAUSE),
+        Button("📊 Resultados", CB_HISTORY),
+        Button("📻 Canais", CB_CHANNELS),
+    ),
+    (
+        Button("⚙️ Configurações", CB_SETTINGS),
+        Button("📡 Status", CB_CONNECTION),
     ),
     (Button("🛑 Parar sinais hoje", CB_DAILY_STOP),),
-    (
-        Button("⚙️ Gestão de risco", CB_RISK),
-        Button("🛡️ Proteções", CB_PROTECTIONS),
-    ),
-    (
-        Button("📋 Histórico", CB_HISTORY),
-        Button("🔄 Atualizar", refresh_callback("main")),
-    ),
-    (
-        Button("🔗 Conectar conta MT5", CB_CONNECT_MT5),
-        Button("🖥️ Minhas contas", CB_MT5_ACCOUNTS),
-    ),
-    (
-        Button("⚙️ Execução dos sinais", CB_SIGNAL_EXECUTION),
-    ),
-    (
-        Button("📻 Canais de sinais", CB_CHANNELS),
-        Button("📡 Status da conexão", CB_CONNECTION),
-    ),
+    (Button("🔄 Atualizar", refresh_callback("main")),),
+)
+
+SETTINGS_MENU: tuple[tuple[Button, ...], ...] = (
+    (Button("⚙️ Gestão de risco", CB_RISK), Button("🛡️ Proteções", CB_PROTECTIONS)),
+    (Button("🎯 Execução dos sinais", CB_SIGNAL_EXECUTION),),
+    (Button("🔔 Alertas de resultados", CB_RESULT_ALERTS),),
+    (Button("🖥️ Minhas contas MT5", CB_MT5_ACCOUNTS),),
+    (Button("🔗 Conectar conta MT5", CB_CONNECT_MT5),),
+    (Button("🔐 Solicitar ativação", CB_ACTIVATE), Button("⏸️ Pausar conta", CB_PAUSE)),
+    (Button("⬅️ Voltar ao menu", CB_MAIN),),
+)
+
+RESULT_ALERTS_MENU: tuple[tuple[Button, ...], ...] = (
+    (Button("✅ Avisar cada fechamento", CB_RESULT_ALERTS_ALL),),
+    (Button("🔕 Desativar alertas", CB_RESULT_ALERTS_OFF),),
+    (Button("⬅️ Voltar", CB_SETTINGS),),
 )
 
 CHANNEL_MENU: tuple[tuple[Button, ...], ...] = (
@@ -203,7 +209,7 @@ PROTECTIONS_MENU: tuple[tuple[Button, ...], ...] = (
     (Button("🛡️ BE antecipado em 1R", "v1:p:be"),),
     (Button("📈 Ativar/desativar Trailing Stop", "v1:p:tr"),),
     (Button("🛑 Configurar limite diário", "v1:p:loss"),),
-    (Button("⬅️ Voltar ao menu", CB_MAIN),),
+    (Button("⬅️ Voltar", CB_SETTINGS),),
 )
 
 HISTORY_MENU: tuple[tuple[Button, ...], ...] = (
@@ -244,7 +250,7 @@ def mt5_connect_menu(web_app_url: str | None = None) -> tuple[tuple[Button, ...]
     )
     return (
         (open_button,),
-        (Button("⬅️ Voltar ao menu", CB_MAIN),),
+        (Button("⬅️ Voltar", CB_SETTINGS),),
     )
 
 
@@ -262,7 +268,7 @@ MT5_ACCOUNTS_MENU: tuple[tuple[Button, ...], ...] = (
     (Button("⚙️ Execução dos sinais", CB_SIGNAL_EXECUTION),),
     (Button("🔄 Testar conexão", CB_MT5_TEST),),
     (Button("🗑️ Remover conta", CB_MT5_REMOVE),),
-    (Button("⬅️ Voltar ao menu", CB_MAIN),),
+    (Button("⬅️ Voltar", CB_SETTINGS),),
 )
 
 
@@ -277,7 +283,7 @@ SIGNAL_EXECUTION_MENU: tuple[tuple[Button, ...], ...] = (
     (Button("🎯 Preço da faixa", CB_EXEC_PRICE_MENU),),
     (Button("⏳ Validade", CB_EXEC_EXPIRATION_MENU),),
     (Button("🎯 Quantidade de TPs", CB_EXEC_TP_MENU),),
-    (Button("⬅️ Voltar", CB_MT5_ACCOUNTS),),
+    (Button("⬅️ Voltar", CB_SETTINGS),),
 )
 
 CONFIRM_DAILY_STOP: tuple[tuple[Button, ...], ...] = (
@@ -287,7 +293,7 @@ CONFIRM_DAILY_STOP: tuple[tuple[Button, ...], ...] = (
 
 DAILY_STOPPED_MENU: tuple[tuple[Button, ...], ...] = (
     (Button("▶️ Retomar sinais agora", CB_RESUME_DAILY_SIGNALS),),
-    (Button("⬅️ Voltar ao menu", CB_MAIN),),
+    (Button("⬅️ Voltar", CB_SETTINGS),),
 )
 
 
@@ -361,6 +367,8 @@ STATIC_CALLBACKS = {
         ENTRY_MODE_MENU,
         ENTRY_PRICE_MENU,
         EXPIRATION_MENU,
+        SETTINGS_MENU,
+        RESULT_ALERTS_MENU,
     )
     for row in keyboard
     for button in row
@@ -402,7 +410,7 @@ RISK_VALUE_CALLBACK_RE = re.compile(
     r"^v1:r:(?P<field>risk|target|loss|max|spread|slippage):(?P<value>\d+(?:[\.,]\d{1,2})?)$"
 )
 REFRESH_CALLBACK_RE = re.compile(
-    r"^v1:ref:(?P<screen>main|account|operations|risk|protections|history|connection|mt5_accounts|channels)$"
+    r"^v1:ref:(?P<screen>main|account|operations|risk|protections|history|connection|mt5_accounts|channels|settings)$"
 )
 CHANNEL_TOGGLE_CALLBACK_RE = re.compile(r"^v1:ch:t:(?P<channel_id>\d+)$")
 

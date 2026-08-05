@@ -207,10 +207,21 @@ class BotManagementTests(unittest.TestCase):
 
         self.assertIn("💼 Minha conta", button_texts)
         self.assertIn("📈 Operações", button_texts)
-        self.assertIn("📡 Status da conexão", button_texts)
-        self.assertIn("🔗 Conectar conta MT5", button_texts)
-        self.assertIn("🖥️ Minhas contas", button_texts)
-        self.assertIn("⚙️ Execução dos sinais", button_texts)
+        self.assertIn("📡 Status", button_texts)
+        self.assertIn("⚙️ Configurações", button_texts)
+        self.assertIn("📊 Resultados", button_texts)
+
+    def test_configuracoes_unifica_menus_e_controla_alertas(self) -> None:
+        settings = self.service.handle_callback(101, "alice", "v1:set")
+        button_texts = [button.text for row in settings.keyboard for button in row]
+        self.assertIn("⚙️ Gestão de risco", button_texts)
+        self.assertIn("🛡️ Proteções", button_texts)
+        self.assertIn("🔔 Alertas de resultados", button_texts)
+
+        alerts = self.service.handle_callback(101, "alice", "v1:set:alerts")
+        self.assertIn("✅ Ativado", alerts.text)
+        disabled = self.service.handle_callback(101, "alice", "v1:set:alerts:off")
+        self.assertIn("⚪ Desativado", disabled.text)
 
     def test_painel_admin_aparece_somente_para_admin_configurado(self) -> None:
         service = BotService(
@@ -581,8 +592,8 @@ class BotManagementTests(unittest.TestCase):
 
         response = self.service.handle_callback(101, "alice", "v1:h")
 
-        self.assertIn("📋 HISTÓRICO", response.text)
-        self.assertIn("Nenhuma execução registrada", response.text)
+        self.assertIn("📊 RESULTADOS", response.text)
+        self.assertIn("Nenhum resultado registrado", response.text)
 
     def test_status_da_conexao(self) -> None:
         self.service.start(101, "alice")

@@ -32,6 +32,7 @@ from telegram_mt5_copier.mt5.pending_order_executor import (
 )
 from telegram_mt5_copier.mt5.pending_order_monitor import PendingOrderMonitor
 from telegram_mt5_copier.mt5.position_manager import PositionManager
+from telegram_mt5_copier.mt5.settlement_monitor import SettlementMonitor
 from telegram_mt5_copier.mt5.pending_order_planner import PendingOrderPlanner
 from telegram_mt5_copier.mt5.symbol_resolver import SymbolResolver
 from telegram_mt5_copier.mt5.terminal_manager import TerminalManager
@@ -957,6 +958,53 @@ class PendingOrderTests(unittest.TestCase):
         self.assertEqual(client.order_send_requests[-1]["action"], 6)
         self.assertEqual(client.order_send_requests[-1]["position"], 9001)
         self.assertEqual(client.order_send_requests[-1]["sl"], 4063.0)
+
+    def test_fechamento_e_registrado_e_notificado_uma_unica_vez(self) -> None:
+        signal = parse_signal_text(BUY_SIGNAL).signal
+        result = self.executor().execute_for_account(signal, self.account, self.profile())
+        group_id = result.group_result.group.id
+        with connect_database(self.database_path) as connection:
+            order_id = connection.execute(
+                "SELECT id FROM execution_orders WHERE execution_group_id=? AND tp_index=1",
+                (group_id,),
+            ).fetchone()[0]
+            connection.execute(
+                "UPDATE execution_orders SET status='filled',mt5_position_ticket='9001' WHERE id=?",
+                (order_id,),
+            ).close()
+
+        class RecordingNotifier:
+            def __init__(self) -> None:
+                self.messages: list[tuple[int, str]] = []
+
+            def send(self, telegram_user_id: int, message: str) -> bool:
+                self.messages.append((telegram_user_id, message))
+                return True
+
+        notifier = RecordingNotifier()
+        now = datetime.now(tz=timezone.utc).timestamp()
+        deals = (
+            {"ticket": 7000, "position_id": 9001, "magic": MT5_MAGIC_NUMBER,
+             "entry": 0, "time": now, "profit": 0, "commission": -0.20},
+            {"ticket": 7001, "position_id": 9001, "magic": MT5_MAGIC_NUMBER,
+             "entry": 1, "reason": 5, "time": now, "price": 4066,
+             "profit": 5, "commission": -0.20, "swap": 0, "fee": 0},
+        )
+        client = SimulatedMT5Client(history_deals=deals)
+        monitor = SettlementMonitor(self.database_path, notifier)  # type: ignore[arg-type]
+
+        self.assertEqual(monitor.reconcile(client, self.account), 1)
+        monitor.deliver_pending(self.account)
+        self.assertEqual(monitor.reconcile(client, self.account), 0)
+        monitor.deliver_pending(self.account)
+        self.assertEqual(len(notifier.messages), 1)
+        self.assertIn("TP1 ATINGIDO", notifier.messages[0][1])
+        self.assertIn("+US$ 4.60", notifier.messages[0][1])
+        with connect_database(self.database_path) as connection:
+            row = connection.execute(
+                "SELECT status,net_profit FROM execution_orders WHERE id=?", (order_id,)
+            ).fetchone()
+        self.assertEqual(row, ("closed", "4.6"))
 
     def test_worker_move_restantes_para_be_quando_tp1_e_atingido(self) -> None:
         signal = parse_signal_text(BUY_SIGNAL).signal

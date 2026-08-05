@@ -147,6 +147,21 @@ o pagamento e definindo a data final do acesso. Depois do vencimento, a conta é
 retirada da seleção de novos sinais; o Worker MT5 continua disponível para
 acompanhar operações que já existiam.
 
+## Alertas e resultados em tempo real
+
+O Worker reconcilia os deals encerrados pelo MT5 a cada poucos segundos. Para
+cada ordem do copiador, ele identifica TP, Stop Loss, breakeven, stop out ou
+fechamento manual, calcula o resultado líquido incluindo comissão, swap e taxas
+e envia uma mensagem privada ao dono da conta. A mensagem também informa o
+resultado diário do robô e o resultado total da conta. O ticket do deal é salvo
+com chave única no banco para impedir que a mesma leitura do histórico gere
+avisos repetidos.
+
+O cliente pode ativar ou desativar esses avisos em
+`Configurações > Alertas de resultados`. Os últimos fechamentos ficam em
+`Resultados`. O menu principal foi mantido curto; risco, execução, proteções,
+alertas e contas MT5 estão reunidos em `Configurações`.
+
 Informe telefone, codigo recebido e senha de verificacao em duas etapas apenas no prompt interativo. A sessao autenticada fica em `SESSION_DIR` e os arquivos `*.session` ja estao bloqueados no `.gitignore`.
 
 ## 3. Execucao dos testes no Mac

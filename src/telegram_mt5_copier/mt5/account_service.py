@@ -593,6 +593,10 @@ class MT5AccountService:
             )
             for sql in (
                 """
+                DELETE FROM execution_close_events
+                WHERE user_id = ? AND mt5_account_id = ?
+                """,
+                """
                 DELETE FROM execution_notifications
                 WHERE execution_group_id IN (
                     SELECT id FROM execution_groups WHERE user_id = ? AND mt5_account_id = ?
