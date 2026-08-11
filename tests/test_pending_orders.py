@@ -33,7 +33,10 @@ from telegram_mt5_copier.mt5.pending_order_executor import (
 from telegram_mt5_copier.mt5.pending_order_monitor import PendingOrderMonitor
 from telegram_mt5_copier.mt5.position_manager import PositionManager
 from telegram_mt5_copier.mt5.settlement_monitor import SettlementMonitor
-from telegram_mt5_copier.mt5.pending_order_planner import PendingOrderPlanner
+from telegram_mt5_copier.mt5.pending_order_planner import (
+    PendingOrderPlanner,
+    PendingOrderPlanningError,
+)
 from telegram_mt5_copier.mt5.symbol_resolver import SymbolResolver
 from telegram_mt5_copier.mt5.terminal_manager import TerminalManager
 from telegram_mt5_copier.mt5.volume_allocator import VolumeAllocationError, allocate_volume
@@ -391,6 +394,33 @@ class PendingOrderTests(unittest.TestCase):
 
         self.assertEqual(plan.total_volume, Decimal("0.05"))
         self.assertEqual(sum(order.normalized_volume for order in plan.orders), Decimal("0.05"))
+
+    def test_risco_percentual_rejeita_quando_lote_minimo_excede_limite(self) -> None:
+        signal = parse_signal_text(BUY_SIGNAL).signal
+        profile = replace(
+            self.profile(),
+            risk_mode="risk_percent",
+            risk_percent=Decimal("0.5"),
+        )
+
+        with self.assertRaises(PendingOrderPlanningError) as context:
+            PendingOrderPlanner().plan(
+                signal=signal,
+                account=replace(self.account, equity=Decimal("2045.38")),
+                profile=profile,
+                symbol_info=SymbolInfo(
+                    name="XAUUSD",
+                    trade_tick_size=Decimal("0.01"),
+                    trade_tick_value=Decimal("1"),
+                ),
+                tick=TickInfo(bid=Decimal("4062"), ask=Decimal("4062")),
+                execution_mode="live_execution",
+            )
+
+        self.assertEqual(
+            context.exception.reason,
+            "Risco calculado gera lote abaixo do minimo do simbolo.",
+        )
 
     def test_spread_e_limite_diario_bloqueiam_antes_do_order_send(self) -> None:
         wide_spread_client = SimulatedMT5Client(

@@ -368,7 +368,6 @@ class BotManagementTests(unittest.TestCase):
             )
 
             service.handle_callback(101, "alice", "v1:r:lot:0.10")
-            service.handle_callback(101, "alice", "v1:r:mode:risk_percent")
             service.handle_callback(101, "alice", "v1:r:risk:0.50")
             service.handle_callback(101, "alice", "v1:r:loss:50")
             service.handle_callback(101, "alice", "v1:r:spread:100")
@@ -381,6 +380,11 @@ class BotManagementTests(unittest.TestCase):
             self.assertEqual(profile.daily_loss_limit, Decimal("50"))
             self.assertEqual(profile.max_spread_points, 100)
             self.assertEqual(profile.max_slippage_points, 20)
+
+            lot_response = service.handle_callback(101, "alice", "v1:r:lot:0.02")
+            profile = accounts.get_execution_profile(user.id, account.id)
+            self.assertEqual(profile.risk_mode, "fixed_lot")
+            self.assertIn("Modo ativado: lote fixo", lot_response.text)
         finally:
             service.close()
             accounts.close()
@@ -413,6 +417,7 @@ class BotManagementTests(unittest.TestCase):
             self.assertIn("Configuração atualizada: Lote fixo = 0.07", lot_response.text)
             self.assertIn("Configuração atualizada: Meta diária = $ 1500.5", target_response.text)
             self.assertEqual(profile.fixed_lot, Decimal("0.07"))
+            self.assertEqual(profile.risk_mode, "risk_percent")
             self.assertEqual(profile.risk_percent, Decimal("0.75"))
             self.assertEqual(profile.daily_profit_target, Decimal("1500.5"))
         finally:

@@ -789,7 +789,11 @@ class BotService:
                 self._apply_risk_value(user, "lot", fixed_lot)
             except ValueError as exc:
                 return BotResponse(str(exc), RISK_MENU, screen="risk")
-            return BotResponse(f"Lote fixo atualizado para {fixed_lot}.", RISK_MENU, screen="risk")
+            return BotResponse(
+                f"Lote fixo atualizado para {fixed_lot}.\nModo ativado: lote fixo.",
+                RISK_MENU,
+                screen="risk",
+            )
 
         risk_value = extract_risk_value(callback)
         if risk_value is not None:
@@ -853,9 +857,13 @@ class BotService:
         account = self.mt5_accounts.first_account(user.id)
         if field == "lot":
             settings = self.settings.update_fixed_lot(user.id, raw_value)
+            self.settings.update_risk_mode(user.id, "fixed_lot")
             if account is not None:
                 self.mt5_accounts.update_execution_profile_fixed_lot(
                     user.id, account.id, settings.fixed_lot
+                )
+                self.mt5_accounts.update_execution_profile_field(
+                    user.id, account.id, "risk_mode", "fixed_lot"
                 )
             return
 
@@ -875,6 +883,7 @@ class BotService:
 
         if field == "risk":
             self.settings.update_risk_percent(user.id, raw_value)
+            self.settings.update_risk_mode(user.id, "risk_percent")
         elif field == "target":
             self.settings.update_daily_profit_target(user.id, raw_value)
         elif field == "loss":
@@ -887,6 +896,10 @@ class BotService:
         self.mt5_accounts.update_execution_profile_risk_value(
             user.id, account.id, profile_field, raw_value
         )
+        if field == "risk":
+            self.mt5_accounts.update_execution_profile_field(
+                user.id, account.id, "risk_mode", "risk_percent"
+            )
 
     def _ensure_user(self, telegram_user_id: int, telegram_username: str | None) -> User:
         user = self.users.get_or_create_user(telegram_user_id, telegram_username)
@@ -1126,6 +1139,11 @@ class BotService:
         max_open_trades = profile.max_open_signals if profile else settings.max_open_trades
         max_spread_points = profile.max_spread_points if profile else None
         max_slippage_points = profile.max_slippage_points if profile else None
+        active_management = (
+            f"Risco percentual de {percent_value(risk_percent)} por operação"
+            if risk_mode == "risk_percent"
+            else f"Lote fixo total de {setting_value(fixed_lot)} por sinal"
+        )
         return BotResponse(
             "\n".join(
                 [
@@ -1133,6 +1151,7 @@ class BotService:
                     "",
                     "Modo de gestão:",
                     risk_mode_label(risk_mode),
+                    f"Em uso nas próximas operações: {active_management}.",
                     "",
                     "Lote fixo:",
                     setting_value(fixed_lot),
