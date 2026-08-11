@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 from telegram_mt5_copier.credential_service import CredentialService
-from telegram_mt5_copier.database import connect_database
+from telegram_mt5_copier.database import SignalDatabase, connect_database, utc_now
 from telegram_mt5_copier.daily_schedule import SAO_PAULO_TIMEZONE
 from telegram_mt5_copier.mt5.account_service import MT5AccountForm, MT5AccountService
 from telegram_mt5_copier.mt5.client import SimulatedMT5Client
@@ -40,6 +40,10 @@ from telegram_mt5_copier.mt5.pending_order_planner import (
 )
 from telegram_mt5_copier.mt5.symbol_resolver import SymbolResolver
 from telegram_mt5_copier.mt5.terminal_manager import TerminalManager
+from telegram_mt5_copier.mt5.trade_comment import (
+    build_trade_comment,
+    parse_trade_comment,
+)
 from telegram_mt5_copier.mt5.volume_allocator import VolumeAllocationError, allocate_volume
 from telegram_mt5_copier.parser import parse_signal_text
 from telegram_mt5_copier.users import USER_STATUS_ACTIVE, UserRepository
@@ -174,6 +178,61 @@ class PendingOrderTests(unittest.TestCase):
 
         self.assertEqual(plan.selected_entry_price, Decimal("4061.00"))
         self.assertEqual(plan.order_type, PendingOrderType.BUY_LIMIT)
+
+    def test_comentario_mt5_exibe_sala_e_preserva_identificacao(self) -> None:
+        comment = build_trade_comment("Gold Precision", "6e87346abcdef", 2)
+
+        self.assertEqual(comment, "Gold Precision 6e87346a T2")
+        self.assertLessEqual(len(comment), 31)
+        parsed = parse_trade_comment(comment)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.signal_prefix, "6e87346a")
+        self.assertEqual(parsed.tp_index, 2)
+
+    def test_execucao_usa_nome_publico_da_sala_no_comentario_mt5(self) -> None:
+        signal = replace(
+            parse_signal_text(BUY_SIGNAL).signal,
+            source_chat_id=-1001234567890,
+            source_message_id=55,
+        )
+        now = utc_now()
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO source_channels (
+                    telegram_chat_id,title,display_name,status,access_status,
+                    created_at,updated_at
+                ) VALUES (?,?,?,?,?,?,?)
+                """,
+                (
+                    str(signal.source_chat_id),
+                    "Nome secreto",
+                    "Gold Alpha",
+                    "active",
+                    "confirmed",
+                    now,
+                    now,
+                ),
+            ).close()
+        SignalDatabase(self.database_path).record_accepted(signal, "sinal")
+        client = SimulatedMT5Client()
+
+        self.executor(client=client, execution_mode="demo_execution").execute_for_account(
+            signal,
+            self.account,
+            self.profile(),
+        )
+
+        self.assertTrue(client.order_send_requests)
+        self.assertTrue(
+            all(
+                str(request["comment"]).startswith("Gold Alpha ")
+                for request in client.order_send_requests
+            )
+        )
+        self.assertTrue(
+            all(len(str(request["comment"])) <= 31 for request in client.order_send_requests)
+        )
 
     def test_plano_e_ordens_preservam_xauusdb_resolvido_na_hfm(self) -> None:
         signal = parse_signal_text(BUY_SIGNAL).signal

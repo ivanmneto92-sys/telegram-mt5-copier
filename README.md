@@ -389,6 +389,19 @@ fazer esse encerramento ficar ligeiramente diferente de zero. O gerenciamento
 de posições existentes permanece ativo mesmo quando o usuário ou o perfil está
 pausado para novas entradas.
 
+## Identificação da sala no MetaTrader 5
+
+A versão `0.26.0` substitui o comentário técnico isolado pelo nome público da
+sala configurado no catálogo. Uma operação pode aparecer como
+`Gold Alpha 6e87346a T1`, em que `Gold Alpha` é o nome mascarado mostrado ao
+cliente, `6e87346a` é o identificador curto do sinal e `T1` indica o alvo.
+
+O comentário é limitado automaticamente a 31 caracteres para compatibilidade
+com o MT5. O nome original do canal não é exposto. A identificação operacional
+continua usando prioritariamente os tickets gravados no banco, e o novo e o
+antigo formato de comentário permanecem reconhecidos para não afetar posições
+criadas por versões anteriores.
+
 ## Instâncias white-label na mesma VPS
 
 A versão `0.18.0` permite executar cópias independentes para marcas diferentes.

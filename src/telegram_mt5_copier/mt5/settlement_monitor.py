@@ -4,7 +4,6 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import logging
 from pathlib import Path
-import re
 from zoneinfo import ZoneInfo
 
 from ..database import connect_database, utc_now
@@ -12,9 +11,8 @@ from ..telegram_notifier import TelegramUserNotifier
 from .daily_performance import DEFAULT_BROKER_TIMEZONE
 from .models import MT5Account
 from .pending_order_executor import MT5_MAGIC_NUMBER, mt5_constant
+from .trade_comment import parse_trade_comment
 
-
-COMMENT_RE = re.compile(r"^tgcp (?P<signal>[0-9a-f]{8}) TP(?P<tp>\d+)$")
 TERMINAL_ORDER_STATUSES = {
     "closed", "cancelled", "expired", "failed", "rejected", "simulated"
 }
@@ -68,7 +66,7 @@ class SettlementMonitor:
         self, account_id: int, deal: object, history_deals: tuple[object, ...]
     ):
         position_id = str(field(deal, "position_id", field(deal, "position", "")) or "")
-        comment_match = COMMENT_RE.match(str(field(deal, "comment", "") or ""))
+        comment_match = parse_trade_comment(str(field(deal, "comment", "") or ""))
         if comment_match is None and position_id:
             for related in history_deals:
                 related_position = str(
@@ -76,7 +74,7 @@ class SettlementMonitor:
                 )
                 if related_position != position_id:
                     continue
-                comment_match = COMMENT_RE.match(
+                comment_match = parse_trade_comment(
                     str(field(related, "comment", "") or "")
                 )
                 if comment_match is not None:
@@ -107,7 +105,7 @@ class SettlementMonitor:
                     WHERE g.mt5_account_id=? AND substr(g.signal_id,1,8)=?
                           AND o.tp_index=? ORDER BY o.id DESC LIMIT 1
                     """,
-                    (account_id, comment_match.group("signal"), int(comment_match.group("tp"))),
+                    (account_id, comment_match.signal_prefix, comment_match.tp_index),
                 ).fetchone()
         return None
 

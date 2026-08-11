@@ -37,6 +37,7 @@ from .models import (
 from .order_validator import OrderValidationError, validate_pending_order_plan
 from .pending_order_planner import PendingOrderPlanner, PendingOrderPlanningError
 from .symbol_resolver import SymbolResolver
+from .trade_comment import build_trade_comment, parse_trade_comment
 
 MT5_MAGIC_NUMBER = 27071301
 
@@ -350,6 +351,7 @@ class PendingOrderExecutor:
                 message="",
             )
 
+        room_name = self._source_display_name(plan.signal_id)
         requests = [
             build_pending_order_request(
                 client=client,
@@ -357,6 +359,7 @@ class PendingOrderExecutor:
                 order=order,
                 profile=profile,
                 symbol_info=symbol_info,
+                room_name=room_name,
             )
             for order in plan.orders
         ]
@@ -415,6 +418,7 @@ class PendingOrderExecutor:
                     profile=profile,
                     symbol_info=symbol_info,
                     submitted_orders=submitted_orders,
+                    room_name=room_name,
                 )
                 if rollback_failures:
                     reason = f"{reason};rollback_failed:{','.join(rollback_failures)}"
@@ -435,6 +439,7 @@ class PendingOrderExecutor:
                     profile=profile,
                     symbol_info=symbol_info,
                     submitted_orders=submitted_orders,
+                    room_name=room_name,
                 )
                 if rollback_failures:
                     reason = f"{reason};rollback_failed:{','.join(rollback_failures)}"
@@ -469,6 +474,25 @@ class PendingOrderExecutor:
             ),
         )
 
+    def _source_display_name(self, signal_id: str) -> str | None:
+        with connect_database(self.database_path) as connection:
+            row = connection.execute(
+                """
+                SELECT CASE
+                         WHEN TRIM(COALESCE(c.display_name, '')) <> ''
+                         THEN TRIM(c.display_name)
+                         ELSE 'Sala de Sinais'
+                       END
+                FROM signals s
+                JOIN source_channels c
+                  ON c.telegram_chat_id = s.source_chat_id
+                WHERE s.signature = ?
+                LIMIT 1
+                """,
+                (signal_id,),
+            ).fetchone()
+        return str(row[0]) if row is not None else None
+
 
 def validate_operational_limits(
     client: object,
@@ -490,8 +514,12 @@ def validate_operational_limits(
         if int(result_value(item, "magic", 0) or 0) != MT5_MAGIC_NUMBER:
             continue
         comment = str(result_value(item, "comment", ""))
-        parts = comment.split()
-        key = parts[1] if len(parts) >= 2 and parts[0] == "tgcp" else f"ticket:{result_value(item, 'ticket', result_value(item, 'order', id(item)))}"
+        parsed_comment = parse_trade_comment(comment)
+        key = (
+            parsed_comment.signal_prefix
+            if parsed_comment is not None
+            else f"ticket:{result_value(item, 'ticket', result_value(item, 'order', id(item)))}"
+        )
         active_signal_keys.add(key)
     if profile.max_open_signals > 0 and len(active_signal_keys) >= profile.max_open_signals:
         raise OrderValidationError("max_open_signals_reached")
@@ -604,6 +632,7 @@ def build_pending_order_request(
     order: PlannedOrder,
     profile: ExecutionProfile,
     symbol_info: SymbolInfo,
+    room_name: str | None = None,
 ) -> dict[str, object]:
     is_market = order.order_type.value in {"BUY", "SELL"}
     request = {
@@ -616,7 +645,7 @@ def build_pending_order_request(
         "tp": decimal_to_float(order.take_profit),
         "deviation": int(profile.max_slippage_points),
         "magic": MT5_MAGIC_NUMBER,
-        "comment": f"tgcp {plan.signal_id[:8]} TP{order.tp_index}",
+        "comment": build_trade_comment(room_name, plan.signal_id, order.tp_index),
     }
     if is_market:
         request["type_time"] = mt5_constant(client, "ORDER_TIME_GTC", 0)
@@ -705,6 +734,7 @@ def rollback_submitted_orders(
     profile: ExecutionProfile,
     symbol_info: SymbolInfo,
     submitted_orders: list[tuple[str, PlannedOrder]],
+    room_name: str | None = None,
 ) -> list[str]:
     if not submitted_orders:
         return []
@@ -719,6 +749,7 @@ def rollback_submitted_orders(
         profile=profile,
         symbol_info=symbol_info,
         submitted_orders=submitted_orders,
+        room_name=room_name,
     )
 
 
@@ -729,9 +760,10 @@ def close_submitted_market_positions(
     profile: ExecutionProfile,
     symbol_info: SymbolInfo,
     submitted_orders: list[tuple[str, PlannedOrder]],
+    room_name: str | None = None,
 ) -> list[str]:
     expected_comments = {
-        f"tgcp {plan.signal_id[:8]} TP{order.tp_index}": ticket
+        build_trade_comment(room_name, plan.signal_id, order.tp_index): ticket
         for ticket, order in submitted_orders
     }
     positions: dict[str, object] = {}

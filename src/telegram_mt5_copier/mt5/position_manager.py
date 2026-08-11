@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
 import logging
 from pathlib import Path
-import re
 import time
 from typing import Callable
 
@@ -22,9 +21,9 @@ from .pending_order_executor import (
     pending_order_type_constant,
 )
 from .settlement_monitor import SettlementMonitor
+from .trade_comment import parse_trade_comment
 from ..telegram_notifier import TelegramUserNotifier
 
-COMMENT_RE = re.compile(r"^tgcp (?P<signal>[0-9a-f]{8}) TP(?P<tp>\d+)$")
 LOGGER = logging.getLogger(__name__)
 
 
@@ -748,13 +747,13 @@ class PositionManager:
                     take_profit=Decimal(str(row[5])),
                     expiration_at=str(row[6]),
                 )
-        match = COMMENT_RE.match(str(value(item, "comment", "")))
-        if match is None:
+        parsed_comment = parse_trade_comment(str(value(item, "comment", "")))
+        if parsed_comment is None:
             return None
         return self._find_order(
             account_id,
-            match.group("signal"),
-            int(match.group("tp")),
+            parsed_comment.signal_prefix,
+            parsed_comment.tp_index,
         )
 
     def _mark_filled(self, order_id: int, position_ticket: int) -> None:
@@ -845,11 +844,11 @@ def tp1_reached_in_history(
 
     for deal in history_deals:
         deal_tickets = ticket_values(deal)
-        comment_match = COMMENT_RE.match(str(value(deal, "comment", "")))
+        comment_match = parse_trade_comment(str(value(deal, "comment", "")))
         belongs_to_tp1 = bool(known_tickets.intersection(deal_tickets)) or bool(
             comment_match
-            and comment_match.group("signal") == signal_prefix
-            and int(comment_match.group("tp")) == 1
+            and comment_match.signal_prefix == signal_prefix
+            and comment_match.tp_index == 1
         )
         if not belongs_to_tp1:
             continue
