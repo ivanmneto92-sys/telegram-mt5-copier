@@ -281,8 +281,39 @@ class SimulatedMT5Client:
         self.order_send_called = True
         self.order_send_requests.append(dict(request))
         if self.order_send_results:
-            return self.order_send_results.pop(0)
-        return {"retcode": 10009, "order": 100000 + len(self.order_send_requests), "comment": "simulated"}
+            result = self.order_send_results.pop(0)
+        else:
+            result = {"retcode": 10009, "order": 100000 + len(self.order_send_requests), "comment": "simulated"}
+        result_retcode = (
+            result.get("retcode", -1)
+            if isinstance(result, dict)
+            else getattr(result, "retcode", -1)
+        )
+        if int(result_retcode) in (0, 10008, 10009):
+            action = int(request.get("action", -1))
+            position_ticket = int(request.get("position", 0) or 0)
+            if action == 6 and position_ticket:
+                self._positions = tuple(
+                    {
+                        **position,
+                        "sl": request.get("sl", position.get("sl", 0)),
+                    }
+                    if isinstance(position, dict)
+                    and int(position.get("ticket", 0) or 0) == position_ticket
+                    else position
+                    for position in self._positions
+                )
+            elif action == 1 and position_ticket:
+                self._positions = tuple(
+                    position
+                    for position in self._positions
+                    if int(
+                        position.get("ticket", 0)
+                        if isinstance(position, dict)
+                        else getattr(position, "ticket", 0)
+                    ) != position_ticket
+                )
+        return result
 
     def constant(self, name: str, default: int) -> int:
         constants = {

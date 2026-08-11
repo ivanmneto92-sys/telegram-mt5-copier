@@ -875,6 +875,23 @@ def run_schema_migrations(connection: sqlite3.Connection) -> None:
     ensure_column(connection, "execution_orders", "fee", "TEXT")
     ensure_column(connection, "execution_orders", "net_profit", "TEXT")
     ensure_column(connection, "execution_orders", "mt5_close_deal_ticket", "TEXT")
+    ensure_column(
+        connection,
+        "execution_orders",
+        "be_status",
+        "TEXT NOT NULL DEFAULT 'not_required'",
+    )
+    ensure_column(connection, "execution_orders", "be_requested_at", "TEXT")
+    ensure_column(connection, "execution_orders", "be_applied_at", "TEXT")
+    ensure_column(connection, "execution_orders", "be_target_sl", "TEXT")
+    ensure_column(connection, "execution_orders", "be_confirmed_sl", "TEXT")
+    ensure_column(connection, "execution_orders", "be_last_error", "TEXT")
+    ensure_column(
+        connection,
+        "execution_orders",
+        "be_attempts",
+        "INTEGER NOT NULL DEFAULT 0",
+    )
 
 
 def ensure_column(connection: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:

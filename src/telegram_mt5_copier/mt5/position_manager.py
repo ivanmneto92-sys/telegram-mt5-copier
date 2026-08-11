@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
 import logging
 from pathlib import Path
@@ -15,13 +16,40 @@ from .ipc_lock import MT5OperationLock
 from .pending_order_executor import (
     MT5_MAGIC_NUMBER,
     is_successful_mt5_result,
+    market_filling_constant,
     mt5_constant,
     mt5_failure_message,
+    pending_order_type_constant,
 )
 from .settlement_monitor import SettlementMonitor
+from ..telegram_notifier import TelegramUserNotifier
 
 COMMENT_RE = re.compile(r"^tgcp (?P<signal>[0-9a-f]{8}) TP(?P<tp>\d+)$")
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ManagedOrder:
+    order_id: int
+    group_id: int
+    tp_index: int
+    direction: str
+    original_stop: Decimal
+    take_profit: Decimal
+    expiration_at: str
+
+
+@dataclass(frozen=True)
+class ProtectionOutcome:
+    state: str
+    changed: bool = False
+    target_sl: Decimal | None = None
+    confirmed_sl: Decimal | None = None
+    error: str | None = None
+
+    @property
+    def protected(self) -> bool:
+        return self.state in {"applied", "already_protected", "closed_at_market"}
 
 
 class PositionManager:
@@ -31,11 +59,13 @@ class PositionManager:
         accounts: MT5AccountService,
         client_factory: Callable[[], object],
         settlement_monitor: SettlementMonitor | None = None,
+        notifier: TelegramUserNotifier | None = None,
     ) -> None:
         self.database_path = database_path
         self.accounts = accounts
         self.client_factory = client_factory
         self.settlement_monitor = settlement_monitor
+        self.notifier = notifier
         self._last_settlement_check: dict[int, float] = {}
 
     def manage_account(self, account: MT5Account, profile: ExecutionProfile) -> int:
@@ -50,83 +80,73 @@ class PositionManager:
             password = self.accounts.decrypted_password_for_account(account)
             if not client.initialize(account.terminal_path, int(account.login), password, account.server_name):
                 return 0
-            managed_positions: list[tuple[object, tuple[int, int, int, str, Decimal, Decimal, str]]] = []
+            managed_positions: list[tuple[object, ManagedOrder]] = []
             for position in client.positions_get():
                 if int(value(position, "magic", 0) or 0) != MT5_MAGIC_NUMBER:
                     continue
-                match = COMMENT_RE.match(str(value(position, "comment", "")))
-                if match is None:
-                    continue
-                order_record = self._find_order(
-                    account.id,
-                    match.group("signal"),
-                    int(match.group("tp")),
-                )
+                order_record = self._find_order_for_item(account.id, position)
                 if order_record is None:
+                    LOGGER.warning(
+                        "Posicao do copiador sem vinculo no banco. account=%s ticket=%s comment=%r",
+                        account.id,
+                        value(position, "ticket", 0),
+                        value(position, "comment", ""),
+                    )
                     continue
-                order_id, _group_id, _tp_index, _direction, _original_stop, _take_profit, _expiration_at = order_record
                 ticket = int(value(position, "ticket", 0) or 0)
-                self._mark_filled(order_id, ticket)
+                self._mark_filled(order_record.order_id, ticket)
                 managed_positions.append((position, order_record))
 
             history_deals: tuple[object, ...] = ()
             if managed_positions:
                 now = datetime.now(tz=timezone.utc)
-                history_deals = client.history_deals_get(now - timedelta(days=7), now)
+                history_deals = client.history_deals_get(now - timedelta(days=30), now)
             managed_group_ids = {
-                order_record[1] for _position, order_record in managed_positions
+                order_record.group_id
+                for _position, order_record in managed_positions
+                if order_record.tp_index > 1
             }
             tp1_reached_groups = {
                 group_id
                 for group_id in managed_group_ids
                 if self._tp1_reached(client, group_id, history_deals)
             }
-            breakeven_changed_groups: set[int] = set()
+            group_protection: dict[int, list[ProtectionOutcome]] = {}
             for position, order_record in managed_positions:
-                _order_id, group_id, tp_index, direction, original_stop, _take_profit, _expiration_at = order_record
                 force_breakeven = (
                     profile.tp1_breakeven_enabled
-                    and group_id in tp1_reached_groups
-                    and tp_index > 1
+                    and order_record.group_id in tp1_reached_groups
+                    and order_record.tp_index > 1
                 )
                 if not force_breakeven and not (
                     profile.breakeven_enabled or profile.trailing_enabled
                 ):
                     continue
-                if self._protect_position(
+                outcome = self._protect_position(
                     client,
                     position,
-                    direction,
-                    original_stop,
+                    order_record.direction,
+                    order_record.original_stop,
                     profile,
                     force_breakeven=force_breakeven,
-                ):
+                )
+                if outcome.changed:
                     changed += 1
-                    if force_breakeven:
-                        breakeven_changed_groups.add(group_id)
-            for group_id in breakeven_changed_groups:
-                self._mark_breakeven_applied(group_id)
-
+                if force_breakeven:
+                    self._record_be_outcome(order_record, outcome)
+                    group_protection.setdefault(order_record.group_id, []).append(outcome)
             for pending_order in client.orders_get():
                 if int(value(pending_order, "magic", 0) or 0) != MT5_MAGIC_NUMBER:
                     continue
-                match = COMMENT_RE.match(str(value(pending_order, "comment", "")))
-                if match is None:
-                    continue
-                order_record = self._find_order(
-                    account.id,
-                    match.group("signal"),
-                    int(match.group("tp")),
-                )
+                order_record = self._find_order_for_item(account.id, pending_order)
                 if order_record is None:
                     continue
-                order_id, group_id, _tp_index, direction, stop_loss, take_profit, expiration_at = order_record
                 symbol = str(value(pending_order, "symbol", ""))
                 tick = client.symbol_info_tick(symbol)
                 if tick is None:
                     continue
                 ticket = int(value(pending_order, "ticket", value(pending_order, "order", 0)) or 0)
-                if group_id in tp1_reached_groups:
+                if order_record.group_id in tp1_reached_groups:
                     result = client.order_send(
                         {
                             "action": mt5_constant(client, "TRADE_ACTION_REMOVE", 8),
@@ -136,10 +156,10 @@ class PositionManager:
                         }
                     )
                     if is_successful_mt5_result(client, result, check=False):
-                        self._mark_cancelled(order_id, group_id)
+                        self._mark_cancelled(order_record.order_id, order_record.group_id)
                         changed += 1
                     continue
-                if datetime.fromisoformat(expiration_at) <= datetime.now(tz=timezone.utc):
+                if datetime.fromisoformat(order_record.expiration_at) <= datetime.now(tz=timezone.utc):
                     result = client.order_send(
                         {
                             "action": mt5_constant(client, "TRADE_ACTION_REMOVE", 8),
@@ -149,14 +169,16 @@ class PositionManager:
                         }
                     )
                     if is_successful_mt5_result(client, result, check=False):
-                        self._mark_expired(order_id, group_id)
+                        self._mark_expired(order_record.order_id, order_record.group_id)
                         changed += 1
                     continue
-                current_price = tick.bid if direction == "BUY" else tick.ask
+                current_price = tick.bid if order_record.direction == "BUY" else tick.ask
                 invalidated = (
-                    direction == "BUY" and (current_price <= stop_loss or current_price >= take_profit)
+                    order_record.direction == "BUY"
+                    and (current_price <= order_record.original_stop or current_price >= order_record.take_profit)
                 ) or (
-                    direction == "SELL" and (current_price >= stop_loss or current_price <= take_profit)
+                    order_record.direction == "SELL"
+                    and (current_price >= order_record.original_stop or current_price <= order_record.take_profit)
                 )
                 if not invalidated:
                     continue
@@ -169,8 +191,13 @@ class PositionManager:
                     }
                 )
                 if is_successful_mt5_result(client, result, check=False):
-                    self._mark_cancelled(order_id, group_id)
+                    self._mark_cancelled(order_record.order_id, order_record.group_id)
                     changed += 1
+            for group_id, outcomes in group_protection.items():
+                if outcomes and all(outcome.protected for outcome in outcomes):
+                    if self._all_open_targets_protected(group_id):
+                        if self._mark_breakeven_applied(group_id):
+                            self._notify_group_be(account, group_id, outcomes)
             if self.settlement_monitor is not None:
                 last_check = self._last_settlement_check.get(account.id, 0.0)
                 if time.monotonic() - last_check >= 3:
@@ -191,28 +218,47 @@ class PositionManager:
         profile: ExecutionProfile,
         *,
         force_breakeven: bool = False,
-    ) -> bool:
+    ) -> ProtectionOutcome:
         symbol = str(value(position, "symbol", ""))
         info = client.symbol_info(symbol)
         tick = client.symbol_info_tick(symbol)
         if info is None or tick is None:
-            return False
+            return ProtectionOutcome("failed", error="symbol_or_tick_unavailable")
         entry = Decimal(str(value(position, "price_open", 0)))
         current_sl = Decimal(str(value(position, "sl", 0) or 0))
         take_profit = Decimal(str(value(position, "tp", 0) or 0))
         initial_risk = abs(entry - original_stop)
         if entry <= 0 or initial_risk <= 0:
-            return False
+            return ProtectionOutcome("failed", error="invalid_entry_or_initial_risk")
 
         current_price = tick.bid if direction == "BUY" else tick.ask
         favorable_move = current_price - entry if direction == "BUY" else entry - current_price
         if not force_breakeven and favorable_move < initial_risk:
-            return False
+            return ProtectionOutcome("not_triggered")
+        already_protected = (
+            direction == "BUY" and current_sl >= entry
+        ) or (
+            direction == "SELL" and current_sl > 0 and current_sl <= entry
+        )
+        if force_breakeven and already_protected:
+            return ProtectionOutcome(
+                "already_protected",
+                target_sl=entry,
+                confirmed_sl=current_sl,
+            )
         if force_breakeven and (
             (direction == "BUY" and current_price <= entry)
             or (direction == "SELL" and current_price >= entry)
         ):
-            return False
+            return self._close_after_missed_breakeven(
+                client,
+                position,
+                direction,
+                info,
+                tick,
+                profile.max_slippage_points,
+                entry,
+            )
 
         proposed_sl = entry
         if profile.trailing_enabled and favorable_move >= initial_risk:
@@ -226,7 +272,7 @@ class PositionManager:
             direction == "SELL" and (current_sl == 0 or proposed_sl < current_sl)
         )
         if not improves:
-            return False
+            return ProtectionOutcome("not_improved")
         request = {
             "action": mt5_constant(client, "TRADE_ACTION_SLTP", 6),
             "position": int(value(position, "ticket", 0)),
@@ -239,22 +285,131 @@ class PositionManager:
         result = client.order_send(request)
         successful = is_successful_mt5_result(client, result, check=False)
         if not successful:
+            error = mt5_failure_message(client, result)
             LOGGER.warning(
                 "Protecao MT5 rejeitada. position=%s symbol=%s sl=%s motivo=%s last_error=%s",
                 request["position"],
                 symbol,
                 proposed_sl,
-                mt5_failure_message(client, result),
+                error,
                 client.last_error(),
             )
-        elif force_breakeven:
-            LOGGER.info(
-                "BE apos TP1 aplicado. position=%s symbol=%s sl=%s",
+            return ProtectionOutcome("failed", target_sl=proposed_sl, error=error)
+
+        confirmed_sl = self._confirmed_position_sl(
+            client,
+            int(request["position"]),
+            direction,
+            proposed_sl,
+            Decimal(str(info.trade_tick_size)),
+        )
+        if confirmed_sl is None:
+            LOGGER.warning(
+                "Protecao MT5 aceita, mas nao confirmada. position=%s symbol=%s sl=%s",
                 request["position"],
                 symbol,
                 proposed_sl,
             )
-        return successful
+            return ProtectionOutcome(
+                "failed",
+                changed=True,
+                target_sl=proposed_sl,
+                error="broker_sl_not_confirmed",
+            )
+        if force_breakeven:
+            LOGGER.info(
+                "BE apos TP1 confirmado. position=%s symbol=%s sl=%s",
+                request["position"],
+                symbol,
+                confirmed_sl,
+            )
+        return ProtectionOutcome(
+            "applied",
+            changed=True,
+            target_sl=proposed_sl,
+            confirmed_sl=confirmed_sl,
+        )
+
+    def _confirmed_position_sl(
+        self,
+        client: object,
+        ticket: int,
+        direction: str,
+        target_sl: Decimal,
+        tolerance: Decimal,
+    ) -> Decimal | None:
+        for attempt in range(3):
+            positions = tuple(client.positions_get())
+            position = next(
+                (
+                    item
+                    for item in positions
+                    if int(value(item, "ticket", 0) or 0) == ticket
+                ),
+                None,
+            )
+            if position is None:
+                return target_sl
+            actual_sl = Decimal(str(value(position, "sl", 0) or 0))
+            confirmed = (
+                direction == "BUY" and actual_sl >= target_sl - tolerance
+            ) or (
+                direction == "SELL" and actual_sl > 0 and actual_sl <= target_sl + tolerance
+            )
+            if confirmed:
+                return actual_sl
+            if attempt < 2:
+                time.sleep(0.05)
+        return None
+
+    def _close_after_missed_breakeven(
+        self,
+        client: object,
+        position: object,
+        direction: str,
+        info: object,
+        tick: object,
+        max_slippage_points: int,
+        target_sl: Decimal,
+    ) -> ProtectionOutcome:
+        ticket = int(value(position, "ticket", 0) or 0)
+        symbol = str(value(position, "symbol", ""))
+        close_direction = "SELL" if direction == "BUY" else "BUY"
+        close_price = tick.bid if direction == "BUY" else tick.ask
+        request = {
+            "action": mt5_constant(client, "TRADE_ACTION_DEAL", 1),
+            "position": ticket,
+            "symbol": symbol,
+            "volume": float(value(position, "volume", 0) or 0),
+            "type": pending_order_type_constant(client, close_direction),
+            "price": float(close_price),
+            "deviation": int(max_slippage_points),
+            "magic": MT5_MAGIC_NUMBER,
+            "comment": "tgcp be emergency",
+            "type_time": mt5_constant(client, "ORDER_TIME_GTC", 0),
+            "type_filling": market_filling_constant(client, info),
+        }
+        result = client.order_send(request)
+        if not is_successful_mt5_result(client, result, check=False):
+            error = f"emergency_close_failed:{mt5_failure_message(client, result)}"
+            LOGGER.error(
+                "BE perdido e fechamento emergencial rejeitado. position=%s symbol=%s motivo=%s",
+                ticket,
+                symbol,
+                error,
+            )
+            return ProtectionOutcome("failed", target_sl=target_sl, error=error)
+        LOGGER.warning(
+            "Preco retornou antes do BE; posicao fechada a mercado. position=%s symbol=%s price=%s",
+            ticket,
+            symbol,
+            close_price,
+        )
+        return ProtectionOutcome(
+            "closed_at_market",
+            changed=True,
+            target_sl=target_sl,
+        )
 
     def _tp1_reached(
         self,
@@ -329,22 +484,198 @@ class PositionManager:
                 (now, now, group_id),
             ).close()
 
-    def _mark_breakeven_applied(self, group_id: int) -> None:
+    def _mark_breakeven_applied(self, group_id: int) -> bool:
         now = utc_now()
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE execution_groups
+                SET breakeven_applied_at = ?, updated_at = ?
+                WHERE id = ? AND breakeven_applied_at IS NULL
+                """,
+                (now, now, group_id),
+            )
+            try:
+                return cursor.rowcount > 0
+            finally:
+                cursor.close()
+
+    def _record_be_outcome(
+        self,
+        order: ManagedOrder,
+        outcome: ProtectionOutcome,
+    ) -> None:
+        now = utc_now()
+        status = outcome.state
         with connect_database(self.database_path) as connection:
             connection.execute(
                 """
-                UPDATE execution_groups
-                SET breakeven_applied_at = COALESCE(breakeven_applied_at, ?),
+                UPDATE execution_orders
+                SET be_status = ?,
+                    be_requested_at = COALESCE(be_requested_at, ?),
+                    be_applied_at = CASE WHEN ? IN (
+                        'applied', 'already_protected', 'closed_at_market'
+                    ) THEN COALESCE(be_applied_at, ?) ELSE be_applied_at END,
+                    be_target_sl = ?,
+                    be_confirmed_sl = COALESCE(?, be_confirmed_sl),
+                    be_last_error = ?,
+                    be_attempts = be_attempts + CASE WHEN ? IN (
+                        'applied', 'closed_at_market', 'failed'
+                    ) THEN 1 ELSE 0 END,
                     updated_at = ?
                 WHERE id = ?
                 """,
-                (now, now, group_id),
+                (
+                    status,
+                    now,
+                    status,
+                    now,
+                    str(outcome.target_sl) if outcome.target_sl is not None else None,
+                    str(outcome.confirmed_sl) if outcome.confirmed_sl is not None else None,
+                    outcome.error,
+                    status,
+                    now,
+                    order.order_id,
+                ),
             ).close()
+        if outcome.state == "failed":
+            self._notify_be_failure(order, outcome)
+        elif outcome.state == "closed_at_market":
+            self._notify_be_emergency(order)
+
+    def _all_open_targets_protected(self, group_id: int) -> bool:
+        with connect_database(self.database_path) as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*),
+                       SUM(CASE WHEN be_status IN (
+                           'applied', 'already_protected', 'closed_at_market'
+                       ) THEN 1 ELSE 0 END)
+                FROM execution_orders
+                WHERE execution_group_id = ? AND tp_index > 1
+                  AND status IN (
+                      'pending_submission', 'pending_active', 'submitted', 'filled'
+                  )
+                """,
+                (group_id,),
+            ).fetchone()
+        total = int(row[0] or 0)
+        protected = int(row[1] or 0)
+        return total > 0 and total == protected
+
+    def _notify_group_be(
+        self,
+        account: MT5Account,
+        group_id: int,
+        outcomes: list[ProtectionOutcome],
+    ) -> None:
+        emergency = any(outcome.state == "closed_at_market" for outcome in outcomes)
+        if emergency:
+            message = (
+                "⚠️ PROTEÇÃO APÓS TP1\n\n"
+                f"Conta: {account.masked_login}\n"
+                "O preço voltou à entrada antes de o Stop ser movido. "
+                "As posições restantes foram fechadas a mercado para limitar a exposição.\n\n"
+                "O resultado pode variar alguns centavos por spread, comissão e slippage."
+            )
+            event_type = "breakeven_emergency_close"
+        else:
+            message = (
+                "🛡️ BREAKEVEN CONFIRMADO\n\n"
+                f"Conta: {account.masked_login}\n"
+                "O TP1 foi atingido e o MetaTrader 5 confirmou a proteção "
+                "das posições restantes na entrada."
+            )
+            event_type = "breakeven_confirmed"
+        self._notify_once(group_id, None, event_type, message)
+
+    def _notify_be_failure(
+        self,
+        order: ManagedOrder,
+        outcome: ProtectionOutcome,
+    ) -> None:
+        message = (
+            "🚨 FALHA NA PROTEÇÃO DE BREAKEVEN\n\n"
+            f"Ordem TP{order.tp_index}\n"
+            f"Motivo técnico: {outcome.error or 'nao_confirmado'}\n\n"
+            "Recomendação: abra o MetaTrader 5 e proteja ou encerre a posição manualmente. "
+            "O sistema continuará tentando enquanto a posição permanecer aberta."
+        )
+        self._notify_once(
+            order.group_id,
+            order.order_id,
+            "breakeven_failed",
+            message,
+        )
+
+    def _notify_be_emergency(self, order: ManagedOrder) -> None:
+        self._notify_once(
+            order.group_id,
+            order.order_id,
+            "breakeven_emergency_close",
+            (
+                "⚠️ PROTEÇÃO APÓS TP1\n\n"
+                f"Ordem TP{order.tp_index}\n"
+                "O preço voltou à entrada antes de o Stop ser confirmado. "
+                "A posição foi fechada a mercado para limitar a exposição.\n\n"
+                "O resultado pode variar por spread, comissão e slippage."
+            ),
+        )
+
+    def _notify_once(
+        self,
+        group_id: int,
+        order_id: int | None,
+        event_type: str,
+        message: str,
+    ) -> None:
+        if self.notifier is None:
+            return
+        with connect_database(self.database_path) as connection:
+            row = connection.execute(
+                "SELECT telegram_user_id FROM users WHERE id = "
+                "(SELECT user_id FROM execution_groups WHERE id = ?)",
+                (group_id,),
+            ).fetchone()
+            if row is None:
+                return
+            exists = connection.execute(
+                """
+                SELECT 1 FROM execution_notifications
+                WHERE event_type = ? AND execution_group_id = ?
+                  AND execution_order_id IS ?
+                LIMIT 1
+                """,
+                (event_type, group_id, order_id),
+            ).fetchone()
+            if exists is not None:
+                return
+            cursor = connection.execute(
+                """
+                INSERT INTO execution_notifications (
+                    event_type, execution_group_id, execution_order_id, created_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (event_type, group_id, order_id, utc_now()),
+            )
+            inserted = cursor.rowcount > 0
+            cursor.close()
+        if not inserted:
+            return
+        if not self.notifier.send(int(row[0]), message):
+            with connect_database(self.database_path) as connection:
+                connection.execute(
+                    """
+                    DELETE FROM execution_notifications
+                    WHERE event_type = ? AND execution_group_id = ?
+                      AND execution_order_id IS ?
+                    """,
+                    (event_type, group_id, order_id),
+                ).close()
 
     def _find_order(
         self, account_id: int, signal_prefix: str, tp_index: int
-    ) -> tuple[int, int, int, str, Decimal, Decimal, str] | None:
+    ) -> ManagedOrder | None:
         with connect_database(self.database_path) as connection:
             cursor = connection.execute(
                 """
@@ -365,14 +696,65 @@ class PositionManager:
                 cursor.close()
         if row is None:
             return None
-        return (
-            int(row[0]),
-            int(row[1]),
-            int(row[2]),
-            str(row[3]),
-            Decimal(str(row[4])),
-            Decimal(str(row[5])),
-            str(row[6]),
+        return ManagedOrder(
+            order_id=int(row[0]),
+            group_id=int(row[1]),
+            tp_index=int(row[2]),
+            direction=str(row[3]),
+            original_stop=Decimal(str(row[4])),
+            take_profit=Decimal(str(row[5])),
+            expiration_at=str(row[6]),
+        )
+
+    def _find_order_for_item(
+        self,
+        account_id: int,
+        item: object,
+    ) -> ManagedOrder | None:
+        tickets = {
+            str(candidate)
+            for candidate in (
+                value(item, "ticket", ""),
+                value(item, "order", ""),
+                value(item, "identifier", ""),
+            )
+            if candidate not in (None, "", 0)
+        }
+        if tickets:
+            placeholders = ",".join("?" for _ in tickets)
+            parameters: list[object] = [account_id, *tickets, *tickets]
+            with connect_database(self.database_path) as connection:
+                row = connection.execute(
+                    f"""
+                    SELECT o.id, g.id, o.tp_index, g.direction, o.stop_loss,
+                           o.take_profit, g.expiration_at
+                    FROM execution_orders o
+                    JOIN execution_groups g ON g.id = o.execution_group_id
+                    WHERE g.mt5_account_id = ? AND (
+                        o.mt5_position_ticket IN ({placeholders}) OR
+                        o.mt5_order_ticket IN ({placeholders})
+                    )
+                    ORDER BY o.id DESC LIMIT 1
+                    """,
+                    parameters,
+                ).fetchone()
+            if row is not None:
+                return ManagedOrder(
+                    order_id=int(row[0]),
+                    group_id=int(row[1]),
+                    tp_index=int(row[2]),
+                    direction=str(row[3]),
+                    original_stop=Decimal(str(row[4])),
+                    take_profit=Decimal(str(row[5])),
+                    expiration_at=str(row[6]),
+                )
+        match = COMMENT_RE.match(str(value(item, "comment", "")))
+        if match is None:
+            return None
+        return self._find_order(
+            account_id,
+            match.group("signal"),
+            int(match.group("tp")),
         )
 
     def _mark_filled(self, order_id: int, position_ticket: int) -> None:

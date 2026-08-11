@@ -945,8 +945,19 @@ class MT5AccountService:
                 FROM mt5_accounts a
                 JOIN users u ON u.id = a.user_id
                 JOIN execution_profiles p ON p.user_id = a.user_id AND p.mt5_account_id = a.id
-                WHERE u.status = 'active'
-                  AND p.enabled = 1
+                WHERE (
+                    (u.status = 'active' AND p.enabled = 1)
+                    OR EXISTS (
+                        SELECT 1
+                        FROM execution_groups g
+                        JOIN execution_orders o ON o.execution_group_id = g.id
+                        WHERE g.mt5_account_id = a.id
+                          AND o.status IN (
+                              'pending_submission', 'pending_active',
+                              'submitted', 'filled'
+                          )
+                    )
+                )
                 ORDER BY a.id ASC
                 """
             )

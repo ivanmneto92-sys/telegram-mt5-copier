@@ -52,6 +52,7 @@ def main() -> int:
             accounts,
             MT5Client,
             settlement_monitor,
+            user_notifier,
         )
         pending_monitor = PendingOrderMonitor(config.database_path)
         workers: dict[int, MT5AccountWorker] = {}

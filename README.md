@@ -372,6 +372,23 @@ preservando a proteção de breakeven após o TP1. Se houver falha durante um
 envio parcial a mercado, o executor tenta fechar imediatamente as posições
 daquele sinal que já foram abertas.
 
+## Proteção confirmada após o TP1
+
+A partir da versão `0.25.0`, o breakeven após o TP1 é acompanhado por posição.
+O Worker identifica a operação primeiro pelo ticket salvo no banco e usa o
+comentário somente como alternativa, protegendo também operações cujo comentário
+foi abreviado ou alterado pela corretora. Depois de enviar o novo Stop, o sistema
+relê a posição no MT5 e só registra o BE como concluído quando todas as posições
+restantes estiverem confirmadas.
+
+Falhas ficam registradas individualmente e geram um aviso no Telegram com a
+recomendação de proteção manual. Se o TP1 já tiver sido atingido, mas o preço
+voltar à entrada antes de o MT5 confirmar o novo Stop, a posição restante é
+encerrada a mercado para limitar a exposição. Spread, comissão e slippage podem
+fazer esse encerramento ficar ligeiramente diferente de zero. O gerenciamento
+de posições existentes permanece ativo mesmo quando o usuário ou o perfil está
+pausado para novas entradas.
+
 ## Instâncias white-label na mesma VPS
 
 A versão `0.18.0` permite executar cópias independentes para marcas diferentes.

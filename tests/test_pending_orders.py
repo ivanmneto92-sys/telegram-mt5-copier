@@ -629,6 +629,25 @@ class PendingOrderTests(unittest.TestCase):
         self.users.set_daily_signal_pause_until(self.user.id, past)
         self.assertEqual(len(self.accounts.accounts_for_approved_users()), 1)
 
+    def test_usuario_pausado_mantem_worker_enquanto_existe_ordem_aberta(self) -> None:
+        result = self.executor().execute_for_account(
+            parse_signal_text(BUY_SIGNAL).signal,
+            self.account,
+            self.profile(),
+        )
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                "UPDATE execution_orders SET status='filled' "
+                "WHERE execution_group_id=? AND tp_index=1",
+                (result.group_result.group.id,),
+            ).close()
+        self.users.set_status(self.user.id, "paused")
+
+        active = self.accounts.accounts_for_active_users()
+
+        self.assertEqual(len(active), 1)
+        self.assertEqual(active[0][0].id, self.account.id)
+
     def test_kill_switch_bloqueia_execucao_demo(self) -> None:
         client = SimulatedMT5Client()
         result = self.executor(
@@ -1271,6 +1290,163 @@ class PendingOrderTests(unittest.TestCase):
         self.assertEqual(changed, 1)
         self.assertEqual(client.order_send_requests[0]["position"], 9022)
         self.assertEqual(client.order_send_requests[0]["sl"], 4061.0)
+
+    def test_worker_encontra_posicao_por_ticket_quando_corretora_altera_comentario(self) -> None:
+        signal = parse_signal_text(BUY_SIGNAL).signal
+        result = self.executor().execute_for_account(signal, self.account, self.profile())
+        group_id = result.group_result.group.id
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                """
+                UPDATE execution_orders
+                SET mt5_position_ticket='9202'
+                WHERE execution_group_id=? AND tp_index=2
+                """,
+                (group_id,),
+            ).close()
+            connection.execute(
+                """
+                UPDATE execution_orders SET status='cancelled'
+                WHERE execution_group_id=? AND tp_index>2
+                """,
+                (group_id,),
+            ).close()
+        client = SimulatedMT5Client(
+            tick=TickInfo(bid=Decimal("4066"), ask=Decimal("4066")),
+            positions=(
+                {
+                    "magic": MT5_MAGIC_NUMBER,
+                    "comment": "comentario alterado pela corretora",
+                    "ticket": 9202,
+                    "symbol": "XAUUSD",
+                    "price_open": 4061,
+                    "sl": 4044,
+                    "tp": 4071,
+                    "volume": 0.01,
+                },
+            ),
+        )
+
+        changed = PositionManager(
+            self.database_path, self.accounts, lambda: client
+        ).manage_account(self.account, self.profile())
+
+        self.assertEqual(changed, 1)
+        with connect_database(self.database_path) as connection:
+            row = connection.execute(
+                """
+                SELECT o.be_status,o.be_confirmed_sl,g.breakeven_applied_at
+                FROM execution_orders o JOIN execution_groups g
+                  ON g.id=o.execution_group_id
+                WHERE o.execution_group_id=? AND o.tp_index=2
+                """,
+                (group_id,),
+            ).fetchone()
+        self.assertEqual(row[0], "applied")
+        self.assertEqual(Decimal(row[1]), Decimal("4061"))
+        self.assertIsNotNone(row[2])
+
+    def test_worker_fecha_restante_quando_preco_retorna_antes_do_be(self) -> None:
+        signal = parse_signal_text(BUY_SIGNAL).signal
+        result = self.executor().execute_for_account(signal, self.account, self.profile())
+        group_id = result.group_result.group.id
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                "UPDATE execution_orders SET status='cancelled' "
+                "WHERE execution_group_id=? AND tp_index>2",
+                (group_id,),
+            ).close()
+        client = SimulatedMT5Client(
+            tick=TickInfo(bid=Decimal("4060"), ask=Decimal("4060.2")),
+            positions=(
+                {
+                    "magic": MT5_MAGIC_NUMBER,
+                    "comment": f"tgcp {signal.signature[:8]} TP2",
+                    "ticket": 9302,
+                    "symbol": "XAUUSD",
+                    "price_open": 4061,
+                    "sl": 4044,
+                    "tp": 4071,
+                    "volume": 0.01,
+                    "type": 0,
+                },
+            ),
+            history_deals=(
+                {
+                    "magic": MT5_MAGIC_NUMBER,
+                    "comment": f"tgcp {signal.signature[:8]} TP1",
+                    "position_id": 9301,
+                    "price": 4066,
+                },
+            ),
+        )
+
+        changed = PositionManager(
+            self.database_path, self.accounts, lambda: client
+        ).manage_account(self.account, self.profile())
+
+        self.assertEqual(changed, 1)
+        self.assertEqual(client.order_send_requests[0]["action"], 1)
+        self.assertEqual(client.order_send_requests[0]["position"], 9302)
+        self.assertEqual(client.order_send_requests[0]["type"], 1)
+        with connect_database(self.database_path) as connection:
+            status = connection.execute(
+                "SELECT be_status FROM execution_orders "
+                "WHERE execution_group_id=? AND tp_index=2",
+                (group_id,),
+            ).fetchone()[0]
+        self.assertEqual(status, "closed_at_market")
+
+    def test_grupo_nao_e_marcado_quando_uma_posicao_nao_confirma_be(self) -> None:
+        signal = parse_signal_text(BUY_SIGNAL).signal
+        result = self.executor().execute_for_account(signal, self.account, self.profile())
+        group_id = result.group_result.group.id
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                "UPDATE execution_orders SET status='cancelled' "
+                "WHERE execution_group_id=? AND tp_index>3",
+                (group_id,),
+            ).close()
+
+        class PartiallyFailingClient(SimulatedMT5Client):
+            def order_send(self, request: dict[str, object]) -> dict[str, object]:
+                if int(request.get("position", 0)) == 9403:
+                    self.order_send_requests.append(dict(request))
+                    return {"retcode": 10030, "comment": "invalid stops"}
+                return super().order_send(request)
+
+        client = PartiallyFailingClient(
+            tick=TickInfo(bid=Decimal("4066"), ask=Decimal("4066")),
+            positions=(
+                {
+                    "magic": MT5_MAGIC_NUMBER, "comment": f"tgcp {signal.signature[:8]} TP2",
+                    "ticket": 9402, "symbol": "XAUUSD", "price_open": 4061,
+                    "sl": 4044, "tp": 4071, "volume": 0.01,
+                },
+                {
+                    "magic": MT5_MAGIC_NUMBER, "comment": f"tgcp {signal.signature[:8]} TP3",
+                    "ticket": 9403, "symbol": "XAUUSD", "price_open": 4061,
+                    "sl": 4044, "tp": 4076, "volume": 0.01,
+                },
+            ),
+        )
+
+        PositionManager(
+            self.database_path, self.accounts, lambda: client
+        ).manage_account(self.account, self.profile())
+
+        with connect_database(self.database_path) as connection:
+            group_be = connection.execute(
+                "SELECT breakeven_applied_at FROM execution_groups WHERE id=?",
+                (group_id,),
+            ).fetchone()[0]
+            statuses = connection.execute(
+                "SELECT tp_index,be_status FROM execution_orders "
+                "WHERE execution_group_id=? AND tp_index IN (2,3) ORDER BY tp_index",
+                (group_id,),
+            ).fetchall()
+        self.assertIsNone(group_be)
+        self.assertEqual(statuses, [(2, "applied"), (3, "failed")])
 
     def test_worker_cancela_entrada_pendente_restante_apos_tp1(self) -> None:
         signal = parse_signal_text(BUY_SIGNAL).signal
