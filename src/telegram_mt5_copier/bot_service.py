@@ -1144,6 +1144,34 @@ class BotService:
             if risk_mode == "risk_percent"
             else f"Lote fixo total de {setting_value(fixed_lot)} por sinal"
         )
+        risk_guidance: list[str]
+        if risk_mode == "risk_percent":
+            estimated_limit = (
+                account.equity * risk_percent / Decimal("100")
+                if account is not None and account.equity is not None and account.equity > 0
+                else None
+            )
+            risk_guidance = [
+                "",
+                "🛡️ COMO O SISTEMA VAI OPERAR",
+                (
+                    f"Equity registrada: {money_value(account.equity)} | "
+                    f"limite estimado por sinal: {money_value(estimated_limit)}."
+                    if estimated_limit is not None and account is not None
+                    else "O valor monetário será calculado usando a equity disponível no MT5 no momento do sinal."
+                ),
+                "O Stop Loss técnico da sala será mantido e o lote será reduzido para respeitar o percentual.",
+                "Se o lote mínimo da corretora exceder esse limite, o sinal será bloqueado automaticamente.",
+                "Recomendação: mantenha essa proteção ativa e não aumente o lote manualmente após o envio.",
+            ]
+        else:
+            risk_guidance = [
+                "",
+                "⚠️ COMO O SISTEMA VAI OPERAR",
+                "O lote fixo será usado em todos os sinais, independentemente da distância até o Stop Loss.",
+                "O percentual exibido abaixo está salvo, mas não está ativo.",
+                "Recomendação: use risco percentual se quiser limitar a perda estimada de cada operação pela banca.",
+            ]
         return BotResponse(
             "\n".join(
                 [
@@ -1170,6 +1198,7 @@ class BotService:
                     "",
                     f"Spread máximo: {max_spread_points if max_spread_points is not None else 'Não configurado'} pontos",
                     f"Slippage máximo: {max_slippage_points if max_slippage_points is not None else 'Não configurado'} pontos",
+                    *risk_guidance,
                     "",
                     "Selecione uma configuração:",
                 ]

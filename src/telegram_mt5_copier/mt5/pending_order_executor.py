@@ -184,7 +184,13 @@ class PendingOrderExecutor:
                 return PendingExecutionResult(
                     account=account,
                     group_result=group_result,
-                    message=format_rejection_message(exc.reason, account),
+                    message=format_rejection_message(
+                        exc.reason,
+                        account,
+                        profile=profile,
+                        symbol_info=symbol_info,
+                        plan=exc.plan,
+                    ),
                 )
             return PendingExecutionResult(
                 account=account,
@@ -453,7 +459,14 @@ class PendingOrderExecutor:
         return PendingExecutionResult(
             account=account,
             group_result=ExecutionGroupResult(group=group, orders=orders),
-            message=format_execution_message(plan, account, send_results, self.execution_mode),
+            message=format_execution_message(
+                plan,
+                account,
+                send_results,
+                self.execution_mode,
+                profile=profile,
+                symbol_info=symbol_info,
+            ),
         )
 
 
@@ -527,7 +540,14 @@ def format_pending_simulation_message(plan: PendingOrderPlan, account: MT5Accoun
     return "\n".join(lines)
 
 
-def format_rejection_message(reason: str, account: MT5Account) -> str:
+def format_rejection_message(
+    reason: str,
+    account: MT5Account,
+    *,
+    profile: ExecutionProfile | None = None,
+    symbol_info: SymbolInfo | None = None,
+    plan: PendingOrderPlan | None = None,
+) -> str:
     if "rollback_failed:" in reason:
         outcome = (
             "ATENÇÃO: pode existir posição aberta. Verifique imediatamente o MetaTrader 5."
@@ -536,16 +556,31 @@ def format_rejection_message(reason: str, account: MT5Account) -> str:
         outcome = "O envio parcial foi revertido e as ordens abertas foram encerradas."
     else:
         outcome = "Nenhuma ordem foi enviada ao MetaTrader 5."
-    return "\n".join(
-        [
-            "⚠️ EXECUÇÃO REJEITADA",
-            "",
-            f"Conta: {account.masked_login}",
-            f"Motivo: {reason}",
-            "",
-            outcome,
-        ]
-    )
+    lines = [
+        "⚠️ EXECUÇÃO REJEITADA",
+        "",
+        f"Conta: {account.masked_login}",
+        f"Motivo: {reason}",
+    ]
+    if profile is not None and profile.risk_mode == "risk_percent":
+        allowed_loss = risk_limit_amount(account, profile)
+        lines.extend(
+            [
+                "",
+                "🛡️ Gestão aplicada: risco percentual",
+                f"Risco configurado: {decimal_to_text(profile.risk_percent)}%",
+                (
+                    f"Limite estimado por sinal: {money_text(allowed_loss)}"
+                    if allowed_loss is not None
+                    else "Limite monetário: será calculado quando a equity estiver disponível."
+                ),
+            ]
+        )
+    guidance = rejection_guidance(reason, profile, symbol_info, plan)
+    if guidance:
+        lines.extend(["", "✅ O que fazer:", guidance])
+    lines.extend(["", outcome])
+    return "\n".join(lines)
 
 
 def order_type_label(order_type: str) -> str:
@@ -820,6 +855,9 @@ def format_execution_message(
     account: MT5Account,
     send_results: list[object],
     execution_mode: str,
+    *,
+    profile: ExecutionProfile | None = None,
+    symbol_info: SymbolInfo | None = None,
 ) -> str:
     account_label = "CONTA REAL" if execution_mode == "live_execution" else "CONTA DEMO"
     is_market = plan.order_type.value in {"BUY", "SELL"}
@@ -836,6 +874,26 @@ def format_execution_message(
     ]
     if not is_market:
         lines.append(f"Validade: {expiration_label(plan)}")
+    if profile is not None:
+        estimated_loss = estimated_plan_loss(plan, symbol_info)
+        lines.extend(["", "🛡️ Gestão aplicada:"])
+        if profile.risk_mode == "risk_percent":
+            lines.append(
+                f"Risco percentual: {decimal_to_text(profile.risk_percent)}%"
+            )
+            allowed_loss = risk_limit_amount(account, profile)
+            if allowed_loss is not None:
+                lines.append(f"Limite estimado: {money_text(allowed_loss)}")
+        else:
+            lines.append(
+                f"Lote fixo total: {decimal_to_text(plan.total_volume)}"
+            )
+        if estimated_loss is not None:
+            lines.append(f"Perda bruta estimada no SL: {money_text(estimated_loss)}")
+        lines.append(
+            "Orientação: mantenha o lote e o Stop Loss enviados pelo sistema. "
+            "Custos, slippage ou gaps podem alterar o resultado final."
+        )
     lines.extend(["", "Tickets:"])
     for order, send_result in zip(plan.orders, send_results):
         lines.append(
@@ -843,3 +901,72 @@ def format_execution_message(
             f"Lote {decimal_to_text(order.normalized_volume)}"
         )
     return "\n".join(lines)
+
+
+def risk_limit_amount(
+    account: MT5Account,
+    profile: ExecutionProfile,
+) -> Decimal | None:
+    if account.equity is None or account.equity <= 0:
+        return None
+    return account.equity * profile.risk_percent / Decimal("100")
+
+
+def estimated_plan_loss(
+    plan: PendingOrderPlan,
+    symbol_info: SymbolInfo | None,
+) -> Decimal | None:
+    if symbol_info is None or symbol_info.trade_tick_size <= 0:
+        return None
+    tick_value = (
+        symbol_info.trade_tick_value_loss
+        if symbol_info.trade_tick_value_loss > 0
+        else symbol_info.trade_tick_value
+    )
+    if tick_value <= 0:
+        return None
+    return sum(
+        (
+            abs(order.entry_price - order.stop_loss)
+            / symbol_info.trade_tick_size
+            * tick_value
+            * order.normalized_volume
+        )
+        for order in plan.orders
+    )
+
+
+def money_text(value: Decimal) -> str:
+    return f"$ {value.quantize(Decimal('0.01'))}"
+
+
+def rejection_guidance(
+    reason: str,
+    profile: ExecutionProfile | None,
+    symbol_info: SymbolInfo | None,
+    plan: PendingOrderPlan | None,
+) -> str | None:
+    if reason == "Risco calculado gera lote abaixo do minimo do simbolo.":
+        minimum = (
+            decimal_to_text(symbol_info.volume_min)
+            if symbol_info is not None
+            else "da corretora"
+        )
+        return (
+            f"O lote necessário ficou abaixo do mínimo {minimum}. "
+            "Mantenha a proteção ativa: o sistema ignorará apenas este sinal e continuará aguardando o próximo. "
+            "Reduzir a quantidade de TPs pode ajudar em alguns sinais; se ainda assim o mínimo exceder o limite, a operação continuará bloqueada."
+        )
+    if reason == "Lote total insuficiente para dividir entre todos os TPs.":
+        return (
+            "Reduza a quantidade de TPs no menu de execução ou aumente o lote somente se isso estiver dentro do risco que você aceita. "
+            "A opção recomendada é manter o limite de risco e deixar este sinal ser ignorado."
+        )
+    if reason == "max_open_signals_reached":
+        return "Aguarde uma operação ativa encerrar. O sistema continuará monitorando os próximos sinais."
+    if reason in {"daily_profit_target_reached", "daily_loss_limit_reached"}:
+        return "Nenhuma ação é necessária. Novos sinais permanecerão bloqueados até a próxima sessão configurada."
+    if reason == "price_hit_tp_before_entry":
+        return "O preço já alcançou o objetivo antes da entrada. Aguarde o próximo sinal; não entre manualmente atrasado."
+    _ = profile, plan
+    return None

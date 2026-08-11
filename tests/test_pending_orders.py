@@ -29,6 +29,7 @@ from telegram_mt5_copier.mt5.order_type_resolver import resolve_order_type
 from telegram_mt5_copier.mt5.pending_order_executor import (
     MT5_MAGIC_NUMBER,
     PendingOrderExecutor,
+    format_rejection_message,
 )
 from telegram_mt5_copier.mt5.pending_order_monitor import PendingOrderMonitor
 from telegram_mt5_copier.mt5.position_manager import PositionManager
@@ -422,6 +423,18 @@ class PendingOrderTests(unittest.TestCase):
             "Risco calculado gera lote abaixo do minimo do simbolo.",
         )
 
+        message = format_rejection_message(
+            context.exception.reason,
+            replace(self.account, equity=Decimal("2045.38")),
+            profile=profile,
+            symbol_info=SymbolInfo(name="XAUUSD", volume_min=Decimal("0.01")),
+            plan=context.exception.plan,
+        )
+        self.assertIn("Risco configurado: 0.5%", message)
+        self.assertIn("Limite estimado por sinal: $ 10.23", message)
+        self.assertIn("O lote necessário ficou abaixo do mínimo 0.01", message)
+        self.assertIn("continuará aguardando o próximo", message)
+
     def test_spread_e_limite_diario_bloqueiam_antes_do_order_send(self) -> None:
         wide_spread_client = SimulatedMT5Client(
             tick=TickInfo(bid=Decimal("4050"), ask=Decimal("4060")),
@@ -708,6 +721,9 @@ class PendingOrderTests(unittest.TestCase):
         self.assertEqual([row["status"] for row in rows], ["pending_active"] * 4)
         self.assertEqual([row["ticket"] for row in rows], ["100001", "100002", "100003", "100004"])
         self.assertIn("ORDENS PENDENTES ENVIADAS EM CONTA DEMO", result.message)
+        self.assertIn("Gestão aplicada", result.message)
+        self.assertIn("Lote fixo total: 0.04", result.message)
+        self.assertIn("Orientação: mantenha o lote e o Stop Loss", result.message)
 
     def test_corretora_com_gtc_nao_recebe_expiration(self) -> None:
         client = SimulatedMT5Client(

@@ -368,7 +368,7 @@ class BotManagementTests(unittest.TestCase):
             )
 
             service.handle_callback(101, "alice", "v1:r:lot:0.10")
-            service.handle_callback(101, "alice", "v1:r:risk:0.50")
+            risk_response = service.handle_callback(101, "alice", "v1:r:risk:0.50")
             service.handle_callback(101, "alice", "v1:r:loss:50")
             service.handle_callback(101, "alice", "v1:r:spread:100")
             service.handle_callback(101, "alice", "v1:r:slippage:20")
@@ -380,6 +380,9 @@ class BotManagementTests(unittest.TestCase):
             self.assertEqual(profile.daily_loss_limit, Decimal("50"))
             self.assertEqual(profile.max_spread_points, 100)
             self.assertEqual(profile.max_slippage_points, 20)
+            self.assertIn("Em uso nas próximas operações: Risco percentual", risk_response.text)
+            self.assertIn("limite estimado por sinal: $ 50", risk_response.text)
+            self.assertIn("Se o lote mínimo da corretora exceder", risk_response.text)
 
             lot_response = service.handle_callback(101, "alice", "v1:r:lot:0.02")
             profile = accounts.get_execution_profile(user.id, account.id)
