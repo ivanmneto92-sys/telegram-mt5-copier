@@ -108,6 +108,11 @@ class SymbolResolverTests(unittest.TestCase):
 
         self.assertEqual(resolver.resolve("XAUUSD"), "GOLD")
 
+    def test_descobre_sufixo_da_corretora_em_par_forex(self) -> None:
+        resolver = SymbolResolver(StrictSymbolClient(("CADCHFb",)))
+
+        self.assertEqual(resolver.resolve("CADCHF"), "CADCHFb")
+
 
 class PendingOrderTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -179,6 +184,30 @@ class PendingOrderTests(unittest.TestCase):
         )
 
         self.assertEqual(plan.symbol, "XAUUSDb")
+
+    def test_execucao_forex_resolve_sufixo_e_preserva_precisao(self) -> None:
+        signal = parse_signal_text(
+            "CADCHF SELL\nENTRY @ 0.58217\nSL 0.58304\n"
+            "TP1 0.58136\nTP2 0.58041\nTP3 0.57956"
+        ).signal
+        client = SimulatedMT5Client(
+            symbol_info=SymbolInfo(
+                name="CADCHFb",
+                point=Decimal("0.00001"),
+                trade_tick_size=Decimal("0.00001"),
+                digits=5,
+            ),
+            tick=TickInfo(bid=Decimal("0.58200"), ask=Decimal("0.58202")),
+        )
+
+        result = self.executor(client=client).execute_for_account(
+            signal, self.account, self.profile()
+        )
+
+        self.assertIsNone(result.group_result.rejected_reason)
+        self.assertEqual(result.group_result.group.symbol, "CADCHFb")
+        self.assertEqual(result.group_result.group.order_type, "SELL_LIMIT")
+        self.assertEqual(result.group_result.group.selected_entry_price, Decimal("0.58217"))
 
     def test_buy_acima_do_mercado_gera_buy_stop(self) -> None:
         plan = self.plan_buy(TickInfo(bid=Decimal("4058"), ask=Decimal("4058")))

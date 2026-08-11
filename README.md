@@ -134,6 +134,14 @@ O analisador também reconhece mensagens em português como `Moeda: XAU-USD`,
 `XAU-USD` continua sendo resolvido para o símbolo específico da corretora, como
 `XAUUSDb` na HFM.
 
+Além do ouro, o analisador aceita pares Forex formados por AUD, CAD, CHF, EUR,
+GBP, JPY, NZD e USD, como `CADCHF`, `EURUSD`, `GBPJPY` e `AUDJPY`. Separadores
+como `CAD/CHF` e `CAD-CHF` são normalizados. O resolvedor consulta cada terminal
+MT5 e preserva automaticamente sufixos da corretora, por exemplo `CADCHFb`,
+`EURUSD.r` ou `GBPJPY_i`. Índices e criptomoedas permanecem bloqueados.
+Relatórios com expressões como `closed trades` e listas de resultados em pips
+são ignorados, mesmo quando contêm símbolos, BUY/SELL, TP e SL.
+
 Os nomes técnicos dos fornecedores não são exibidos aos clientes. O menu do bot
 usa aliases estáveis como `Sala de Sinais 01`, mantendo seleção e execução
 vinculadas ao ID numérico real do Telegram. No painel administrativo, o admin

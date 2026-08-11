@@ -393,7 +393,7 @@ class MonitorPipelineTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(publisher.messages), 1)
 
-    async def test_ativo_diferente_de_xauusd(self) -> None:
+    async def test_par_forex_e_aceito(self) -> None:
         decision = await self.processor.process(
             IncomingMessage(
                 source_chat_id="source",
@@ -402,8 +402,8 @@ class MonitorPipelineTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual(decision.status, DecisionStatus.REJECTED)
-        self.assertEqual(decision.reason, "unsupported_asset")
+        self.assertEqual(decision.status, DecisionStatus.ACCEPTED)
+        self.assertEqual(decision.signal.symbol, "EURUSD")
 
     async def test_sinal_com_propaganda_removida(self) -> None:
         decision = await self.processor.process(
@@ -425,6 +425,62 @@ class MonitorPipelineTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ParserTests(unittest.TestCase):
+    def test_cadchf_sell_com_entry_arroba(self) -> None:
+        decision = parse_signal_text(
+            """🔵🔵11 AUGUST FREE signal forecast:
+CADCHF
+
+CADCHF SELL
+
+ENTRY @ 0.58217
+SL: 0.58304
+
+TP1: 0.58136
+TP2: 0.58041
+TP3: 0.57956
+
+Become a VIP member"""
+        )
+
+        self.assertEqual(decision.status, DecisionStatus.ACCEPTED)
+        self.assertEqual(decision.signal.symbol, "CADCHF")
+        self.assertEqual(decision.signal.direction, Direction.SELL)
+        self.assertEqual(decision.signal.entry_low, Decimal("0.58217"))
+        self.assertEqual(decision.signal.stop_loss, Decimal("0.58304"))
+        self.assertEqual(
+            decision.signal.take_profits,
+            (Decimal("0.58136"), Decimal("0.58041"), Decimal("0.57956")),
+        )
+        self.assertEqual(validate_signal(decision.signal).status, DecisionStatus.ACCEPTED)
+        self.assertTrue(decision.signal.clean_message.startswith("CADCHF SELL"))
+
+    def test_relatorio_de_pips_nao_vira_sinal(self) -> None:
+        decision = parse_signal_text(
+            """Monday 03/08/2026 closed trades:
+GBPUSD BUY TP +50 pips✅
+EURUSD BUY TP +50 pips✅
+EURJPY SELL SL -60 pips"""
+        )
+
+        self.assertEqual(decision.status, DecisionStatus.IGNORED)
+        self.assertEqual(decision.reason, "performance_report")
+
+    def test_relatorio_fechado_com_entry_continua_ignorado(self) -> None:
+        decision = parse_signal_text(
+            "CLOSED TRADES\nEURUSD BUY\nENTRY 1.10\nSL 1.09\nTP 1.11"
+        )
+
+        self.assertEqual(decision.status, DecisionStatus.IGNORED)
+        self.assertEqual(decision.reason, "performance_report")
+
+    def test_cripto_continua_bloqueada(self) -> None:
+        decision = parse_signal_text(
+            "BTCUSD BUY\nENTRY 60000\nSL 59000\nTP 62000"
+        )
+
+        self.assertEqual(decision.status, DecisionStatus.REJECTED)
+        self.assertEqual(decision.reason, "unsupported_asset")
+
     def test_scalping_em_portugues_com_xau_hifen(self) -> None:
         decision = parse_signal_text(
             """📊 VAMOS FAZER UM SCALPING

@@ -4,13 +4,12 @@ from decimal import Decimal, InvalidOperation
 import re
 
 from .models import DecisionStatus, Direction, ProcessingDecision, TradeSignal
-from .signal_formatter import HEADER_RE, clean_signal_text
+from .signal_formatter import HEADER_RE, clean_signal_text, extract_signal_symbol
 
 NUMBER_TEXT = r"\d+(?:[\.,]\d+)?"
 NUMBER_RE = re.compile(NUMBER_TEXT)
 RANGE_RE = re.compile(rf"(?P<first>{NUMBER_TEXT})\s*[-–—]\s*(?P<second>{NUMBER_TEXT})")
 
-SUPPORTED_GOLD_RE = re.compile(r"\b(?:XAU\s*[-/]?\s*USD|GOLD)\b", re.IGNORECASE)
 OTHER_ASSET_RE = re.compile(
     r"\b(?:EUR\s*/?\s*USD|GBP\s*/?\s*USD|USD\s*/?\s*JPY|BTC\s*/?\s*USD|"
     r"ETH\s*/?\s*USD|US30|NAS100|SPX500|US500|WTI|OIL)\b",
@@ -21,6 +20,8 @@ ENTRY_LABEL_RE = re.compile(
     r"\b(?:ENTRY(?:\s+ZONE)?|ENTER|ENTRADA|(?:IN\s+)?ZONE)\b",
     re.IGNORECASE,
 )
+CLOSED_TRADES_REPORT_RE = re.compile(r"\bCLOSED\s+TRADES?\b", re.IGNORECASE)
+RESULT_REPORT_RE = re.compile(r"\b(?:RESULTS?|PIPS?)\b", re.IGNORECASE)
 SL_LABEL_RE = re.compile(r"\b(?:SL|STOP(?:\s+LOSS)?)\b", re.IGNORECASE)
 TP_LABEL_RE = re.compile(r"\b(?:TP\d*|TARGET\d*|TAKE\s+PROFIT\d*)\b", re.IGNORECASE)
 INDEXED_TP_LABEL_RE = re.compile(
@@ -39,13 +40,19 @@ def parse_signal_text(
     if not clean_text:
         return ProcessingDecision(DecisionStatus.IGNORED, "empty_message")
 
-    if not SUPPORTED_GOLD_RE.search(clean_text):
+    if CLOSED_TRADES_REPORT_RE.search(clean_text) or (
+        RESULT_REPORT_RE.search(clean_text) and not ENTRY_LABEL_RE.search(clean_text)
+    ):
+        return ProcessingDecision(DecisionStatus.IGNORED, "performance_report")
+
+    symbol = extract_signal_symbol(clean_text)
+    if symbol is None:
         if looks_like_trade_message(clean_text) or OTHER_ASSET_RE.search(clean_text):
             return ProcessingDecision(DecisionStatus.REJECTED, "unsupported_asset")
         return ProcessingDecision(DecisionStatus.IGNORED, "common_message")
 
     if not HEADER_RE.search(clean_text):
-        return ProcessingDecision(DecisionStatus.REJECTED, "missing_xauusd_direction")
+        return ProcessingDecision(DecisionStatus.REJECTED, "missing_symbol_direction")
 
     direction_match = DIRECTION_RE.search(clean_text)
     if not direction_match:
@@ -70,7 +77,7 @@ def parse_signal_text(
         return ProcessingDecision(DecisionStatus.REJECTED, "missing_take_profit")
 
     signal = TradeSignal(
-        symbol="XAUUSD",
+        symbol=symbol,
         direction=direction,
         entry_low=entry_range[0],
         entry_high=entry_range[1],

@@ -243,7 +243,9 @@ class SimulatedMT5Client:
         return TerminalInfo(path=None, connected=self.initialized)
 
     def symbol_info(self, symbol: str) -> SymbolInfo | None:
-        if symbol.upper().startswith("XAUUSD"):
+        requested = symbol.upper()
+        configured = self._symbol_info.name.upper()
+        if requested == configured or configured.startswith(requested):
             return self._symbol_info
         return None
 

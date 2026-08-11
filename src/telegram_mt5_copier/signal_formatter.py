@@ -6,16 +6,19 @@ from .models import TradeSignal, decimal_to_text
 
 PRICE_VALUE_PATTERN = r"\d+(?:[\.,]\d+)?(?:\s*[-–—]\s*\d+(?:[\.,]\d+)?)?"
 GOLD_ASSET_PATTERN = r"(?:XAU\s*[-/]?\s*USD|GOLD)"
+FOREX_CURRENCY_PATTERN = r"(?:AUD|CAD|CHF|EUR|GBP|JPY|NZD|USD)"
+FOREX_ASSET_PATTERN = rf"(?:{FOREX_CURRENCY_PATTERN}\s*[-/]?\s*{FOREX_CURRENCY_PATTERN})"
+SUPPORTED_ASSET_PATTERN = rf"(?:{GOLD_ASSET_PATTERN}|{FOREX_ASSET_PATTERN})"
 DIRECTION_PATTERN = r"(?:BUY|SELL|COMPRA|VENDA)"
 HEADER_RE = re.compile(
     r"(?:"
-    rf"\b{GOLD_ASSET_PATTERN}\b[^\w]{{1,8}}\b(?P<asset_first_direction>{DIRECTION_PATTERN})\b"
+    rf"\b(?P<asset_first_asset>{SUPPORTED_ASSET_PATTERN})\b[^\w]{{1,12}}\b(?P<asset_first_direction>{DIRECTION_PATTERN})\b"
     r"(?:[ \t]+NOW\b)?"
     r"|"
     rf"\b(?P<direction_first_direction>{DIRECTION_PATTERN})\b[^\w]{{1,8}}"
-    rf"\b{GOLD_ASSET_PATTERN}\b"
+    rf"\b(?P<direction_first_asset>{SUPPORTED_ASSET_PATTERN})\b"
     r"|"
-    rf"\b{GOLD_ASSET_PATTERN}\b[^\r\n]*\r?\n"
+    rf"\b(?P<localized_asset>{SUPPORTED_ASSET_PATTERN})\b[^\r\n]*\r?\n"
     rf"[^\r\n]*\b(?:AN[ÁA]LISE)\b\s*:\s*"
     rf"(?P<localized_direction>{DIRECTION_PATTERN})\b"
     r")",
@@ -26,7 +29,7 @@ HEADER_TAIL_ENTRY_RE = re.compile(
     rf"(?P<value>{PRICE_VALUE_PATTERN})",
     re.IGNORECASE,
 )
-ENTRY_LINE_RE = re.compile(r"\b(?:ENTRY|ENTRADA)\b\s*[:\-]?\s*(?P<value>\d+(?:[\.,]\d+)?(?:\s*[-–—]\s*\d+(?:[\.,]\d+)?)?)", re.IGNORECASE)
+ENTRY_LINE_RE = re.compile(r"\b(?:ENTRY|ENTRADA)\b\s*[:\-]?\s*@?\s*(?P<value>\d+(?:[\.,]\d+)?(?:\s*[-–—]\s*\d+(?:[\.,]\d+)?)?)", re.IGNORECASE)
 SL_LINE_RE = re.compile(
     r"\b(?:SL|STOP[ \t]+LOSS)\b(?:\s*\(\s*SL\s*\))?\s*[:\-]?\s*"
     r"(?P<value>\d+(?:[\.,]\d+)?)",
@@ -54,6 +57,11 @@ def clean_signal_text(text: str) -> str | None:
         or header_match.group("localized_direction")
     ).upper()
     direction = {"COMPRA": "BUY", "VENDA": "SELL"}.get(direction, direction)
+    symbol = normalize_symbol(
+        header_match.group("asset_first_asset")
+        or header_match.group("direction_first_asset")
+        or header_match.group("localized_asset")
+    )
     body = text[header_match.end() :]
     lines = [strip_noise(line) for line in body.splitlines()]
 
@@ -89,7 +97,7 @@ def clean_signal_text(text: str) -> str | None:
         return None
 
     output = [
-        f"XAUUSD {direction}",
+        f"{symbol} {direction}",
         "",
         f"ENTRY {entry_value}",
         "",
@@ -122,3 +130,31 @@ def strip_noise(value: str) -> str:
 
 def normalize_range_spacing(value: str) -> str:
     return re.sub(r"\s*[-–—]\s*", "-", value.strip())
+
+
+def extract_signal_symbol(text: str) -> str | None:
+    match = HEADER_RE.search(text)
+    if match is None:
+        return None
+    asset = (
+        match.group("asset_first_asset")
+        or match.group("direction_first_asset")
+        or match.group("localized_asset")
+    )
+    symbol = normalize_symbol(asset)
+    if symbol == "XAUUSD":
+        return symbol
+    currencies = {"AUD", "CAD", "CHF", "EUR", "GBP", "JPY", "NZD", "USD"}
+    if (
+        len(symbol) == 6
+        and symbol[:3] in currencies
+        and symbol[3:] in currencies
+        and symbol[:3] != symbol[3:]
+    ):
+        return symbol
+    return None
+
+
+def normalize_symbol(value: str) -> str:
+    normalized = re.sub(r"[^A-Z]", "", value.upper())
+    return "XAUUSD" if normalized == "GOLD" else normalized
