@@ -86,7 +86,7 @@ def main() -> int:
                         service.mark_notification_sent(event, user_id, phase)
             update_service_heartbeat(
                 config.database_path, SERVICE_NAME,
-                "provider=ok",
+                details="provider=ok",
             )
         except Exception as exc:
             # Fail-open: uma indisponibilidade externa nunca bloqueia sinais sem calendário válido.

@@ -529,7 +529,7 @@ Agendador de Tarefas. A única tarefa automática deve iniciar
 
 ## Proteção contra notícias de alto impacto
 
-A partir da versão `0.27.1`, o menu **Configurações > Notícias do mercado**
+A partir da versão `0.27.2`, o menu **Configurações > Notícias do mercado**
 permite que cada cliente escolha entre operar normalmente ou bloquear novas
 entradas durante notícias de alto impacto. A opção padrão é operar normalmente;
 portanto, nenhum cliente é bloqueado sem escolher a proteção.
