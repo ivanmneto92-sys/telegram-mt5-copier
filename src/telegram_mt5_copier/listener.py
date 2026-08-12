@@ -43,12 +43,14 @@ class SignalProcessor:
         logger: logging.Logger,
         pending_order_executor: PendingOrderExecutor | None = None,
         execution_notifier: Callable[[PendingExecutionResult], Awaitable[None]] | None = None,
+        publication_scope: str | None = None,
     ) -> None:
         self.database = database
         self.publisher = publisher
         self.logger = logger
         self.pending_order_executor = pending_order_executor
         self.execution_notifier = execution_notifier
+        self.publication_scope = publication_scope
         self._closed = False
 
     def close(self) -> None:
@@ -106,7 +108,21 @@ class SignalProcessor:
             return duplicate_decision
 
         formatted_message = format_signal(signal)
-        await self.publisher.publish(signal, formatted_message, client=client)
+        should_publish = (
+            self.publication_scope is None
+            or self.database.claim_publication(
+                signal.content_signature,
+                self.publication_scope,
+            )
+        )
+        if should_publish:
+            await self.publisher.publish(signal, formatted_message, client=client)
+        else:
+            self.logger.info(
+                "publicacao_ignorada: sinal duplicado no destino origem=%s mensagem_id=%s",
+                signal.source_chat_id,
+                signal.source_message_id,
+            )
         self.database.record_accepted(signal, formatted_message)
         if self.pending_order_executor is not None:
             execution_results = await asyncio.to_thread(
@@ -214,6 +230,7 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
         logger,
         pending_order_executor=pending_order_executor,
         execution_notifier=execution_notifier,
+        publication_scope=config.destination_chat_id,
     )
 
     client = TelegramClient(

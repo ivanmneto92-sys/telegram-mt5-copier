@@ -7,7 +7,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from telegram_mt5_copier.database import SignalDatabase
+from telegram_mt5_copier.database import SignalDatabase, connect_database
 from telegram_mt5_copier.listener import (
     SignalProcessor,
     log_incoming_message,
@@ -393,6 +393,35 @@ class MonitorPipelineTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(publisher.messages), 1)
 
+    async def test_mesmo_sinal_de_duas_salas_publica_uma_vez_no_destino(self) -> None:
+        publisher = SlowFakePublisher()
+        first_processor = SignalProcessor(
+            self.database,
+            publisher,
+            logger=NullLogger(),
+            publication_scope="-100destino",
+        )
+        second_processor = SignalProcessor(
+            self.database,
+            publisher,
+            logger=NullLogger(),
+            publication_scope="-100destino",
+        )
+
+        first, second = await asyncio.gather(
+            first_processor.process(
+                IncomingMessage(source_chat_id="sala-1", source_message_id=1, text=BUY_VALID)
+            ),
+            second_processor.process(
+                IncomingMessage(source_chat_id="sala-2", source_message_id=2, text=BUY_VALID)
+            ),
+        )
+
+        self.assertEqual(first.status, DecisionStatus.ACCEPTED)
+        self.assertEqual(second.status, DecisionStatus.ACCEPTED)
+        self.assertEqual(len(publisher.messages), 1)
+        self.assertEqual(count_signals(self.database.database_path), 2)
+
     async def test_par_forex_e_aceito(self) -> None:
         decision = await self.processor.process(
             IncomingMessage(
@@ -636,6 +665,11 @@ class NullLogger:
 
     def error(self, *_args, **_kwargs) -> None:
         return None
+
+
+def count_signals(database_path: Path) -> int:
+    with connect_database(database_path) as connection:
+        return int(connection.execute("SELECT COUNT(*) FROM signals").fetchone()[0])
 
 
 if __name__ == "__main__":

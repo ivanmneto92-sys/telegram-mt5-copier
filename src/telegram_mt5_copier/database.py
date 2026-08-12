@@ -102,6 +102,35 @@ class SignalDatabase:
             finally:
                 cursor.close()
 
+    def claim_publication(self, content_signature: str, publication_scope: str) -> bool:
+        """Reserva uma publicação limpa por destino, independentemente da origem.
+
+        Dois canais de origem podem republicar exatamente a mesma entrada. Cada
+        origem ainda é processada para respeitar as assinaturas dos clientes,
+        mas o canal limpo recebe somente uma cópia dentro da janela de dedupe.
+        """
+        now = datetime.now(tz=timezone.utc)
+        cutoff = (now - timedelta(minutes=DUPLICATE_WINDOW_MINUTES)).isoformat()
+        with connect_database(self.database_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                "DELETE FROM signal_publication_claims WHERE claimed_at < ?",
+                (cutoff,),
+            )
+            cursor.close()
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO signal_publication_claims (
+                    publication_scope, content_signature, claimed_at
+                ) VALUES (?, ?, ?)
+                """,
+                (publication_scope, content_signature, now.isoformat()),
+            )
+            try:
+                return cursor.rowcount == 1
+            finally:
+                cursor.close()
+
     def has_accepted_source_message(
         self,
         source_chat_id: int | str | None,
@@ -564,6 +593,21 @@ def initialize_database(database_path: Path) -> None:
                 content_signature TEXT NOT NULL,
                 claimed_at TEXT NOT NULL,
                 PRIMARY KEY (source_chat_id, content_signature)
+            );
+
+            CREATE TABLE IF NOT EXISTS signal_publication_claims (
+                publication_scope TEXT NOT NULL,
+                content_signature TEXT NOT NULL,
+                claimed_at TEXT NOT NULL,
+                PRIMARY KEY (publication_scope, content_signature)
+            );
+
+            CREATE TABLE IF NOT EXISTS signal_account_execution_claims (
+                mt5_account_id INTEGER NOT NULL,
+                content_signature TEXT NOT NULL,
+                claimed_at TEXT NOT NULL,
+                PRIMARY KEY (mt5_account_id, content_signature),
+                FOREIGN KEY (mt5_account_id) REFERENCES mt5_accounts(id)
             );
 
             CREATE TABLE IF NOT EXISTS customer_billing (

@@ -360,6 +360,19 @@ O parser também reconhece entradas escritas no cabeçalho como
 `GOLD BUY NOW IN ZONE 4027-4020`. Alvos sem preço, como `TP 3: OPEN`, são
 ignorados; os demais TPs numéricos continuam sendo executados normalmente.
 
+## Proteção contra sinais duplicados no canal limpo
+
+A partir da versão `0.28.2`, a deduplicação da publicação considera todas as
+salas de origem. Se duas salas republicarem exatamente a mesma estrutura de
+ativo, direção, entrada, SL e TPs dentro de quatro horas, o canal limpo recebe
+somente uma mensagem. O segundo evento continua sendo registrado por origem
+para respeitar a escolha de salas. Antes de executar, há uma segunda reserva por
+conta: clientes que seguem as duas salas recebem uma única operação, enquanto
+quem segue apenas a segunda sala continua recebendo o sinal normalmente.
+
+O Monitor de Sinais também usa um lock exclusivo por instância. Uma segunda
+cópia manual ou órfã é bloqueada antes de se conectar ao Telegram.
+
 ## Modos de entrada por cliente
 
 A partir da versão `0.13.0`, cada cliente escolhe no bot em

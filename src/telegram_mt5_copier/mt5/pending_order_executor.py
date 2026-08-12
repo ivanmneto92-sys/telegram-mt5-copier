@@ -262,6 +262,13 @@ class PendingOrderExecutor:
             validation_started_at=validation_started_at,
             validation_finished_at=validation_finished_at,
         )
+        if not self.repository.claim_account_signal(signal.content_signature, account.id):
+            shutdown_if_needed()
+            return PendingExecutionResult(
+                account=account,
+                group_result=ExecutionGroupResult(group=None, orders=(), duplicate=True),
+                message="",
+            )
         if self.execution_mode == "simulation":
             group_result = self.groups.create_simulated_group(plan, metrics=metrics)
             message = "" if group_result.duplicate else format_pending_simulation_message(plan, account)

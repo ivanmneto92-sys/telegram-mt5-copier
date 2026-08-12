@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from ..database import connect_database, initialize_database, utc_now
+from ..database import (
+    DUPLICATE_WINDOW_MINUTES,
+    connect_database,
+    initialize_database,
+    utc_now,
+)
 from ..models import decimal_to_text
 from .models import (
     ExecutionGroup,
@@ -44,6 +50,28 @@ class ExecutionRepository:
             )
             try:
                 return cursor.fetchone() is not None
+            finally:
+                cursor.close()
+
+    def claim_account_signal(self, content_signature: str, account_id: int) -> bool:
+        now = datetime.now(tz=timezone.utc)
+        cutoff = (now - timedelta(minutes=DUPLICATE_WINDOW_MINUTES)).isoformat()
+        with connect_database(self.database_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "DELETE FROM signal_account_execution_claims WHERE claimed_at < ?",
+                (cutoff,),
+            ).close()
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO signal_account_execution_claims (
+                    mt5_account_id, content_signature, claimed_at
+                ) VALUES (?, ?, ?)
+                """,
+                (account_id, content_signature, now.isoformat()),
+            )
+            try:
+                return cursor.rowcount == 1
             finally:
                 cursor.close()
 

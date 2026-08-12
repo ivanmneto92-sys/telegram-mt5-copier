@@ -241,6 +241,10 @@ class AppConfig:
         return self.data_dir / f"telegram-mt5-supervisor{self.instance_suffix}.lock"
 
     @property
+    def signal_monitor_lock_path(self) -> Path:
+        return self.data_dir / f"telegram-signal-monitor{self.instance_suffix}.lock"
+
+    @property
     def signal_monitor_log_path(self) -> Path:
         return self.log_dir / f"telegram-mt5-copier{self.instance_suffix}.log"
 

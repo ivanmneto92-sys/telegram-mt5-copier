@@ -7,6 +7,7 @@ import sys
 
 from .config import AppConfig
 from .listener import run_listener
+from .supervisor import SupervisorAlreadyRunningError, SupervisorLock
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -128,7 +129,11 @@ def run_service(config: AppConfig) -> int:
     logger.info("SQLITE_DB=%s", config.database_path)
 
     try:
-        return run_listener(config, logger)
+        with SupervisorLock(config.signal_monitor_lock_path):
+            return run_listener(config, logger)
+    except SupervisorAlreadyRunningError as exc:
+        logger.error("Monitor de sinais duplicado bloqueado: %s", exc)
+        return 3
     except Exception as exc:
         logger.error("Falha no monitoramento: %s", exc)
         return 2

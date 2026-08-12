@@ -1038,6 +1038,26 @@ class PendingOrderTests(unittest.TestCase):
         self.assertEqual(minutes_until_expiration(self.database_path), 120)
         self.assertIsNotNone(total_latency_ms(self.database_path))
 
+    def test_mesmo_sinal_de_salas_diferentes_nao_duplica_na_conta(self) -> None:
+        first_signal = parse_signal_text(
+            BUY_SIGNAL,
+            source_chat_id="sala-1",
+            source_message_id=101,
+        ).signal
+        second_signal = parse_signal_text(
+            BUY_SIGNAL,
+            source_chat_id="sala-2",
+            source_message_id=202,
+        ).signal
+        executor = self.executor()
+
+        first = executor.execute_for_account(first_signal, self.account, self.profile())
+        second = executor.execute_for_account(second_signal, self.account, self.profile())
+
+        self.assertFalse(first.group_result.duplicate)
+        self.assertTrue(second.group_result.duplicate)
+        self.assertEqual(count_execution_orders(self.database_path), 4)
+
     def test_isolamento_entre_usuarios(self) -> None:
         bob = self.users.get_or_create_user(202, "bob")
         grant_paid_access(self.database_path, bob.id)
