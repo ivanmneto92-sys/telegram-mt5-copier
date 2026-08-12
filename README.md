@@ -526,3 +526,32 @@ No bot de gestão, cada campo de risco possui valores rápidos e a opção `✍�
 Com o supervisor instalado, não cadastre cada executável separadamente no
 Agendador de Tarefas. A única tarefa automática deve iniciar
 `telegram-mt5-supervisor`.
+
+## Proteção contra notícias de alto impacto
+
+A partir da versão `0.27.0`, o menu **Configurações > Notícias do mercado**
+permite que cada cliente escolha entre operar normalmente ou bloquear novas
+entradas durante notícias de alto impacto. A opção padrão é operar normalmente;
+portanto, nenhum cliente é bloqueado sem escolher a proteção.
+
+Quando ativada, a proteção considera apenas a moeda relacionada ao ativo. Por
+exemplo, uma notícia forte dos Estados Unidos afeta `XAUUSD` e `EURUSD`, mas não
+bloqueia `EURGBP`. A janela padrão começa 10 minutos antes e termina 10 minutos
+depois do evento. Posições e ordens já existentes não são alteradas.
+
+Clientes ativos e com MT5 conectado recebem um aviso 10 minutos antes e outro
+no momento do evento. O calendário usa eventos de importância 3 da Trading
+Economics e requer uma chave própria no `.env` de cada instância:
+
+```dotenv
+MARKET_NEWS_ENABLED=true
+ECONOMIC_CALENDAR_API_KEY=cliente:chave
+MARKET_NEWS_MINUTES_BEFORE=10
+MARKET_NEWS_MINUTES_AFTER=10
+MARKET_NEWS_POLL_SECONDS=30
+```
+
+Se o provedor estiver indisponível, o sistema registra o erro e opera em modo
+aberto: ele não inventa eventos nem bloqueia entradas sem informação válida.
+O supervisor inicia o componente `market-news` somente quando
+`MARKET_NEWS_ENABLED=true`.

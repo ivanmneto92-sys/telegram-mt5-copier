@@ -30,6 +30,7 @@ class UserSettings:
     breakeven_enabled: bool
     trailing_enabled: bool
     tp1_breakeven_enabled: bool
+    avoid_high_impact_news: bool
 
 
 class SettingsService:
@@ -67,9 +68,10 @@ class SettingsService:
                     breakeven_enabled,
                     trailing_enabled,
                     tp1_breakeven_enabled,
+                    avoid_high_impact_news,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user_id,
@@ -83,6 +85,7 @@ class SettingsService:
                     0,
                     0,
                     1,
+                    0,
                     utc_now(),
                 ),
             )
@@ -105,7 +108,8 @@ class SettingsService:
                     tp_distribution_mode,
                     breakeven_enabled,
                     trailing_enabled,
-                    tp1_breakeven_enabled
+                    tp1_breakeven_enabled,
+                    avoid_high_impact_news
                 FROM user_settings
                 WHERE user_id = ?
                 """,
@@ -162,6 +166,11 @@ class SettingsService:
     def update_trailing_enabled(self, user_id: int, enabled: bool) -> UserSettings:
         return self._update_field(user_id, "trailing_enabled", int(enabled))
 
+    def update_avoid_high_impact_news(
+        self, user_id: int, enabled: bool
+    ) -> UserSettings:
+        return self._update_field(user_id, "avoid_high_impact_news", int(enabled))
+
     def _update_field(self, user_id: int, field_name: str, value: str | int) -> UserSettings:
         allowed_fields = {
             "risk_mode",
@@ -174,6 +183,7 @@ class SettingsService:
             "breakeven_enabled",
             "trailing_enabled",
             "tp1_breakeven_enabled",
+            "avoid_high_impact_news",
         }
         if field_name not in allowed_fields:
             raise ValueError("Campo de configuracao invalido.")
@@ -202,6 +212,7 @@ def settings_from_row(row: tuple[object, ...]) -> UserSettings:
         breakeven_enabled=bool(row[8]),
         trailing_enabled=bool(row[9]),
         tp1_breakeven_enabled=bool(row[10]),
+        avoid_high_impact_news=bool(row[11]),
     )
 
 

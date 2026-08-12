@@ -26,6 +26,9 @@ CB_SETTINGS = "v1:set"
 CB_RESULT_ALERTS = "v1:set:alerts"
 CB_RESULT_ALERTS_ALL = "v1:set:alerts:all"
 CB_RESULT_ALERTS_OFF = "v1:set:alerts:off"
+CB_MARKET_NEWS = "v1:set:news"
+CB_MARKET_NEWS_ALLOW = "v1:set:news:allow"
+CB_MARKET_NEWS_BLOCK = "v1:set:news:block"
 CB_CONNECTION = "v1:c"
 CB_CONNECT_MT5 = "v1:mt5:connect"
 CB_MT5_ACCOUNTS = "v1:mt5:accounts"
@@ -93,10 +96,17 @@ SETTINGS_MENU: tuple[tuple[Button, ...], ...] = (
     (Button("⚙️ Gestão de risco", CB_RISK), Button("🛡️ Proteções", CB_PROTECTIONS)),
     (Button("🎯 Execução dos sinais", CB_SIGNAL_EXECUTION),),
     (Button("🔔 Alertas de resultados", CB_RESULT_ALERTS),),
+    (Button("📰 Notícias do mercado", CB_MARKET_NEWS),),
     (Button("🖥️ Minhas contas MT5", CB_MT5_ACCOUNTS),),
     (Button("🔗 Conectar conta MT5", CB_CONNECT_MT5),),
     (Button("🔐 Solicitar ativação", CB_ACTIVATE), Button("⏸️ Pausar conta", CB_PAUSE)),
     (Button("⬅️ Voltar ao menu", CB_MAIN),),
+)
+
+MARKET_NEWS_MENU: tuple[tuple[Button, ...], ...] = (
+    (Button("▶️ Operar durante notícias", CB_MARKET_NEWS_ALLOW),),
+    (Button("🛡️ Bloquear em notícias fortes", CB_MARKET_NEWS_BLOCK),),
+    (Button("⬅️ Voltar", CB_SETTINGS),),
 )
 
 RESULT_ALERTS_MENU: tuple[tuple[Button, ...], ...] = (
@@ -369,6 +379,7 @@ STATIC_CALLBACKS = {
         EXPIRATION_MENU,
         SETTINGS_MENU,
         RESULT_ALERTS_MENU,
+        MARKET_NEWS_MENU,
     )
     for row in keyboard
     for button in row

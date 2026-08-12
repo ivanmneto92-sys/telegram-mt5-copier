@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "telegram-mt5-copier"
-version = "0.26.0"
+version = "0.27.0"
 description = "Base portavel para copiador Telegram -> MetaTrader 5."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -25,6 +25,7 @@ telegram-mt5-onboarding = "telegram_mt5_copier.web_server:main"
 telegram-mt5-worker = "telegram_mt5_copier.mt5_worker:main"
 telegram-mt5-supervisor = "telegram_mt5_copier.supervisor:main"
 telegram-mt5-health-monitor = "telegram_mt5_copier.operational_health:main"
+telegram-market-news = "telegram_mt5_copier.market_news_monitor:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

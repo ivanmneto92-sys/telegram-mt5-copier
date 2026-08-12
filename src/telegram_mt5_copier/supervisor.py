@@ -251,6 +251,7 @@ def default_service_specs(
     python_executable: Path | None = None,
     *,
     include_health_monitor: bool = True,
+    include_market_news: bool = False,
 ) -> tuple[ServiceSpec, ...]:
     python_path = python_executable or Path(sys.executable)
     scripts_dir = python_path.parent
@@ -263,6 +264,8 @@ def default_service_specs(
     )
     if include_health_monitor:
         executable_names += (("health-monitor", "telegram-mt5-health-monitor"),)
+    if include_market_news:
+        executable_names += (("market-news", "telegram-market-news"),)
     specs: list[ServiceSpec] = []
     missing: list[str] = []
     for service_name, executable_name in executable_names:
@@ -285,6 +288,7 @@ def service_display_name(service_name: str) -> str:
         "signal-monitor": "Monitor de sinais",
         "mt5-worker": "Worker MT5",
         "health-monitor": "Monitor operacional",
+        "market-news": "Notícias do mercado",
     }.get(service_name, service_name)
 
 
@@ -326,7 +330,8 @@ def main() -> int:
             config.brand_name,
         )
         services = default_service_specs(
-            include_health_monitor=config.operational_alerts_enabled
+            include_health_monitor=config.operational_alerts_enabled,
+            include_market_news=config.market_news_enabled,
         )
         notifier = TelegramAdminNotifier(
             config.telegram_bot_token,

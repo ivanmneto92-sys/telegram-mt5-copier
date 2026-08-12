@@ -304,6 +304,7 @@ def initialize_database(database_path: Path) -> None:
                 breakeven_enabled INTEGER NOT NULL,
                 trailing_enabled INTEGER NOT NULL,
                 tp1_breakeven_enabled INTEGER NOT NULL DEFAULT 1,
+                avoid_high_impact_news INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(id)
             );
@@ -479,6 +480,35 @@ def initialize_database(database_path: Path) -> None:
                 FOREIGN KEY (execution_group_id) REFERENCES execution_groups(id),
                 FOREIGN KEY (execution_order_id) REFERENCES execution_orders(id),
                 UNIQUE (event_type, execution_group_id, execution_order_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS economic_calendar_events (
+                provider TEXT NOT NULL,
+                provider_event_id TEXT NOT NULL,
+                event_at TEXT NOT NULL,
+                country TEXT NOT NULL,
+                currency TEXT NOT NULL,
+                event_name TEXT NOT NULL,
+                category TEXT,
+                importance INTEGER NOT NULL,
+                date_span INTEGER NOT NULL DEFAULT 0,
+                previous_value TEXT,
+                forecast_value TEXT,
+                actual_value TEXT,
+                source_url TEXT,
+                fetched_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (provider, provider_event_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS economic_calendar_notifications (
+                provider TEXT NOT NULL,
+                provider_event_id TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                phase TEXT NOT NULL,
+                sent_at TEXT NOT NULL,
+                PRIMARY KEY (provider, provider_event_id, user_id, phase),
+                FOREIGN KEY (user_id) REFERENCES users(id)
             );
 
             CREATE TABLE IF NOT EXISTS audit_events (
@@ -855,6 +885,12 @@ def run_schema_migrations(connection: sqlite3.Connection) -> None:
         "user_settings",
         "tp1_breakeven_enabled",
         "INTEGER NOT NULL DEFAULT 1",
+    )
+    ensure_column(
+        connection,
+        "user_settings",
+        "avoid_high_impact_news",
+        "INTEGER NOT NULL DEFAULT 0",
     )
     ensure_column(
         connection,

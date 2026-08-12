@@ -60,6 +60,11 @@ def run_check(config: AppConfig) -> int:
     print(f"DEFAULT_PENDING_EXPIRATION_MINUTES={config.default_pending_expiration_minutes}")
     print(f"GLOBAL_EXECUTION_KILL_SWITCH={str(config.global_execution_kill_switch).lower()}")
     print(f"ONBOARDING_LOCAL_URL={config.local_onboarding_url}")
+    print(f"MARKET_NEWS_ENABLED={str(config.market_news_enabled).lower()}")
+    print(
+        "ECONOMIC_CALENDAR_API_KEY="
+        + ("configurada" if config.economic_calendar_api_key else "ausente")
+    )
 
     if missing and not config.dry_run:
         print("Variaveis obrigatorias ausentes: " + ", ".join(missing), file=sys.stderr)

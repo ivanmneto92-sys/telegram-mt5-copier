@@ -90,6 +90,11 @@ class AppConfig:
     health_stale_after_seconds: int
     operational_alert_repeat_minutes: int
     daily_performance_timezone: str
+    market_news_enabled: bool
+    economic_calendar_api_key: str | None = field(repr=False)
+    market_news_minutes_before: int
+    market_news_minutes_after: int
+    market_news_poll_seconds: int
 
     @classmethod
     def load(
@@ -185,6 +190,25 @@ class AppConfig:
                 runtime_env,
                 "Europe/Athens",
             ).strip(),
+            market_news_enabled=parse_bool(
+                _value("MARKET_NEWS_ENABLED", file_values, runtime_env, "false"),
+                default=False,
+            ),
+            economic_calendar_api_key=_optional_value(
+                "ECONOMIC_CALENDAR_API_KEY", file_values, runtime_env
+            ),
+            market_news_minutes_before=parse_non_negative_int(
+                _value("MARKET_NEWS_MINUTES_BEFORE", file_values, runtime_env, "10"),
+                "MARKET_NEWS_MINUTES_BEFORE",
+            ),
+            market_news_minutes_after=parse_non_negative_int(
+                _value("MARKET_NEWS_MINUTES_AFTER", file_values, runtime_env, "10"),
+                "MARKET_NEWS_MINUTES_AFTER",
+            ),
+            market_news_poll_seconds=parse_positive_int(
+                _value("MARKET_NEWS_POLL_SECONDS", file_values, runtime_env, "30"),
+                "MARKET_NEWS_POLL_SECONDS",
+            ),
         )
 
         if create_dirs:
@@ -328,6 +352,16 @@ def parse_positive_int(value: str, name: str) -> int:
         raise ValueError(f"{name} deve ser um numero inteiro.") from exc
     if parsed < 1:
         raise ValueError(f"{name} deve ser maior que zero.")
+    return parsed
+
+
+def parse_non_negative_int(value: str, name: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} deve ser um numero inteiro.") from exc
+    if parsed < 0:
+        raise ValueError(f"{name} nao pode ser negativo.")
     return parsed
 
 

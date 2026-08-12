@@ -17,6 +17,7 @@ from .database import (
     update_service_heartbeat,
 )
 from .models import DecisionStatus, IncomingMessage, ProcessingDecision
+from .market_news import MarketNewsService
 from .parser import parse_signal_text
 from .publisher import TelegramPublisher, format_signal
 from .telegram_login import validate_telegram_credentials
@@ -189,6 +190,14 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
                 MT5Client
                 if config.mt5_execution_mode in {"demo_execution", "live_execution"}
                 else SimulatedMT5Client
+            ),
+            news_service=MarketNewsService(
+                config.database_path,
+                minutes_before=config.market_news_minutes_before,
+                minutes_after=config.market_news_minutes_after,
+                enabled=bool(
+                    config.market_news_enabled and config.economic_calendar_api_key
+                ),
             ),
         )
     execution_notifier = None

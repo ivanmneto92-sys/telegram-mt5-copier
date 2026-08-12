@@ -13,6 +13,7 @@ from ..daily_schedule import (
     next_daily_signal_resume_at,
 )
 from ..database import connect_database, utc_now
+from ..market_news import MarketNewsService, format_news_rejection
 from .account_service import MT5AccountService
 from .client import SimulatedMT5Client
 from .execution_group_service import ExecutionGroupResult, ExecutionGroupService, build_latency_metrics
@@ -61,6 +62,7 @@ class PendingOrderExecutor:
         client_factory: Callable[[], object] | None = None,
         planner: PendingOrderPlanner | None = None,
         repository: ExecutionRepository | None = None,
+        news_service: MarketNewsService | None = None,
     ) -> None:
         self.database_path = database_path
         self.accounts = accounts
@@ -71,6 +73,7 @@ class PendingOrderExecutor:
         self.planner = planner or PendingOrderPlanner()
         self.repository = repository or ExecutionRepository(database_path)
         self.groups = ExecutionGroupService(self.repository)
+        self.news_service = news_service or MarketNewsService(database_path)
         self._closed = False
 
     def close(self) -> None:
@@ -178,6 +181,17 @@ class PendingOrderExecutor:
                 execution_mode=self.execution_mode,
                 now=planned_at,
             )
+            news_event = self.news_service.blocking_event(
+                account.user_id, signal.symbol, planned_at
+            )
+            if news_event is not None:
+                shutdown_if_needed()
+                group_result = self.groups.reject_group(plan, "high_impact_news_window")
+                return PendingExecutionResult(
+                    account=account,
+                    group_result=group_result,
+                    message=format_news_rejection(news_event, account.account_alias),
+                )
         except PendingOrderPlanningError as exc:
             shutdown_if_needed()
             if exc.plan is not None:

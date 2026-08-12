@@ -65,6 +65,9 @@ from .bot_keyboards import (
     CB_RESULT_ALERTS,
     CB_RESULT_ALERTS_ALL,
     CB_RESULT_ALERTS_OFF,
+    CB_MARKET_NEWS,
+    CB_MARKET_NEWS_ALLOW,
+    CB_MARKET_NEWS_BLOCK,
     CB_MAIN,
     CB_DAILY_STOP,
     CB_MT5_ACCOUNTS,
@@ -109,6 +112,7 @@ from .bot_keyboards import (
     SIGNAL_EXECUTION_MENU,
     SETTINGS_MENU,
     RESULT_ALERTS_MENU,
+    MARKET_NEWS_MENU,
     TAKE_PROFIT_COUNT_MENU,
     Button,
     extract_fixed_lot,
@@ -174,6 +178,9 @@ class BotService:
         mt5_account_service: MT5AccountService | None = None,
         mt5_onboarding_url: str | None = None,
         brand_name: str = "Instituto Trader",
+        market_news_available: bool = False,
+        market_news_minutes_before: int = 10,
+        market_news_minutes_after: int = 10,
     ) -> None:
         self.users = UserRepository(database_path)
         self.settings = SettingsService(database_path)
@@ -184,6 +191,9 @@ class BotService:
         self.database_path = database_path
         self.mt5_onboarding_url = mt5_onboarding_url
         self.brand_name = brand_name.strip() or "Instituto Trader"
+        self.market_news_available = market_news_available
+        self.market_news_minutes_before = market_news_minutes_before
+        self.market_news_minutes_after = market_news_minutes_after
         self.admin_ids = set(admin_ids)
         self.admin_browser_auth = AdminBrowserAuthService(
             database_path,
@@ -433,6 +443,13 @@ class BotService:
                 "all" if callback == CB_RESULT_ALERTS_ALL else "off",
             )
             return self._result_alerts_screen(user)
+        if callback == CB_MARKET_NEWS:
+            return self._market_news_screen(user)
+        if callback in {CB_MARKET_NEWS_ALLOW, CB_MARKET_NEWS_BLOCK}:
+            self.settings.update_avoid_high_impact_news(
+                user.id, callback == CB_MARKET_NEWS_BLOCK
+            )
+            return self._market_news_screen(user)
         if callback == CB_RISK:
             return self._risk_screen(user)
         if callback == CB_PROTECTIONS:
@@ -927,6 +944,8 @@ class BotService:
             return self._channels_screen(user)
         if screen == "settings":
             return self._settings_screen(user)
+        if screen == "market_news":
+            return self._market_news_screen(user)
         return self._main_panel(user, first_name=first_name)
 
     def _settings_screen(self, user: User) -> BotResponse:
@@ -962,6 +981,31 @@ class BotService:
             ),
             RESULT_ALERTS_MENU,
             screen="result_alerts",
+        )
+
+    def _market_news_screen(self, user: User) -> BotResponse:
+        settings = self.settings.ensure_defaults(user.id)
+        mode = (
+            "🛡️ Bloquear novas entradas em notícias fortes"
+            if settings.avoid_high_impact_news
+            else "▶️ Operar normalmente durante notícias"
+        )
+        availability = (
+            "✅ Calendário financeiro conectado."
+            if self.market_news_available
+            else "⚠️ Calendário ainda não habilitado pelo administrador."
+        )
+        return BotResponse(
+            "\n".join([
+                "📰 NOTÍCIAS DO MERCADO", "", f"Modo atual: {mode}", availability, "",
+                "Quando a proteção está ativa, novas ordens são bloqueadas somente em notícias de alto impacto relacionadas ao ativo.",
+                f"Janela: {self.market_news_minutes_before} min antes até {self.market_news_minutes_after} min depois.",
+                "Você será avisado antes e no momento da notícia.", "",
+                "Se você nunca escolher uma opção, as operações continuam liberadas.",
+                "Ordens já abertas não são fechadas nem alteradas.",
+            ]),
+            MARKET_NEWS_MENU,
+            screen="market_news",
         )
 
     def _channels_screen(self, user: User) -> BotResponse:
