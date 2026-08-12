@@ -88,6 +88,9 @@ class MiniAppFrontendTests(unittest.TestCase):
         self.assertNotIn('<input name="server_name"', html)
         self.assertIn("HFMarketsGlobal-Live3", html)
         self.assertIn("FTMO-Demo", html)
+        self.assertIn('name="custom_server_name"', html)
+        self.assertIn("Meu servidor não está na lista — digitar", script)
+        self.assertIn('customOption.value = "__custom__"', script)
         self.assertIn('brokerInput.addEventListener("change", updateServerOptions)', script)
 
     def test_identidade_white_label_aparece_sem_injetar_html(self) -> None:

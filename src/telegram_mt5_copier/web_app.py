@@ -5,6 +5,7 @@ import hashlib
 import hmac
 from html import escape
 import json
+import re
 import time
 from typing import Mapping, MutableSet
 from urllib.parse import parse_qsl, urlencode
@@ -185,6 +186,7 @@ class MT5OnboardingService:
         request_scheme: str,
         broker_name: str,
         server_name: str,
+        custom_server_name: str = "",
         login: str,
         password: str,
         account_alias: str,
@@ -203,7 +205,11 @@ class MT5OnboardingService:
             raise WebAppValidationError("Muitas tentativas em pouco tempo.")
 
         broker_name = self._validated_broker_name(broker_name)
-        server_name = self._validated_server_name(broker_name, server_name)
+        server_name = self._validated_server_name(
+            broker_name,
+            server_name,
+            custom_server_name,
+        )
 
         user = self.users.get_or_create_user(init.user.id, init.user.username)
         form = MT5AccountForm(
@@ -221,14 +227,17 @@ class MT5OnboardingService:
             connection_status=account.connection_status,
         )
 
-    def _validated_server_name(self, broker_name: str, server_name: str) -> str:
+    def _validated_server_name(
+        self,
+        broker_name: str,
+        server_name: str,
+        custom_server_name: str = "",
+    ) -> str:
         if not self.enforce_broker_servers:
-            return server_name
+            return validate_custom_server_name(server_name)
         allowed = self.broker_servers.get(broker_name.strip().casefold(), ())
-        if not allowed:
-            raise WebAppValidationError(
-                "Nenhum servidor disponivel para esta corretora. Fale com o suporte."
-            )
+        if server_name == CUSTOM_SERVER_VALUE:
+            return validate_custom_server_name(custom_server_name)
         submitted = server_name.strip().casefold()
         for canonical_name in allowed:
             if canonical_name.casefold() == submitted:
@@ -244,10 +253,21 @@ class MT5OnboardingService:
         return canonical
 
 
+def validate_custom_server_name(server_name: str) -> str:
+    cleaned = server_name.strip()
+    if not SERVER_NAME_PATTERN.fullmatch(cleaned):
+        raise WebAppValidationError(
+            "Servidor invalido. Copie exatamente o nome exibido nos dados da conta MT5."
+        )
+    return cleaned
+
+
 OUTSIDE_TELEGRAM_MESSAGE = "Abra esta página pelo botão Conectar conta MT5 dentro do bot."
 EMPTY_INIT_DATA_MESSAGE = "Não foi possível identificar sua sessão. Feche esta tela e abra novamente pelo bot."
 VALIDATION_FAILED_MESSAGE = "Não foi possível validar sua sessão do Telegram."
 FRIENDLY_OPEN_ERROR_MESSAGE = "Não foi possível abrir a conexão segura. Feche esta tela e tente novamente pelo bot."
+CUSTOM_SERVER_VALUE = "__custom__"
+SERVER_NAME_PATTERN = re.compile(r"^[^\x00-\x1f\x7f]{2,100}$")
 
 
 def render_onboarding_form(
@@ -300,6 +320,7 @@ def render_onboarding_form(
     input, select {{ width: 100%; box-sizing: border-box; padding: 12px; border: 1px solid #c9ced6; border-radius: 8px; margin-top: 6px; background: #fff; }}
     button {{ margin-top: 20px; width: 100%; padding: 13px; border: 0; border-radius: 8px; background: #1473e6; color: white; font-weight: 700; }}
     button:disabled {{ opacity: .62; }}
+    [hidden] {{ display: none !important; }}
   </style>
   <script{nonce_attribute}>
     (function () {{
@@ -337,7 +358,11 @@ def render_onboarding_form(
           <option value="" selected disabled>Primeiro selecione a corretora</option>
         </select>
       </label>
-      <small id="server-help">Selecione a corretora para ver os servidores disponíveis.</small>
+      <small id="server-help">Selecione a corretora e use exatamente o servidor informado nos dados da sua conta.</small>
+      <label id="custom-server-field" hidden>Digite o servidor da sua conta
+        <input name="custom_server_name" maxlength="100" autocomplete="off"
+               placeholder="Ex.: servidor exibido nas credenciais MT5">
+      </label>
       <label>Login<input name="login" inputmode="numeric" required></label>
       <label>Senha<input name="password" type="password" required></label>
       <label>Apelido da conta<input name="account_alias" required></label>
@@ -450,6 +475,8 @@ def render_miniapp_script() -> str:
     var passwordInput = document.querySelector("input[name='password']");
     var brokerInput = document.querySelector("[name='broker_name']");
     var serverInput = document.querySelector("select[name='server_name']");
+    var customServerField = document.getElementById("custom-server-field");
+    var customServerInput = document.querySelector("input[name='custom_server_name']");
     var serverCatalogNode = document.getElementById("broker-servers");
     var submitButton = form ? form.querySelector("button") : null;
     var serverCatalog = {};
@@ -474,7 +501,7 @@ def render_miniapp_script() -> str:
       placeholder.selected = true;
       placeholder.textContent = servers.length
         ? "Selecione seu servidor"
-        : "Nenhum servidor disponível — fale com o suporte";
+        : "Selecione a opção para digitar";
       serverInput.appendChild(placeholder);
       for (var index = 0; index < servers.length; index += 1) {
         var option = document.createElement("option");
@@ -482,12 +509,33 @@ def render_miniapp_script() -> str:
         option.textContent = servers[index];
         serverInput.appendChild(option);
       }
-      serverInput.disabled = servers.length === 0;
+      var customOption = document.createElement("option");
+      customOption.value = "__custom__";
+      customOption.textContent = "Meu servidor não está na lista — digitar";
+      serverInput.appendChild(customOption);
+      serverInput.disabled = !brokerInput.value;
+      toggleCustomServerField();
+    }
+
+    function toggleCustomServerField() {
+      var customSelected = serverInput && serverInput.value === "__custom__";
+      if (customServerField) {
+        customServerField.hidden = !customSelected;
+      }
+      if (customServerInput) {
+        customServerInput.required = customSelected;
+        if (!customSelected) {
+          customServerInput.value = "";
+        }
+      }
     }
 
     if (brokerInput) {
       brokerInput.addEventListener("change", updateServerOptions);
       updateServerOptions();
+    }
+    if (serverInput) {
+      serverInput.addEventListener("change", toggleCustomServerField);
     }
 
     function showMessage(text, kind) {
@@ -612,6 +660,7 @@ def render_miniapp_script() -> str:
         init_data: initDataInput ? initDataInput.value : "",
         broker_name: brokerInput ? brokerInput.value : "",
         server_name: serverInput ? serverInput.value : "",
+        custom_server_name: customServerInput ? customServerInput.value : "",
         login: document.querySelector("input[name='login']").value,
         password: passwordInput ? passwordInput.value : "",
         account_alias: document.querySelector("input[name='account_alias']").value

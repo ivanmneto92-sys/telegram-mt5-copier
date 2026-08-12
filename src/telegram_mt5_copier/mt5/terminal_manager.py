@@ -46,6 +46,32 @@ BROKER_ALIASES = {
     "EXNESS": "EXNESS",
     "INFINOX": "INFINOX",
 }
+DEFAULT_BROKER_SERVERS: dict[str, tuple[str, ...]] = {
+    "HFM": (
+        "HFMarketsGlobal-Demo",
+        "HFMarketsGlobal-Demo3",
+        "HFMarketsGlobal-Demo4",
+        "HFMarketsGlobal-Live1",
+        "HFMarketsGlobal-Live3",
+        "HFMarketsGlobal-Live4",
+        "HFMarketsGlobal-Live5",
+        "HFMarketsGlobal-Live7",
+        "HFMarketsGlobal-Live8",
+        "HFMarketsGlobal-Live9",
+        "HFMarketsGlobal-Live10",
+        "HFMarketsGlobal-Live11",
+        "HFMarketsGlobal-Live12",
+        "HFMarketsGlobal-Live13",
+        "HFMarketsGlobal-Live14",
+        "HFMarketsGlobal-Live15",
+        "HFMarketsGlobal-Live16",
+        "HFMarketsGlobal-Live17",
+        "HFMarketsGlobal-Live18",
+        "HFMarketsGlobal-Live19",
+        "HFMarketsGlobal-Live20",
+    ),
+    "FTMO": ("FTMO-Demo",),
+}
 
 
 @dataclass(frozen=True)
@@ -107,19 +133,20 @@ class TerminalManager:
 
     def available_servers(self, broker_name: str) -> tuple[str, ...]:
         key = canonical_broker_key(broker_name)
-        servers = list(self.broker_server_names.get(key, ()))
+        servers = list(DEFAULT_BROKER_SERVERS.get(key, ()))
+        servers.extend(self.broker_server_names.get(key, ()))
         try:
             template = self.template_for_broker(broker_name)
         except ValueError:
             template = None
         if template is not None:
-            config_dir = template / "config"
-            if config_dir.is_dir():
-                servers.extend(path.stem for path in config_dir.glob("*.srv"))
-        return tuple(sorted(
-            dict.fromkeys(server.strip() for server in servers if server.strip()),
-            key=str.casefold,
-        ))
+            servers.extend(path.stem for path in template.rglob("*.srv"))
+        unique = {
+            server.strip().casefold(): server.strip()
+            for server in servers
+            if server.strip()
+        }
+        return tuple(sorted(unique.values(), key=natural_server_sort_key))
 
     def account_dir(self, account_id: int) -> Path:
         return self.base_dir / str(account_id)
@@ -163,6 +190,13 @@ class TerminalManager:
             data_dir=data_dir,
             logs_dir=logs_dir,
         )
+
+
+def natural_server_sort_key(value: str) -> tuple[object, ...]:
+    return tuple(
+        int(part) if part.isdigit() else part.casefold()
+        for part in re.split(r"(\d+)", value)
+    )
 
 
 def canonical_broker_key(value: str) -> str:

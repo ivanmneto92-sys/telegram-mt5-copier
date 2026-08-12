@@ -217,6 +217,7 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             request_scheme=scheme,
             broker_name=fields.get("broker_name", ""),
             server_name=fields.get("server_name", ""),
+            custom_server_name=fields.get("custom_server_name", ""),
             login=fields.get("login", ""),
             password=fields.get("password", ""),
             account_alias=fields.get("account_alias", ""),

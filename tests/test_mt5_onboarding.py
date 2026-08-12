@@ -328,10 +328,12 @@ class MT5OnboardingTests(unittest.TestCase):
             broker_server_names={"HFM": ("HFMarketsGlobal-Live1",)},
         )
 
-        self.assertEqual(
-            manager.available_servers("HFM"),
-            ("HFMarketsGlobal-Live1", "HFMarketsGlobal-Live3"),
-        )
+        servers = manager.available_servers("HFM")
+        self.assertIn("HFMarketsGlobal-Demo", servers)
+        self.assertIn("HFMarketsGlobal-Demo3", servers)
+        self.assertIn("HFMarketsGlobal-Live1", servers)
+        self.assertIn("HFMarketsGlobal-Live3", servers)
+        self.assertIn("HFMarketsGlobal-Live20", servers)
 
     def test_mt5_client_inicializa_em_modo_portable(self) -> None:
         fake_mt5 = FakeMT5Module()
@@ -628,6 +630,16 @@ class MT5OnboardingTests(unittest.TestCase):
         self.assertEqual(service._validated_broker_name("hfm"), "HFM")
         with self.assertRaisesRegex(WebAppValidationError, "Servidor invalido"):
             service._validated_server_name("HFM", "Servidor-Inventado")
+        self.assertEqual(
+            service._validated_server_name(
+                "HFM",
+                "__custom__",
+                "HFMarketsGlobal-Demo7",
+            ),
+            "HFMarketsGlobal-Demo7",
+        )
+        with self.assertRaisesRegex(WebAppValidationError, "Servidor invalido"):
+            service._validated_server_name("HFM", "__custom__", "linha\nnova")
         with self.assertRaisesRegex(WebAppValidationError, "Corretora invalida"):
             service._validated_broker_name("Corretora-Inventada")
 

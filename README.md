@@ -316,12 +316,15 @@ Cada conta cadastrada recebe uma pasta isolada em `MT5_BASE_DIR\<mt5_account_id>
 
 Para operar com mais de uma corretora, mantenha uma instalação-modelo oficial e separada para cada uma e configure `MT5_BROKER_TEMPLATES`. A Mini App passa a exibir somente as corretoras configuradas e o provisionamento copia o modelo correspondente. `MT5_TEMPLATE_PATH` continua aceito como modelo HFM por compatibilidade com instalações anteriores. FTMO, FXGlobe, Exness e INFINOX podem usar servidores e símbolos diferentes; o resolvedor de símbolos detecta automaticamente sufixos disponíveis no terminal.
 
-A partir da versão `0.28.0`, o cliente não digita mais o servidor. Depois de
-escolher a corretora, ele seleciona um servidor da lista. O catálogo combina os
-arquivos `config/*.srv` da instalação-modelo, servidores que já tiveram contas
-cadastradas e os nomes opcionais de `MT5_BROKER_SERVERS`. O backend valida a
-combinação corretora/servidor antes de tentar o login, evitando erros de escrita
-e valores alterados manualmente na requisição.
+A partir da versão `0.29.0`, depois de escolher a corretora o cliente seleciona
+um servidor da lista ou usa `Meu servidor não está na lista — digitar`. O
+catálogo combina servidores oficiais conhecidos, todos os arquivos `*.srv`
+encontrados na instalação-modelo, servidores que já tiveram contas cadastradas
+e os nomes opcionais de `MT5_BROKER_SERVERS`. A lista padrão da HFM inclui os
+servidores Live e Demo publicados pela corretora. Para FTMO e outras corretoras,
+cujo servidor pode variar conforme a credencial, o cliente deve informar
+exatamente o nome exibido no e-mail ou painel da conta. O backend aceita a opção
+manual de forma controlada e continua validando as opções do catálogo.
 
 Ao criar uma pasta a partir do template selecionado, o provisionamento remove `config\accounts.dat`, credenciais, bases e logs herdados antes da primeira inicialização. A configuração higienizada usa `KeepPrivate=0`, habilita negociação algorítmica, preserva as opções técnicas da API Python já validadas no template e não contém login ou senha. A conexão Python inicia o terminal diretamente com a conta do cliente. Falhas transitórias `IPC timeout`/`IPC send failed`, comuns durante o primeiro LiveUpdate, recebem apenas uma nova tentativa controlada. Se o cliente repetir um cadastro que falhou, o registro e a pasta existentes são reutilizados em vez de consumir outro ID da VPS.
 
