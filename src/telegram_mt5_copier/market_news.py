@@ -264,7 +264,8 @@ def format_news_alert(event: EconomicEvent, phase: str, protected: bool, *, bran
         details.append(f"Anterior: {event.previous_value}")
     if phase == "now" and event.actual_value:
         details.append(f"Atual: {event.actual_value}")
-    return "\n".join(details + ["", protection, "Ordens já abertas não são alteradas.", "", brand_name])
+    source = "Forex Factory" if event.provider == "forex_factory" else "Trading Economics"
+    return "\n".join(details + ["", protection, "Ordens já abertas não são alteradas.", "", f"Fonte: {source}", brand_name])
 
 
 def format_news_rejection(event: EconomicEvent, account_alias: str) -> str:
