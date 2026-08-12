@@ -334,6 +334,10 @@ class MT5OnboardingTests(unittest.TestCase):
         self.assertIn("HFMarketsGlobal-Live1", servers)
         self.assertIn("HFMarketsGlobal-Live3", servers)
         self.assertIn("HFMarketsGlobal-Live20", servers)
+        self.assertEqual(
+            manager.available_servers("FTMO"),
+            ("FTMO-Demo", "FTMO-Demo2", "FTMO-Server"),
+        )
 
     def test_mt5_client_inicializa_em_modo_portable(self) -> None:
         fake_mt5 = FakeMT5Module()

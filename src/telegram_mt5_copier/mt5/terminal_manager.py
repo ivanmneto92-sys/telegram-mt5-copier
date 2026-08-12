@@ -70,7 +70,11 @@ DEFAULT_BROKER_SERVERS: dict[str, tuple[str, ...]] = {
         "HFMarketsGlobal-Live19",
         "HFMarketsGlobal-Live20",
     ),
-    "FTMO": ("FTMO-Demo",),
+    "FTMO": (
+        "FTMO-Demo",
+        "FTMO-Demo2",
+        "FTMO-Server",
+    ),
 }
 
 
