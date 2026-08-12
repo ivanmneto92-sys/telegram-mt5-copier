@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta, timezone
 import json
 import logging
 from pathlib import Path
+import hashlib
 from urllib import parse, request
 from zoneinfo import ZoneInfo
 
@@ -106,6 +107,51 @@ class TradingEconomicsCalendarClient:
                 forecast_value=str(item.get("Forecast") or ""),
                 actual_value=str(item.get("Actual") or ""),
                 source_url=str(item.get("URL") or ""),
+            ))
+        return tuple(events)
+
+
+class ForexFactoryCalendarClient:
+    """Reads the free weekly export published by Forex Factory/Fair Economy."""
+
+    export_url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+
+    def __init__(self, *, timeout_seconds: int = 20) -> None:
+        self.timeout_seconds = timeout_seconds
+
+    def fetch_high_impact(self, start: date, end: date) -> tuple[EconomicEvent, ...]:
+        api_request = request.Request(
+            self.export_url,
+            headers={"User-Agent": "TelegramMT5Copier/0.27 (+economic-calendar)"},
+        )
+        with request.urlopen(api_request, timeout=self.timeout_seconds) as response:
+            payload = json.loads(response.read().decode("utf-8-sig"))
+        if not isinstance(payload, list):
+            raise RuntimeError("forex_factory_calendar_invalid_response")
+        events: list[EconomicEvent] = []
+        for item in payload:
+            if str(item.get("impact") or "").strip().casefold() != "high":
+                continue
+            event_at = parse_event_datetime(str(item["date"]))
+            if not start <= event_at.date() <= end:
+                continue
+            currency = str(item.get("country") or "").strip().upper()
+            if currency not in KNOWN_CURRENCIES:
+                continue
+            title = str(item.get("title") or "Notícia econômica").strip()
+            fingerprint = f"{event_at.isoformat()}|{currency}|{title}"
+            event_id = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:24]
+            events.append(EconomicEvent(
+                provider_event_id=event_id,
+                event_at=event_at,
+                country=currency,
+                currency=currency,
+                event_name=title,
+                importance=3,
+                forecast_value=str(item.get("forecast") or ""),
+                previous_value=str(item.get("previous") or ""),
+                source_url="https://www.forexfactory.com/calendar",
+                provider="forex_factory",
             ))
         return tuple(events)
 

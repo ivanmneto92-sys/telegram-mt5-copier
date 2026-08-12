@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from telegram_mt5_copier.database import connect_database, initialize_database, utc_now
 from telegram_mt5_copier.market_news import (
     EconomicEvent,
+    ForexFactoryCalendarClient,
     MarketNewsService,
     currencies_for_symbol,
 )
@@ -61,3 +62,25 @@ def test_disabled_calendar_never_uses_cached_event(tmp_path):
     SettingsService(database_path).update_avoid_high_impact_news(user_id, True)
     disabled = MarketNewsService(database_path, enabled=False)
     assert disabled.blocking_event(user_id, "XAUUSD", now) is None
+
+
+def test_forex_factory_parser_keeps_only_high_impact(monkeypatch):
+    payload = b'''[
+      {"title":"Core CPI m/m","country":"USD","date":"2026-08-12T08:30:00-04:00","impact":"High","forecast":"0.2%","previous":"0.0%"},
+      {"title":"Minor report","country":"USD","date":"2026-08-12T10:30:00-04:00","impact":"Low","forecast":"","previous":""}
+    ]'''
+
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def read(self): return payload
+
+    monkeypatch.setattr("telegram_mt5_copier.market_news.request.urlopen", lambda *_args, **_kwargs: Response())
+    events = ForexFactoryCalendarClient().fetch_high_impact(
+        datetime(2026, 8, 12, tzinfo=timezone.utc).date(),
+        datetime(2026, 8, 13, tzinfo=timezone.utc).date(),
+    )
+    assert len(events) == 1
+    assert events[0].currency == "USD"
+    assert events[0].provider == "forex_factory"
+    assert events[0].event_at == datetime(2026, 8, 12, 12, 30, tzinfo=timezone.utc)

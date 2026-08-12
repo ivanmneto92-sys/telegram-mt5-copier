@@ -195,9 +195,7 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
                 config.database_path,
                 minutes_before=config.market_news_minutes_before,
                 minutes_after=config.market_news_minutes_after,
-                enabled=bool(
-                    config.market_news_enabled and config.economic_calendar_api_key
-                ),
+                enabled=config.market_news_enabled,
             ),
         )
     execution_notifier = None

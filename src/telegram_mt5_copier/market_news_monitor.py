@@ -10,6 +10,7 @@ from .config import AppConfig
 from .database import update_service_heartbeat
 from .market_news import (
     MarketNewsService,
+    ForexFactoryCalendarClient,
     TradingEconomicsCalendarClient,
     format_news_alert,
 )
@@ -53,13 +54,14 @@ def main() -> int:
     notifier = TelegramUserNotifier(config.telegram_bot_token, logger=logger)
     client = (
         TradingEconomicsCalendarClient(config.economic_calendar_api_key)
-        if config.economic_calendar_api_key else None
+        if config.economic_calendar_api_key
+        else ForexFactoryCalendarClient()
     )
     next_fetch = datetime.min.replace(tzinfo=timezone.utc)
     logger.info(
         "Monitor de notícias iniciado. antecedencia=%s tolerancia=%s fonte=%s",
         config.market_news_minutes_before, config.market_news_minutes_after,
-        "configurada" if client else "sem_chave",
+        "trading_economics" if config.economic_calendar_api_key else "forex_factory_gratuito",
     )
     while True:
         now = datetime.now(timezone.utc)
@@ -72,10 +74,6 @@ def main() -> int:
                 service.upsert_events(events)
                 next_fetch = now + timedelta(minutes=5)
                 logger.info("Calendário atualizado. eventos_fortes=%s", len(events))
-            elif client is None and now >= next_fetch:
-                logger.warning("ECONOMIC_CALENDAR_API_KEY ausente; proteção opera em modo aberto.")
-                next_fetch = now + timedelta(minutes=30)
-
             users = service.active_connected_users()
             for event, phase in service.due_events(now):
                 for user_id, telegram_user_id, protected in users:
@@ -88,7 +86,7 @@ def main() -> int:
                         service.mark_notification_sent(event, user_id, phase)
             update_service_heartbeat(
                 config.database_path, SERVICE_NAME,
-                f"provider={'ok' if client else 'missing_key'}",
+                "provider=ok",
             )
         except Exception as exc:
             # Fail-open: uma indisponibilidade externa nunca bloqueia sinais sem calendário válido.

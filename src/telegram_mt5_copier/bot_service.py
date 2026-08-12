@@ -991,7 +991,7 @@ class BotService:
             else "▶️ Operar normalmente durante notícias"
         )
         availability = (
-            "✅ Calendário financeiro conectado."
+            "✅ Calendário financeiro gratuito conectado."
             if self.market_news_available
             else "⚠️ Calendário ainda não habilitado pelo administrador."
         )

@@ -529,7 +529,7 @@ Agendador de Tarefas. A única tarefa automática deve iniciar
 
 ## Proteção contra notícias de alto impacto
 
-A partir da versão `0.27.0`, o menu **Configurações > Notícias do mercado**
+A partir da versão `0.27.1`, o menu **Configurações > Notícias do mercado**
 permite que cada cliente escolha entre operar normalmente ou bloquear novas
 entradas durante notícias de alto impacto. A opção padrão é operar normalmente;
 portanto, nenhum cliente é bloqueado sem escolher a proteção.
@@ -540,16 +540,18 @@ bloqueia `EURGBP`. A janela padrão começa 10 minutos antes e termina 10 minuto
 depois do evento. Posições e ordens já existentes não são alteradas.
 
 Clientes ativos e com MT5 conectado recebem um aviso 10 minutos antes e outro
-no momento do evento. O calendário usa eventos de importância 3 da Trading
-Economics e requer uma chave própria no `.env` de cada instância:
+no momento do evento. Por padrão, o calendário usa gratuitamente a exportação
+semanal oficial do Forex Factory, sem cadastro, cartão ou chave de API:
 
 ```dotenv
 MARKET_NEWS_ENABLED=true
-ECONOMIC_CALENDAR_API_KEY=cliente:chave
 MARKET_NEWS_MINUTES_BEFORE=10
 MARKET_NEWS_MINUTES_AFTER=10
 MARKET_NEWS_POLL_SECONDS=30
 ```
+
+`ECONOMIC_CALENDAR_API_KEY` é opcional. Se preenchida, troca o provedor gratuito
+pela Trading Economics; se ficar vazia, o Forex Factory é usado normalmente.
 
 Se o provedor estiver indisponível, o sistema registra o erro e opera em modo
 aberto: ele não inventa eventos nem bloqueia entradas sem informação válida.
