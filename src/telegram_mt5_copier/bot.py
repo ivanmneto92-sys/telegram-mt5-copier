@@ -48,6 +48,7 @@ def main() -> int:
                 config.mt5_base_dir,
                 config.mt5_template_path,
                 config.mt5_broker_template_paths,
+                config.mt5_broker_servers,
             ),
             client_factory=MT5Client,
             allow_live_accounts=config.allow_live_accounts,

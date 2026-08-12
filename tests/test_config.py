@@ -7,6 +7,7 @@ import unittest
 from telegram_mt5_copier.config import (
     AppConfig,
     parse_broker_template_paths,
+    parse_broker_servers,
     parse_bool,
     parse_instance_id,
     parse_port,
@@ -202,6 +203,22 @@ class ConfigTests(unittest.TestCase):
     def test_templates_mt5_rejeitam_formato_invalido(self) -> None:
         with self.assertRaisesRegex(ValueError, "CORRETORA=CAMINHO"):
             parse_broker_template_paths("FTMO", Path.cwd())
+
+    def test_servidores_mt5_por_corretora_sao_carregados(self) -> None:
+        self.assertEqual(
+            parse_broker_servers(
+                "HFM=HFMarketsGlobal-Live1|HFMarketsGlobal-Live3;"
+                "FTMO=FTMO-Demo"
+            ),
+            {
+                "HFM": ("HFMarketsGlobal-Live1", "HFMarketsGlobal-Live3"),
+                "FTMO": ("FTMO-Demo",),
+            },
+        )
+
+    def test_servidores_mt5_rejeitam_formato_invalido(self) -> None:
+        with self.assertRaisesRegex(ValueError, "CORRETORA=SERVIDOR1"):
+            parse_broker_servers("HFMarketsGlobal-Live3")
 
     def test_instancia_white_label_isola_banco_sessao_porta_e_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

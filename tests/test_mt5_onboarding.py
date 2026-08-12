@@ -317,6 +317,22 @@ class MT5OnboardingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Corretora sem template"):
             manager.provision_account(91, broker_name="Exness")
 
+    def test_descobre_servidores_no_template_e_na_configuracao(self) -> None:
+        hfm = self.root / "template-servidores"
+        (hfm / "config").mkdir(parents=True)
+        (hfm / "terminal64.exe").write_bytes(b"hfm")
+        (hfm / "config" / "HFMarketsGlobal-Live3.srv").write_bytes(b"server")
+        manager = TerminalManager(
+            self.root / "multi-server",
+            broker_template_paths={"HFM": hfm},
+            broker_server_names={"HFM": ("HFMarketsGlobal-Live1",)},
+        )
+
+        self.assertEqual(
+            manager.available_servers("HFM"),
+            ("HFMarketsGlobal-Live1", "HFMarketsGlobal-Live3"),
+        )
+
     def test_mt5_client_inicializa_em_modo_portable(self) -> None:
         fake_mt5 = FakeMT5Module()
         client = MT5Client(fake_mt5)
@@ -595,6 +611,25 @@ class MT5OnboardingTests(unittest.TestCase):
 
         self.assertEqual(result.masked_login, "••••5678")
         self.assertNotIn("mt5-secret-password", repr(result))
+
+    def test_onboarding_rejeita_servidor_fora_da_lista_da_corretora(self) -> None:
+        service = MT5OnboardingService(
+            bot_token="123456:bot-token",
+            users=self.users,
+            accounts=self.accounts,
+            csrf=CSRFTokenService("csrf-secret"),
+            broker_servers={"HFM": ("HFMarketsGlobal-Live3",)},
+        )
+
+        self.assertEqual(
+            service._validated_server_name("hfm", "hfmarketsglobal-live3"),
+            "HFMarketsGlobal-Live3",
+        )
+        self.assertEqual(service._validated_broker_name("hfm"), "HFM")
+        with self.assertRaisesRegex(WebAppValidationError, "Servidor invalido"):
+            service._validated_server_name("HFM", "Servidor-Inventado")
+        with self.assertRaisesRegex(WebAppValidationError, "Corretora invalida"):
+            service._validated_broker_name("Corretora-Inventada")
 
     def test_shutdown_e_close_idempotentes(self) -> None:
         self.client.shutdown()

@@ -6,7 +6,7 @@ import hmac
 from html import escape
 import json
 import time
-from typing import MutableSet
+from typing import Mapping, MutableSet
 from urllib.parse import parse_qsl, urlencode
 
 from .mt5.account_service import MT5AccountForm, MT5AccountService
@@ -158,6 +158,7 @@ class MT5OnboardingService:
         rate_limiter: SimpleRateLimiter | None = None,
         replay_cache: MutableSet[str] | None = None,
         require_https: bool = True,
+        broker_servers: Mapping[str, tuple[str, ...]] | None = None,
     ) -> None:
         self.bot_token = bot_token
         self.users = users
@@ -166,6 +167,15 @@ class MT5OnboardingService:
         self.rate_limiter = rate_limiter or SimpleRateLimiter()
         self.replay_cache = replay_cache if replay_cache is not None else set()
         self.require_https = require_https
+        self.enforce_broker_servers = broker_servers is not None
+        self.broker_names = {
+            broker.strip().casefold(): broker.strip()
+            for broker in (broker_servers or {})
+        }
+        self.broker_servers = {
+            broker.strip().casefold(): tuple(servers)
+            for broker, servers in (broker_servers or {}).items()
+        }
 
     def submit_account_form(
         self,
@@ -192,6 +202,9 @@ class MT5OnboardingService:
         if not self.rate_limiter.allow(init.user.id):
             raise WebAppValidationError("Muitas tentativas em pouco tempo.")
 
+        broker_name = self._validated_broker_name(broker_name)
+        server_name = self._validated_server_name(broker_name, server_name)
+
         user = self.users.get_or_create_user(init.user.id, init.user.username)
         form = MT5AccountForm(
             broker_name=broker_name,
@@ -208,6 +221,28 @@ class MT5OnboardingService:
             connection_status=account.connection_status,
         )
 
+    def _validated_server_name(self, broker_name: str, server_name: str) -> str:
+        if not self.enforce_broker_servers:
+            return server_name
+        allowed = self.broker_servers.get(broker_name.strip().casefold(), ())
+        if not allowed:
+            raise WebAppValidationError(
+                "Nenhum servidor disponivel para esta corretora. Fale com o suporte."
+            )
+        submitted = server_name.strip().casefold()
+        for canonical_name in allowed:
+            if canonical_name.casefold() == submitted:
+                return canonical_name
+        raise WebAppValidationError("Servidor invalido para a corretora selecionada.")
+
+    def _validated_broker_name(self, broker_name: str) -> str:
+        if not self.enforce_broker_servers:
+            return broker_name
+        canonical = self.broker_names.get(broker_name.strip().casefold())
+        if canonical is None:
+            raise WebAppValidationError("Corretora invalida.")
+        return canonical
+
 
 OUTSIDE_TELEGRAM_MESSAGE = "Abra esta página pelo botão Conectar conta MT5 dentro do bot."
 EMPTY_INIT_DATA_MESSAGE = "Não foi possível identificar sua sessão. Feche esta tela e abra novamente pelo bot."
@@ -220,6 +255,7 @@ def render_onboarding_form(
     csrf_token: str = "",
     broker_options: tuple[str, ...] = (),
     brand_name: str = "Instituto Trader",
+    broker_servers: Mapping[str, tuple[str, ...]] | None = None,
 ) -> str:
     nonce_attribute = f' nonce="{escape(script_nonce, quote=True)}"' if script_nonce else ""
     safe_brand = escape(brand_name.strip() or "Instituto Trader")
@@ -235,6 +271,13 @@ def render_onboarding_form(
         )
     else:
         broker_field = '<input name="broker_name" required>'
+    server_catalog_json = json.dumps(
+        {name: list(servers) for name, servers in (broker_servers or {}).items()},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    server_catalog = escape(server_catalog_json, quote=True)
     return f"""<!doctype html>
 <html lang="pt-BR">
 <head>
@@ -289,12 +332,18 @@ def render_onboarding_form(
       <input type="hidden" name="csrf_token" value="{csrf_token}">
       <input type="hidden" name="init_data" id="init_data">
       <label>Corretora{broker_field}</label>
-      <label>Servidor<input name="server_name" required></label>
+      <label>Servidor
+        <select name="server_name" required disabled>
+          <option value="" selected disabled>Primeiro selecione a corretora</option>
+        </select>
+      </label>
+      <small id="server-help">Selecione a corretora para ver os servidores disponíveis.</small>
       <label>Login<input name="login" inputmode="numeric" required></label>
       <label>Senha<input name="password" type="password" required></label>
       <label>Apelido da conta<input name="account_alias" required></label>
       <button type="submit">Salvar conexão segura</button>
     </form>
+    <div hidden id="broker-servers" data-catalog="{server_catalog}"></div>
     <noscript>
       <div class="message error" style="display:block">Abra esta página pelo botão Conectar conta MT5 dentro do bot.</div>
     </noscript>
@@ -399,7 +448,47 @@ def render_miniapp_script() -> str:
     var initDataInput = document.getElementById("init_data");
     var csrfInput = document.querySelector("input[name='csrf_token']");
     var passwordInput = document.querySelector("input[name='password']");
+    var brokerInput = document.querySelector("[name='broker_name']");
+    var serverInput = document.querySelector("select[name='server_name']");
+    var serverCatalogNode = document.getElementById("broker-servers");
     var submitButton = form ? form.querySelector("button") : null;
+    var serverCatalog = {};
+
+    try {
+      serverCatalog = serverCatalogNode
+        ? JSON.parse(serverCatalogNode.getAttribute("data-catalog") || "{}")
+        : {};
+    } catch (_catalogError) {
+      serverCatalog = {};
+    }
+
+    function updateServerOptions() {
+      if (!serverInput || !brokerInput) {
+        return;
+      }
+      var servers = serverCatalog[brokerInput.value] || [];
+      serverInput.textContent = "";
+      var placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.disabled = true;
+      placeholder.selected = true;
+      placeholder.textContent = servers.length
+        ? "Selecione seu servidor"
+        : "Nenhum servidor disponível — fale com o suporte";
+      serverInput.appendChild(placeholder);
+      for (var index = 0; index < servers.length; index += 1) {
+        var option = document.createElement("option");
+        option.value = servers[index];
+        option.textContent = servers[index];
+        serverInput.appendChild(option);
+      }
+      serverInput.disabled = servers.length === 0;
+    }
+
+    if (brokerInput) {
+      brokerInput.addEventListener("change", updateServerOptions);
+      updateServerOptions();
+    }
 
     function showMessage(text, kind) {
       if (!message) {
@@ -521,8 +610,8 @@ def render_miniapp_script() -> str:
       var fields = {
         csrf_token: csrfInput ? csrfInput.value : "",
         init_data: initDataInput ? initDataInput.value : "",
-        broker_name: document.querySelector("[name='broker_name']").value,
-        server_name: document.querySelector("input[name='server_name']").value,
+        broker_name: brokerInput ? brokerInput.value : "",
+        server_name: serverInput ? serverInput.value : "",
         login: document.querySelector("input[name='login']").value,
         password: passwordInput ? passwordInput.value : "",
         account_alias: document.querySelector("input[name='account_alias']").value

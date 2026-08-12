@@ -63,12 +63,17 @@ class TerminalManager:
         base_dir: Path,
         template_path: Path | None = None,
         broker_template_paths: Mapping[str, Path] | None = None,
+        broker_server_names: Mapping[str, tuple[str, ...]] | None = None,
     ) -> None:
         self.base_dir = base_dir
         self.template_path = template_path
         self.broker_template_paths = {
             canonical_broker_key(name): Path(path)
             for name, path in (broker_template_paths or {}).items()
+        }
+        self.broker_server_names = {
+            canonical_broker_key(name): tuple(servers)
+            for name, servers in (broker_server_names or {}).items()
         }
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
@@ -99,6 +104,22 @@ class TerminalManager:
                 f"terminal64.exe nao encontrado em {template}."
             )
         return template
+
+    def available_servers(self, broker_name: str) -> tuple[str, ...]:
+        key = canonical_broker_key(broker_name)
+        servers = list(self.broker_server_names.get(key, ()))
+        try:
+            template = self.template_for_broker(broker_name)
+        except ValueError:
+            template = None
+        if template is not None:
+            config_dir = template / "config"
+            if config_dir.is_dir():
+                servers.extend(path.stem for path in config_dir.glob("*.srv"))
+        return tuple(sorted(
+            dict.fromkeys(server.strip() for server in servers if server.strip()),
+            key=str.casefold,
+        ))
 
     def account_dir(self, account_id: int) -> Path:
         return self.base_dir / str(account_id)

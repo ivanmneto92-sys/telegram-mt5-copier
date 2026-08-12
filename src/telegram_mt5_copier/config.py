@@ -76,6 +76,7 @@ class AppConfig:
     mt5_credential_key: str | None = field(repr=False)
     mt5_template_path: Path | None
     mt5_broker_template_paths: dict[str, Path]
+    mt5_broker_servers: dict[str, tuple[str, ...]]
     mt5_base_dir: Path
     mt5_execution_mode: str
     mt5_max_accounts_per_vps: int
@@ -144,6 +145,9 @@ class AppConfig:
             mt5_broker_template_paths=parse_broker_template_paths(
                 _value("MT5_BROKER_TEMPLATES", file_values, runtime_env, ""),
                 root,
+            ),
+            mt5_broker_servers=parse_broker_servers(
+                _value("MT5_BROKER_SERVERS", file_values, runtime_env, "")
             ),
             mt5_base_dir=_configured_path("MT5_BASE_DIR", file_values, runtime_env, root, "./mt5_accounts"),
             mt5_execution_mode=_value("MT5_EXECUTION_MODE", file_values, runtime_env, "simulation").strip().lower(),
@@ -333,6 +337,32 @@ def parse_broker_template_paths(value: str | None, project_root: Path) -> dict[s
             raise ValueError(f"Template MT5 duplicado para a corretora {broker}.")
         templates[broker.upper()] = project_path(raw_path, project_root)
     return templates
+
+
+def parse_broker_servers(value: str | None) -> dict[str, tuple[str, ...]]:
+    """Parse CORRETORA=Servidor1|Servidor2;OUTRA=Servidor into a safe catalog."""
+    if not value:
+        return {}
+    catalog: dict[str, tuple[str, ...]] = {}
+    for raw_item in value.split(";"):
+        item = raw_item.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise ValueError(
+                "MT5_BROKER_SERVERS deve usar CORRETORA=SERVIDOR1|SERVIDOR2."
+            )
+        broker, raw_servers = (part.strip() for part in item.split("=", 1))
+        key = broker.upper()
+        servers = tuple(dict.fromkeys(
+            server.strip() for server in raw_servers.split("|") if server.strip()
+        ))
+        if not key or not servers:
+            raise ValueError("MT5_BROKER_SERVERS contem corretora ou servidor vazio.")
+        if key in catalog:
+            raise ValueError(f"Servidores MT5 duplicados para a corretora {broker}.")
+        catalog[key] = servers
+    return catalog
 
 
 def configured_source_chat_ids(

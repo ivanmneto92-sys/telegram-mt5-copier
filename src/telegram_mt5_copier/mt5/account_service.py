@@ -311,6 +311,21 @@ class MT5AccountService:
             client.shutdown()
             operation_lock.close()
 
+    def known_server_names(self, broker_name: str) -> tuple[str, ...]:
+        with connect_database(self.database_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT server_name
+                FROM mt5_accounts
+                WHERE lower(broker_name) = lower(?)
+                  AND server_name <> ''
+                  AND connection_status = 'connected'
+                ORDER BY server_name COLLATE NOCASE
+                """,
+                (broker_name,),
+            ).fetchall()
+        return tuple(str(row[0]) for row in rows)
+
     def _initialize_client(
         self,
         client: object,

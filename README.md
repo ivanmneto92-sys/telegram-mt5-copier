@@ -302,6 +302,7 @@ Configure no `.env` da VPS:
 ```env
 MT5_TEMPLATE_PATH=C:\Caminho\Para\MT5Modelo
 MT5_BROKER_TEMPLATES=HFM=C:\MT5TemplateHFM;FTMO=C:\MT5TemplateFTMO;FXGLOBE=C:\MT5TemplateFXGlobe;EXNESS=C:\MT5TemplateExness;INFINOX=C:\MT5TemplateINFINOX
+MT5_BROKER_SERVERS=HFM=HFMarketsGlobal-Live1|HFMarketsGlobal-Live2|HFMarketsGlobal-Live3;FTMO=FTMO-Demo
 MT5_BASE_DIR=C:\MT5Accounts
 MT5_EXECUTION_MODE=simulation
 ALLOW_LIVE_ACCOUNTS=false
@@ -313,7 +314,14 @@ O script `scripts/setup_windows.ps1` instala o pacote `MetaTrader5` somente no W
 
 Cada conta cadastrada recebe uma pasta isolada em `MT5_BASE_DIR\<mt5_account_id>\`, com `terminal64.exe`, `data\`, `logs\`, `worker.lock` e `heartbeat.txt`. A chamada ao MetaTrader usa modo portable, mantendo os dados junto da cópia isolada do terminal e evitando alternar contas dentro de um mesmo terminal.
 
-Para operar com mais de uma corretora, mantenha uma instalação-modelo oficial e separada para cada uma e configure `MT5_BROKER_TEMPLATES`. A Mini App passa a exibir somente as corretoras configuradas e o provisionamento copia o modelo correspondente. `MT5_TEMPLATE_PATH` continua aceito como modelo HFM por compatibilidade com instalações anteriores. FTMO, FXGlobe, Exness e INFINOX podem usar servidores e símbolos diferentes; o servidor continua sendo informado pelo cliente e o resolvedor de símbolos detecta automaticamente sufixos disponíveis no terminal.
+Para operar com mais de uma corretora, mantenha uma instalação-modelo oficial e separada para cada uma e configure `MT5_BROKER_TEMPLATES`. A Mini App passa a exibir somente as corretoras configuradas e o provisionamento copia o modelo correspondente. `MT5_TEMPLATE_PATH` continua aceito como modelo HFM por compatibilidade com instalações anteriores. FTMO, FXGlobe, Exness e INFINOX podem usar servidores e símbolos diferentes; o resolvedor de símbolos detecta automaticamente sufixos disponíveis no terminal.
+
+A partir da versão `0.28.0`, o cliente não digita mais o servidor. Depois de
+escolher a corretora, ele seleciona um servidor da lista. O catálogo combina os
+arquivos `config/*.srv` da instalação-modelo, servidores que já tiveram contas
+cadastradas e os nomes opcionais de `MT5_BROKER_SERVERS`. O backend valida a
+combinação corretora/servidor antes de tentar o login, evitando erros de escrita
+e valores alterados manualmente na requisição.
 
 Ao criar uma pasta a partir do template selecionado, o provisionamento remove `config\accounts.dat`, credenciais, bases e logs herdados antes da primeira inicialização. A configuração higienizada usa `KeepPrivate=0`, habilita negociação algorítmica, preserva as opções técnicas da API Python já validadas no template e não contém login ou senha. A conexão Python inicia o terminal diretamente com a conta do cliente. Falhas transitórias `IPC timeout`/`IPC send failed`, comuns durante o primeiro LiveUpdate, recebem apenas uma nova tentativa controlada. Se o cliente repetir um cadastro que falhou, o registro e a pasta existentes são reutilizados em vez de consumir outro ID da VPS.
 

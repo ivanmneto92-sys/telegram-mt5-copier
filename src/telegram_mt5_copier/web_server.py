@@ -31,6 +31,7 @@ class OnboardingHandler(BaseHTTPRequestHandler):
     csrf: CSRFTokenService
     bot_token: str
     broker_options: tuple[str, ...] = ()
+    broker_servers: dict[str, tuple[str, ...]] = {}
     brand_name: str = "Instituto Trader"
     instance_id: str = "main"
 
@@ -79,6 +80,7 @@ class OnboardingHandler(BaseHTTPRequestHandler):
                 script_nonce,
                 broker_options=self.broker_options,
                 brand_name=self.brand_name,
+                broker_servers=self.broker_servers,
             ),
             script_nonce=script_nonce,
         )
@@ -124,6 +126,7 @@ class OnboardingHandler(BaseHTTPRequestHandler):
                 script_nonce,
                 broker_options=self.broker_options,
                 brand_name=self.brand_name,
+                broker_servers=self.broker_servers,
             ),
             script_nonce=script_nonce,
             head_only=True,
@@ -509,6 +512,7 @@ def main() -> int:
             config.mt5_base_dir,
             config.mt5_template_path,
             config.mt5_broker_template_paths,
+            config.mt5_broker_servers,
         )
         accounts = MT5AccountService(
             config.database_path,
@@ -519,12 +523,21 @@ def main() -> int:
             daily_performance_timezone=config.daily_performance_timezone,
         )
         csrf = CSRFTokenService(config.mt5_credential_key)
+        broker_options = terminal_manager.available_brokers()
+        broker_servers = {
+            broker: merge_server_names(
+                terminal_manager.available_servers(broker),
+                accounts.known_server_names(broker),
+            )
+            for broker in broker_options
+        }
         onboarding = MT5OnboardingService(
             bot_token=config.telegram_bot_token,
             users=users,
             accounts=accounts,
             csrf=csrf,
             require_https=True,
+            broker_servers=broker_servers,
         )
         admin_panel = AdminPanelService(
             config.database_path,
@@ -536,7 +549,8 @@ def main() -> int:
             admin_ids=config.bot_admin_ids,
         )
         OnboardingHandler.bot_token = config.telegram_bot_token
-        OnboardingHandler.broker_options = terminal_manager.available_brokers()
+        OnboardingHandler.broker_options = broker_options
+        OnboardingHandler.broker_servers = broker_servers
         OnboardingHandler.brand_name = config.brand_name
         OnboardingHandler.instance_id = config.instance_id
         OnboardingHandler.csrf = csrf
@@ -560,6 +574,16 @@ def main() -> int:
         return 2
 
     return 0
+
+
+def merge_server_names(*groups: tuple[str, ...]) -> tuple[str, ...]:
+    merged: dict[str, str] = {}
+    for group in groups:
+        for name in group:
+            cleaned = name.strip()
+            if cleaned:
+                merged.setdefault(cleaned.casefold(), cleaned)
+    return tuple(sorted(merged.values(), key=str.casefold))
 
 
 def safe_log(event: str, **fields: str) -> None:

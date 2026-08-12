@@ -74,6 +74,22 @@ class MiniAppFrontendTests(unittest.TestCase):
         self.assertIn('<option value="INFINOX">INFINOX</option>', html)
         self.assertNotIn('<input name="broker_name"', html)
 
+    def test_formulario_lista_servidores_de_acordo_com_a_corretora(self) -> None:
+        html = render_onboarding_form(
+            broker_options=("HFM", "FTMO"),
+            broker_servers={
+                "HFM": ("HFMarketsGlobal-Live1", "HFMarketsGlobal-Live3"),
+                "FTMO": ("FTMO-Demo",),
+            },
+        )
+        script = render_miniapp_script()
+
+        self.assertIn('<select name="server_name" required disabled>', html)
+        self.assertNotIn('<input name="server_name"', html)
+        self.assertIn("HFMarketsGlobal-Live3", html)
+        self.assertIn("FTMO-Demo", html)
+        self.assertIn('brokerInput.addEventListener("change", updateServerOptions)', script)
+
     def test_identidade_white_label_aparece_sem_injetar_html(self) -> None:
         onboarding = render_onboarding_form(brand_name="Mesa <Alpha>")
         admin = render_admin_panel(brand_name="Mesa <Alpha>")
