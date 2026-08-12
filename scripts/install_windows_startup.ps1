@@ -55,6 +55,11 @@ $settings = New-ScheduledTaskSettingsSet `
     -RestartInterval (New-TimeSpan -Minutes 1) `
     -StartWhenAvailable
 
+$existingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+if ($existingTask) {
+    & (Join-Path $PSScriptRoot 'stop_windows_instance.ps1') -TaskName $TaskName
+}
+
 Register-ScheduledTask `
     -TaskName $TaskName `
     -Action $action `

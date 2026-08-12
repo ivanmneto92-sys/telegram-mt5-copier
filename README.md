@@ -455,6 +455,12 @@ mantém a tarefa `Telegram MT5 Copier`; as demais recebem automaticamente nomes
 como `Telegram MT5 Copier - mesa_alpha`. Cada porta local precisa de uma rota
 HTTPS própria no proxy reverso.
 
+Para atualizações futuras no Windows, use `scripts\update_windows_instance.ps1`
+dentro de cada cópia. O script encerra a tarefa e toda a árvore de processos
+daquela instância antes do `git pull`, evitando Workers órfãos e disputas pelo
+arquivo `worker.lock`. Os processos de outra marca e os terminais MT5 não são
+encerrados.
+
 ## Supervisor e inicialização automática no Windows
 
 A partir da versão `0.12.0`, o comando `telegram-mt5-supervisor` inicia e

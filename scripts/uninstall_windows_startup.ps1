@@ -23,7 +23,7 @@ if ([string]::IsNullOrWhiteSpace($TaskName)) {
 }
 
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
-    Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    & (Join-Path $PSScriptRoot 'stop_windows_instance.ps1') -TaskName $TaskName
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
     Write-Host "Tarefa '$TaskName' removida."
 }
