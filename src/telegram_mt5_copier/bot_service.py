@@ -353,16 +353,17 @@ class BotService:
                     [
                         "➕ SUGERIR CANAL",
                         "",
-                        "Envie o link público ou @username do canal.",
+                        "Envie o link público, o link de convite privado ou @username do canal.",
                         "",
                         "Exemplos:",
                         "https://t.me/NomeDoCanal",
+                        "https://t.me/+CodigoDoConvite",
                         "https://web.telegram.org/k/#@NomeDoCanal",
                         "@NomeDoCanal",
                         "",
                         "⚠️ A conta principal de monitoramento precisa participar do canal. Você apenas sugere; o administrador faz a análise e a aprovação.",
                         "",
-                        "Links privados devem ser enviados diretamente ao administrador e não ficam armazenados aqui.",
+                        "🔒 Em canal privado, a conta principal precisa entrar pelo convite antes da verificação. O sistema não entra automaticamente sem a aprovação do administrador.",
                     ]
                 ),
                 CHANNEL_TEXT_INPUT_MENU,
@@ -374,7 +375,7 @@ class BotService:
                     [
                         "ℹ️ COMO FUNCIONAM OS CANAIS",
                         "",
-                        "1. Você sugere um canal público.",
+                        "1. Você sugere um canal público ou privado.",
                         "2. O administrador acessa e analisa o formato dos sinais.",
                         "3. A conta principal do sistema confirma que consegue monitorá-lo.",
                         "4. Após aprovação, o canal aparece na sua lista.",

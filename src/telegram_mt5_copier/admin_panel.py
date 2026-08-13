@@ -270,6 +270,22 @@ class AdminPanelService:
         )
         return {"channel_id": channel_id, "display_name": public_name}
 
+    def update_channel_status(
+        self,
+        *,
+        admin_telegram_user_id: int,
+        channel_id: int,
+        status: str,
+    ) -> dict[str, object]:
+        updated_status = self.channels.set_channel_status(channel_id, status)
+        self._log_admin_action(
+            admin_telegram_user_id,
+            None,
+            "admin_panel_channel_status",
+            {"channel_id": channel_id, "status": updated_status},
+        )
+        return {"channel_id": channel_id, "status": updated_status}
+
     def _channel_request_user_id(self, request_id: int) -> int:
         with connect_database(self.database_path) as connection:
             row = connection.execute(
@@ -1097,7 +1113,7 @@ def render_admin_script() -> str:
     var requestHtml = requests.map(function (request) {
       var canApprove = request.status === "ready_for_admin_review";
       return '<article class="channel-card">' +
-        '<div class="identity"><h2>' + esc(request.title || "@" + request.username) + '</h2>' +
+        '<div class="identity"><h2>' + esc(request.title || (request.username ? "@" + request.username : "Canal privado")) + '</h2>' +
         '<div class="meta"><a href="' + esc(request.canonical_link) + '" target="_blank" rel="noopener" style="color:var(--cyan)">' +
         esc(request.canonical_link) + '</a><br>Solicitado por @' + esc(request.telegram_username || request.telegram_user_id) + '</div></div>' +
         '<div class="detail"><strong>' + esc(channelRequestStatus(request.status)) + '</strong><br>' +
@@ -1110,14 +1126,18 @@ def render_admin_script() -> str:
         '<button class="action pause" data-channel-action="reject" data-request-id="' + esc(request.id) + '">Rejeitar</button>' +
         '</div></article>';
     }).join("");
-    var activeHtml = approved.filter(function (channel) { return channel.status === "active"; }).map(function (channel) {
-      return '<article class="channel-card"><div class="identity"><h2>✅ ' + esc(channel.title) + '</h2>' +
-        '<div class="meta">@' + esc(channel.username || "sem username") + ' · ID ' + esc(channel.telegram_chat_id) + '</div></div>' +
+    var activeHtml = approved.map(function (channel) {
+      var isActive = channel.status === "active";
+      return '<article class="channel-card"><div class="identity"><h2>' + (isActive ? '✅ ' : '⏸️ ') + esc(channel.title) + '</h2>' +
+        '<div class="meta">' + esc(channel.username ? "@" + channel.username : "Canal privado") + ' · ID ' + esc(channel.telegram_chat_id) + '</div></div>' +
         '<div class="detail">Cliente vê: <strong>' + esc(channel.display_name) + '</strong><br>' +
-        'Monitoramento confirmado · ' + esc(channel.subscriber_count) + ' seleção(ões) personalizadas</div>' +
+        (isActive ? 'Monitoramento ativo' : 'Canal desativado') + ' · ' + esc(channel.subscriber_count) + ' seleção(ões) personalizadas</div>' +
         '<div class="actions"><button class="action finance" data-channel-action="display-name" ' +
-        'data-channel-id="' + esc(channel.id) + '" data-display-name="' + esc(channel.display_name) + '">Alterar nome exibido</button></div>' +
-        '<div class="status active">Ativo</div></article>';
+        'data-channel-id="' + esc(channel.id) + '" data-display-name="' + esc(channel.display_name) + '">Alterar nome exibido</button>' +
+        '<button class="action ' + (isActive ? 'pause' : 'activate') + '" data-channel-action="channel-status" ' +
+        'data-channel-id="' + esc(channel.id) + '" data-channel-status="' + (isActive ? 'suspended' : 'active') + '">' +
+        (isActive ? 'Desativar canal' : 'Reativar canal') + '</button></div>' +
+        '<div class="status ' + (isActive ? 'active' : 'paused') + '">' + (isActive ? 'Ativo' : 'Desativado') + '</div></article>';
     }).join("");
     channelList.innerHTML = requestHtml + activeHtml ||
       '<div class="empty">Nenhuma solicitação ou canal cadastrado.</div>';
@@ -1303,6 +1323,23 @@ def render_admin_script() -> str:
         display_name: displayName
       })).then(reloadDashboard)
         .catch(function (error) { showError(error.message || "Não foi possível alterar o nome exibido."); })
+        .finally(function () { state.busy = false; button.disabled = false; });
+      return;
+    }
+    if (action === "channel-status") {
+      var nextStatus = button.getAttribute("data-channel-status");
+      var questionStatus = nextStatus === "suspended"
+        ? "Desativar este canal? Novos sinais serão interrompidos, mas o histórico será preservado."
+        : "Reativar este canal para os clientes e para o monitoramento?";
+      if (!window.confirm(questionStatus)) { return; }
+      state.busy = true;
+      button.disabled = true;
+      post("/api/admin/channel-status", authFields({
+        csrf_token: state.csrf,
+        channel_id: button.getAttribute("data-channel-id"),
+        status: nextStatus
+      })).then(reloadDashboard)
+        .catch(function (error) { showError(error.message || "Não foi possível alterar o canal."); })
         .finally(function () { state.busy = false; button.disabled = false; });
       return;
     }

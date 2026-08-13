@@ -18,13 +18,15 @@ REQUEST_APPROVED = "approved"
 REQUEST_REJECTED = "rejected"
 
 USERNAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{3,31}$")
+INVITE_HASH_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
+PRIVATE_CHAT_ID_RE = re.compile(r"^\d{5,20}$")
 TOGGLE_CALLBACK_RE = re.compile(r"^v1:ch:t:(?P<channel_id>\d+)$")
 DEFAULT_CHANNEL_DISPLAY_PREFIX = "Sala de Sinais"
 
 
 @dataclass(frozen=True)
 class NormalizedChannelLink:
-    username: str
+    username: str | None
     normalized_key: str
     canonical_link: str
 
@@ -47,13 +49,15 @@ class ChannelCatalogService:
         normalized = normalize_channel_link(raw_link)
         now = utc_now()
         with connect_database(self.database_path) as connection:
-            channel = connection.execute(
-                """
-                SELECT id, display_name, status FROM source_channels
-                WHERE username = ? COLLATE NOCASE
-                """,
-                (normalized.username,),
-            ).fetchone()
+            channel = None
+            if normalized.username:
+                channel = connection.execute(
+                    """
+                    SELECT id, display_name, status FROM source_channels
+                    WHERE username = ? COLLATE NOCASE
+                    """,
+                    (normalized.username,),
+                ).fetchone()
             if channel is not None and str(channel[2]) == CHANNEL_STATUS_ACTIVE:
                 self._enable_subscription(connection, user_id, int(channel[0]), now)
                 return ChannelRequestResult(
@@ -77,7 +81,7 @@ class ChannelCatalogService:
                     int(duplicate[0]),
                     int(duplicate[1]) if duplicate[1] is not None else None,
                     str(duplicate[2]),
-                    f"@{normalized.username}",
+                    channel_request_title(normalized),
                     normalized.canonical_link,
                 )
             cursor = connection.execute(
@@ -106,7 +110,7 @@ class ChannelCatalogService:
             request_id,
             None,
             REQUEST_PENDING_ACCESS,
-            f"@{normalized.username}",
+            channel_request_title(normalized),
             normalized.canonical_link,
         )
 
@@ -231,6 +235,24 @@ class ChannelCatalogService:
             )
         return public_channel_title(channel_id, normalized)
 
+    def set_channel_status(self, channel_id: int, status: str) -> str:
+        if status not in {CHANNEL_STATUS_ACTIVE, CHANNEL_STATUS_SUSPENDED}:
+            raise ValueError("Status de canal inválido.")
+        with connect_database(self.database_path) as connection:
+            row = connection.execute(
+                "SELECT access_status FROM source_channels WHERE id = ?",
+                (channel_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("Canal não encontrado.")
+            if status == CHANNEL_STATUS_ACTIVE and str(row[0]) != "confirmed":
+                raise ValueError("O acesso da conta de monitoramento não está confirmado.")
+            connection.execute(
+                "UPDATE source_channels SET status = ?, updated_at = ? WHERE id = ?",
+                (status, utc_now(), channel_id),
+            )
+        return status
+
     def register_configured_channel(
         self,
         *,
@@ -288,7 +310,8 @@ class ChannelCatalogService:
                 UPDATE source_channels SET
                     username = COALESCE(?, username),
                     title = ?, canonical_link = COALESCE(?, canonical_link),
-                    status = 'active', access_status = 'confirmed',
+                    status = CASE WHEN status = 'suspended' THEN status ELSE 'active' END,
+                    access_status = 'confirmed',
                     content_protected = ?, history_accessible = ?,
                     last_message_id = ?, last_error = NULL,
                     updated_at = ?, validated_at = COALESCE(validated_at, ?)
@@ -323,7 +346,7 @@ class ChannelCatalogService:
             {
                 "request_id": int(row[0]),
                 "normalized_key": str(row[1]),
-                "username": str(row[2]),
+                "username": str(row[2]) if row[2] else None,
                 "canonical_link": str(row[3]),
             }
             for row in rows
@@ -352,12 +375,13 @@ class ChannelCatalogService:
         telegram_chat_id: int | str,
         title: str,
         username: str | None,
+        canonical_link: str | None = None,
         content_protected: bool,
         history_accessible: bool,
         last_message_id: int | str | None,
     ) -> int:
         now = utc_now()
-        canonical = f"https://t.me/{username}" if username else None
+        canonical = canonical_link or (f"https://t.me/{username}" if username else None)
         with connect_database(self.database_path) as connection:
             row = connection.execute(
                 """
@@ -643,8 +667,10 @@ class ChannelCatalogService:
 def normalize_channel_link(raw_link: str) -> NormalizedChannelLink:
     value = raw_link.strip()
     if not value or len(value) > 500:
-        raise ValueError("Envie um link público ou @username válido.")
+        raise ValueError("Envie um link público, privado ou @username válido.")
     username: str | None = None
+    invite_hash: str | None = None
+    private_chat_id: str | None = None
     if value.startswith("@"):
         username = value[1:]
     else:
@@ -659,17 +685,36 @@ def normalize_channel_link(raw_link: str) -> NormalizedChannelLink:
             parts = [part for part in parsed.path.split("/") if part]
             if parts and parts[0].lower() == "s":
                 parts = parts[1:]
-            if parts and not (
-                parts[0].startswith("+")
-                or parts[0].lower() in {"joinchat", "c"}
-            ):
-                username = parts[0]
+            if parts and parts[0].startswith("+"):
+                invite_hash = parts[0][1:]
+            elif len(parts) >= 2 and parts[0].lower() == "joinchat":
+                invite_hash = parts[1]
+            elif len(parts) >= 2 and parts[0].lower() == "c":
+                private_chat_id = parts[1]
             elif parts:
-                raise ValueError(
-                    "Links privados ainda precisam ser enviados diretamente ao administrador."
-                )
+                username = parts[0]
+    if invite_hash is not None:
+        invite_hash = invite_hash.split("?", 1)[0].strip()
+        if not INVITE_HASH_RE.fullmatch(invite_hash):
+            raise ValueError("Link de convite privado inválido.")
+        return NormalizedChannelLink(
+            username=None,
+            normalized_key=f"invite:{invite_hash}",
+            canonical_link=f"https://t.me/+{invite_hash}",
+        )
+    if private_chat_id is not None:
+        private_chat_id = private_chat_id.split("?", 1)[0].strip()
+        if not PRIVATE_CHAT_ID_RE.fullmatch(private_chat_id):
+            raise ValueError("Link interno do canal privado inválido.")
+        return NormalizedChannelLink(
+            username=None,
+            normalized_key=f"chat_id:-100{private_chat_id}",
+            canonical_link=f"https://t.me/c/{private_chat_id}",
+        )
     if username is None:
-        raise ValueError("Não reconheci o canal. Envie @username ou um link público do Telegram.")
+        raise ValueError(
+            "Não reconheci o canal. Envie @username ou um link público/privado do Telegram."
+        )
     username = username.split("?", 1)[0].strip().lstrip("@")
     if not USERNAME_RE.fullmatch(username):
         raise ValueError("Username público do canal inválido.")
@@ -678,6 +723,10 @@ def normalize_channel_link(raw_link: str) -> NormalizedChannelLink:
         normalized_key=f"username:{username.lower()}",
         canonical_link=f"https://t.me/{username}",
     )
+
+
+def channel_request_title(channel: NormalizedChannelLink) -> str:
+    return f"@{channel.username}" if channel.username else "Canal privado"
 
 
 def extract_channel_toggle(callback_data: str) -> int | None:

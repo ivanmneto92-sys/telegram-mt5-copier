@@ -86,6 +86,7 @@ O admin master pode:
 - aprovar o acesso somente ao registrar o valor pago e a data de validade;
 - bloquear automaticamente novas entradas quando a validade terminar;
 - visualizar a receita mensal cadastrada;
+- desativar ou reativar canais de sinais sem apagar o histórico operacional;
 - registrar cada alteração em `admin_actions`.
 
 Exemplo:
@@ -104,8 +105,8 @@ com PIX/cartão depende da escolha futura do provedor de pagamento.
 
 O monitoramento usa uma única conta técnica do Telegram. O cliente não conecta
 a própria sessão e não adiciona canais diretamente à execução. Pelo submenu
-`📻 Canais de sinais`, ele pode enviar `@username`, um link `t.me` público ou um
-link do Telegram Web.
+`📻 Canais de sinais`, ele pode enviar `@username`, um link `t.me` público, um
+link privado de convite ou um link do Telegram Web.
 
 O fluxo de segurança é:
 
@@ -118,10 +119,14 @@ O fluxo de segurança é:
    específicos.
 
 Uma sugestão nunca faz a conta técnica entrar automaticamente em um canal e
-nunca começa a executar ordens antes da aprovação. Links privados de convite
-não são armazenados; devem ser enviados diretamente ao administrador. Os canais
-já informados em `SOURCE_CHAT_IDS` são cadastrados como fontes confiáveis ao
-iniciar o monitor, preservando a configuração existente.
+nunca começa a executar ordens antes da aprovação. Em canais privados, o link
+fica disponível somente na área administrativa e a conta técnica deve entrar
+manualmente antes da verificação. O admin pode desativar um canal pelo painel:
+ele deixa imediatamente de gerar novas ordens e desaparece da seleção dos
+clientes, enquanto sinais e operações anteriores continuam preservados para
+auditoria. Os canais já informados em `SOURCE_CHAT_IDS` são cadastrados como
+fontes confiáveis ao iniciar o monitor, preservando a configuração existente;
+um canal desativado no painel não é reativado automaticamente após reinícios.
 
 Quando um sinal é aceito, a seleção do canal é aplicada individualmente antes
 da escolha das contas MT5. Clientes no modo personalizado não recebem execução

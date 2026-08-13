@@ -55,6 +55,13 @@ class FakeTelegramClient:
         return [type("Message", (), {"id": 77})()]
 
 
+class FakePrivateTelegramClient(FakeTelegramClient):
+    async def get_entity(self, chat_id: int) -> FakeEntity:
+        assert chat_id == -1001234567890
+        self.entity.username = None
+        return self.entity
+
+
 class ChannelCatalogTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -77,11 +84,20 @@ class ChannelCatalogTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertEqual(normalize_channel_link(value).username, expected)
 
-    def test_link_privado_nao_e_armazenado(self) -> None:
-        for value in ("https://t.me/+segredo", "https://t.me/c/123/4"):
-            with self.assertRaisesRegex(ValueError, "privados"):
-                self.catalog.submit_request(self.user.id, value)
-        self.assertEqual(self.catalog.admin_channels()["requests"], [])
+    def test_normaliza_e_armazena_links_privados(self) -> None:
+        invite = normalize_channel_link("https://t.me/+AbCdEfGh1234")
+        internal = normalize_channel_link("https://t.me/c/1234567890/42")
+
+        self.assertIsNone(invite.username)
+        self.assertEqual(invite.normalized_key, "invite:AbCdEfGh1234")
+        self.assertEqual(internal.normalized_key, "chat_id:-1001234567890")
+        result = self.catalog.submit_request(self.user.id, invite.canonical_link)
+        self.assertEqual(result.title, "Canal privado")
+        self.assertEqual(len(self.catalog.admin_channels()["requests"]), 1)
+
+    def test_link_privado_invalido_e_rejeitado(self) -> None:
+        with self.assertRaisesRegex(ValueError, "convite privado inválido"):
+            self.catalog.submit_request(self.user.id, "https://t.me/+curto")
 
     async def test_validacao_exige_participacao_da_conta_principal(self) -> None:
         self.catalog.submit_request(self.user.id, "@SNIPERGOLD_SIGNALS")
@@ -102,6 +118,17 @@ class ChannelCatalogTests(unittest.IsolatedAsyncioTestCase):
         request = self.catalog.admin_channels()["requests"][0]
         self.assertEqual(request["status"], REQUEST_READY_REVIEW)
         self.assertEqual(request["telegram_chat_id"], "-1002151523561")
+
+    async def test_valida_link_interno_de_canal_privado_quando_monitor_participa(self) -> None:
+        self.catalog.submit_request(self.user.id, "https://t.me/c/1234567890/42")
+        await validate_pending_channels_once(
+            FakePrivateTelegramClient(left=False),
+            self.catalog,
+            CaptureLogger(),
+        )
+        request = self.catalog.admin_channels()["requests"][0]
+        self.assertEqual(request["status"], REQUEST_READY_REVIEW)
+        self.assertEqual(request["canonical_link"], "https://t.me/c/1234567890")
 
     async def test_admin_aprova_e_cliente_pode_personalizar(self) -> None:
         request = self.catalog.submit_request(self.user.id, "@SNIPERGOLD_SIGNALS")
@@ -167,6 +194,32 @@ class ChannelCatalogTests(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaisesRegex(ValueError, "60"):
             self.catalog.set_display_name(channel_id, "x" * 61)
+
+    def test_admin_desativa_e_reativa_canal_sem_perder_historico(self) -> None:
+        channel_id = self.catalog.register_configured_channel(
+            telegram_chat_id="-1001234567890",
+            title="Fornecedor Secreto Gold",
+            username="FornecedorSecreto",
+            content_protected=True,
+            history_accessible=True,
+            last_message_id=10,
+        )
+        self.assertEqual(self.catalog.set_channel_status(channel_id, "suspended"), "suspended")
+        self.assertFalse(self.catalog.is_active_chat("-1001234567890"))
+        self.assertEqual(self.catalog.user_overview(self.user.id)["channels"], [])
+
+        # Uma reinicialização do monitor atualiza metadados, mas não reativa o canal removido.
+        self.catalog.register_configured_channel(
+            telegram_chat_id="-1001234567890",
+            title="Fornecedor atualizado",
+            username="FornecedorSecreto",
+            content_protected=True,
+            history_accessible=True,
+            last_message_id=11,
+        )
+        self.assertFalse(self.catalog.is_active_chat("-1001234567890"))
+        self.assertEqual(self.catalog.set_channel_status(channel_id, "active"), "active")
+        self.assertTrue(self.catalog.is_active_chat("-1001234567890"))
 
     def test_bot_recebe_sugestao_e_mostra_submenu(self) -> None:
         service = BotService(self.database_path)
@@ -273,3 +326,4 @@ class ChannelCatalogTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Canais de sinais", render_admin_panel())
         self.assertIn("/api/admin/channel-", render_admin_script())
         self.assertIn("/api/admin/channel-display-name", render_admin_script())
+        self.assertIn("/api/admin/channel-status", render_admin_script())

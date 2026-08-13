@@ -469,9 +469,13 @@ async def validate_pending_channels_once(
 ) -> None:
     for request_item in await asyncio.to_thread(catalog.pending_validations):
         normalized_key = str(request_item["normalized_key"])
-        username = str(request_item["username"])
+        username_value = request_item.get("username")
+        username = str(username_value) if username_value else None
         try:
-            entity = await client.get_entity(username)
+            entity = await resolve_suggested_channel_entity(client, request_item)
+            if entity is None:
+                catalog.mark_awaiting_membership(normalized_key, "monitor_not_member")
+                continue
             if bool(getattr(entity, "left", False)):
                 catalog.mark_awaiting_membership(normalized_key, "monitor_not_member")
                 continue
@@ -490,6 +494,7 @@ async def validate_pending_channels_once(
                 telegram_chat_id=chat_id,
                 title=telegram_entity_title(entity),
                 username=getattr(entity, "username", None) or username,
+                canonical_link=str(request_item["canonical_link"]),
                 content_protected=bool(getattr(entity, "noforwards", False)),
                 history_accessible=True,
                 last_message_id=snapshot["last_message_id"],
@@ -505,6 +510,26 @@ async def validate_pending_channels_once(
                 normalized_key,
                 type(exc).__name__,
             )
+
+
+async def resolve_suggested_channel_entity(
+    client: Any,
+    request_item: dict[str, object],
+) -> Any | None:
+    username = request_item.get("username")
+    if username:
+        return await client.get_entity(str(username))
+
+    normalized_key = str(request_item["normalized_key"])
+    if normalized_key.startswith("chat_id:"):
+        return await client.get_entity(int(normalized_key.split(":", 1)[1]))
+    if normalized_key.startswith("invite:"):
+        from telethon.tl.functions.messages import CheckChatInviteRequest
+
+        invite_hash = normalized_key.split(":", 1)[1]
+        invite = await client(CheckChatInviteRequest(invite_hash))
+        return getattr(invite, "chat", None)
+    raise ValueError("Identificador do canal sugerido inválido.")
 
 
 def telegram_client_options() -> dict[str, object]:
