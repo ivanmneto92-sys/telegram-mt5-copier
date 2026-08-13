@@ -5,7 +5,10 @@ import re
 import unicodedata
 
 
-MT5_COMMENT_MAX_LENGTH = 31
+# MT5 documenta 31 caracteres, mas alguns terminais/corretoras (ex.: white-label)
+# rejeitam com "Invalid comment argument" perto desse limite; 26 é o valor seguro
+# observado na prática.
+MT5_COMMENT_MAX_LENGTH = 26
 LEGACY_COMMENT_RE = re.compile(
     r"^tgcp (?P<signal>[0-9a-f]{8}) TP(?P<tp>\d+)$",
     re.IGNORECASE,
