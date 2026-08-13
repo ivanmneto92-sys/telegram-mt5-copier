@@ -89,6 +89,12 @@ O admin master pode:
 - desativar ou reativar canais de sinais sem apagar o histórico operacional;
 - registrar cada alteração em `admin_actions`.
 
+A partir da versão `0.31.0`, o painel é organizado em quatro áreas responsivas:
+`Visão geral`, com pendências e atalhos; `Clientes`, com acesso, MT5 e operação;
+`Financeiro`, com busca e filtros próprios para pagamentos e vencimentos; e
+`Canais`, com solicitações e controle das fontes de sinais. No computador a
+navegação usa menu lateral e, no celular, uma barra compacta no topo.
+
 Exemplo:
 
 ```env

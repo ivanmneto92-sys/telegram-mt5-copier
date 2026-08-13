@@ -241,7 +241,12 @@ class AdminPanelTests(unittest.TestCase):
         self.assertIn("/api/admin/user-status", script)
         self.assertIn("/api/admin/billing-update", script)
         self.assertIn("/api/admin/approve", script)
-        self.assertIn('data-filter="overdue"', html)
+        self.assertIn('data-finance-filter="overdue"', html)
+        self.assertIn('data-view="overview"', html)
+        self.assertIn('data-view="clients"', html)
+        self.assertIn('data-view="finance"', html)
+        self.assertIn('data-view="channels"', html)
+        self.assertIn('id="finance-list"', html)
         self.assertNotIn("TELEGRAM_BOT_TOKEN", html + script)
 
 

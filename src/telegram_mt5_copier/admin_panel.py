@@ -746,8 +746,22 @@ def render_admin_panel(
       color: var(--text);
     }}
     button, input, select, textarea {{ font: inherit; }}
-    .shell {{ max-width: 1280px; margin: 0 auto; padding: 26px 18px 60px; }}
-    header {{ display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; margin-bottom: 28px; }}
+    .shell {{ max-width: 1500px; margin: 0 auto; padding: 18px; display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 20px; }}
+    .sidebar {{ position: sticky; top: 18px; align-self: start; min-height: calc(100vh - 36px); padding: 22px 14px; border: 1px solid var(--line); border-radius: 20px; background: rgba(8, 23, 39, .94); box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 22px; }}
+    .brand-block {{ padding: 0 8px; }}
+    .brand-title {{ margin-top: 7px; font-size: 20px; font-weight: 850; letter-spacing: -.02em; }}
+    .brand-copy {{ color: var(--muted); font-size: 12px; margin-top: 5px; line-height: 1.45; }}
+    .navigation {{ display: grid; gap: 7px; }}
+    .nav-button {{ display: grid; grid-template-columns: 26px 1fr auto; align-items: center; gap: 9px; width: 100%; padding: 12px; border: 1px solid transparent; border-radius: 12px; color: var(--muted); background: transparent; text-align: left; cursor: pointer; }}
+    .nav-button:hover {{ color: var(--text); background: rgba(17, 36, 59, .72); }}
+    .nav-button.active {{ color: var(--text); border-color: rgba(57,215,196,.32); background: rgba(57,215,196,.1); }}
+    .nav-icon {{ font-size: 18px; text-align: center; }}
+    .nav-label {{ font-weight: 750; }}
+    .nav-badge {{ min-width: 23px; padding: 3px 6px; border-radius: 999px; background: var(--panel-soft); color: var(--text); font-size: 11px; text-align: center; }}
+    .nav-button.active .nav-badge {{ background: var(--cyan); color: #06151a; }}
+    .sidebar-foot {{ margin-top: auto; padding: 12px 9px 0; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; line-height: 1.5; }}
+    .content {{ min-width: 0; padding: 8px 4px 60px; }}
+    header {{ display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; margin-bottom: 22px; }}
     .eyebrow {{ color: var(--cyan); font-size: 12px; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; }}
     h1 {{ margin: 6px 0 4px; font-size: clamp(28px, 5vw, 44px); line-height: 1; letter-spacing: -.035em; }}
     .subtitle {{ color: var(--muted); margin: 0; }}
@@ -759,11 +773,24 @@ def render_admin_panel(
     .refresh:hover, .logout:hover {{ border-color: var(--cyan); }}
     .notice {{ padding: 14px 16px; border: 1px solid var(--line); background: var(--panel); border-radius: 14px; color: var(--muted); }}
     .notice.error {{ color: #ffd9dd; border-color: rgba(255,107,120,.55); background: rgba(92, 25, 38, .45); }}
-    .summary {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin: 20px 0 26px; }}
+    .summary {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 0 0 22px; }}
     .metric {{ padding: 17px; border: 1px solid var(--line); border-radius: 16px; background: linear-gradient(145deg, rgba(17,36,59,.96), rgba(10,25,43,.96)); box-shadow: var(--shadow); }}
     .metric span {{ display: block; color: var(--muted); font-size: 12px; min-height: 30px; }}
     .metric strong {{ display: block; margin-top: 8px; font-size: 27px; letter-spacing: -.03em; }}
     .toolbar {{ display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 15px; }}
+    .view[hidden] {{ display: none !important; }}
+    .view-head {{ display: flex; justify-content: space-between; align-items: end; gap: 16px; margin: 0 0 18px; }}
+    .view-head h2 {{ margin: 0 0 5px; font-size: 25px; letter-spacing: -.025em; }}
+    .view-head p {{ margin: 0; color: var(--muted); font-size: 13px; }}
+    .overview-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }}
+    .overview-panel {{ min-width: 0; padding: 18px; border: 1px solid var(--line); border-radius: 18px; background: rgba(13, 27, 46, .94); }}
+    .overview-panel h3 {{ margin: 0 0 5px; font-size: 17px; }}
+    .overview-panel > p {{ margin: 0 0 14px; color: var(--muted); font-size: 12px; }}
+    .quick-list {{ display: grid; gap: 8px; }}
+    .quick-row {{ display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 11px 12px; border-radius: 11px; background: #091727; color: var(--muted); font-size: 13px; }}
+    .quick-row strong {{ color: var(--text); overflow-wrap: anywhere; }}
+    .quick-action {{ border: 1px solid var(--line); border-radius: 9px; padding: 7px 9px; color: var(--cyan); background: transparent; cursor: pointer; white-space: nowrap; }}
+    .finance-card {{ display: grid; grid-template-columns: minmax(190px, 1.3fr) minmax(140px, .8fr) minmax(150px, .8fr) minmax(130px, .7fr) auto; gap: 16px; align-items: center; padding: 17px; border: 1px solid var(--line); border-radius: 16px; background: rgba(13, 27, 46, .94); }}
     .search {{ flex: 1 1 280px; min-width: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: #091727; color: var(--text); outline: none; }}
     .search:focus {{ border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(57,215,196,.1); }}
     .filters {{ display: flex; gap: 7px; overflow-x: auto; }}
@@ -815,19 +842,35 @@ def render_admin_panel(
     .payment-history {{ display: grid; gap: 7px; color: var(--muted); font-size: 13px; }}
     .payment-row {{ display: flex; justify-content: space-between; gap: 12px; padding: 9px 11px; background: #091727; border: 1px solid var(--line); border-radius: 10px; }}
     @media (max-width: 980px) {{
+      .shell {{ grid-template-columns: 1fr; padding-top: 84px; }}
+      .sidebar {{ position: fixed; z-index: 20; inset: 0 0 auto 0; min-height: 0; padding: 10px 12px; border-width: 0 0 1px; border-radius: 0; display: block; backdrop-filter: blur(15px); }}
+      .brand-block, .sidebar-foot {{ display: none; }}
+      .navigation {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; max-width: 760px; margin: 0 auto; }}
+      .nav-button {{ display: flex; justify-content: center; padding: 9px 7px; }}
+      .nav-label {{ font-size: 12px; }}
+      .nav-badge {{ display: none; }}
       .summary {{ grid-template-columns: repeat(3, 1fr); }}
       .user-main {{ grid-template-columns: 1fr 1fr; }}
       .channel-card {{ grid-template-columns: 1fr 1fr; }}
+      .finance-card {{ grid-template-columns: 1fr 1fr; }}
       .actions {{ flex-direction: row; }}
     }}
     @media (max-width: 620px) {{
-      .shell {{ padding: 19px 12px 45px; }}
+      .shell {{ padding: 78px 12px 45px; }}
+      .navigation {{ gap: 2px; }}
+      .nav-button {{ flex-direction: column; gap: 2px; padding: 7px 3px; }}
+      .nav-icon {{ font-size: 17px; }}
+      .nav-label {{ font-size: 10px; }}
+      .content {{ padding-top: 0; }}
       header {{ align-items: center; }}
       .subtitle {{ font-size: 13px; }}
       .summary {{ grid-template-columns: repeat(2, 1fr); }}
       .metric {{ padding: 14px; }}
+      .overview-grid {{ grid-template-columns: 1fr; }}
+      .view-head {{ align-items: flex-start; flex-direction: column; }}
       .user-main {{ grid-template-columns: 1fr; gap: 12px; padding: 15px; }}
       .channel-card {{ grid-template-columns: 1fr; }}
+      .finance-card {{ grid-template-columns: 1fr; }}
       .actions {{ width: 100%; }}
       .action {{ flex: 1; }}
       .form-grid {{ grid-template-columns: 1fr; }}
@@ -839,37 +882,77 @@ def render_admin_panel(
 </head>
 <body>
   <main class="shell">
-    <header>
-      <div>
+    <aside class="sidebar" aria-label="Menu administrativo">
+      <div class="brand-block">
         <div class="eyebrow">{safe_brand} · Master</div>
-        <h1>Central de clientes</h1>
-        <p class="subtitle">Acesso, conexão MT5 e atividade operacional em um único lugar.</p>
+        <div class="brand-title">Central de clientes</div>
+        <div class="brand-copy">Gestão administrativa e operacional.</div>
       </div>
-      <div class="header-actions">
-        <button class="refresh" id="refresh" type="button">Atualizar</button>
-        <button class="logout" id="logout" type="button" hidden>Sair</button>
-      </div>
-    </header>
-    <div class="notice" id="notice">Validando seu acesso administrativo pelo Telegram…</div>
-    <section class="summary" id="summary" aria-label="Resumo operacional" hidden></section>
-    <section id="workspace" hidden>
-      <div class="toolbar">
-        <input class="search" id="search" type="search" placeholder="Buscar nome, ID, conta ou servidor" aria-label="Buscar clientes">
-        <div class="filters" id="filters" aria-label="Filtrar clientes">
-          <button class="filter active" type="button" data-filter="all">Todos</button>
-          <button class="filter" type="button" data-filter="active">Ativos</button>
-          <button class="filter" type="button" data-filter="paused">Pausados</button>
-          <button class="filter" type="button" data-filter="attention">Atenção</button>
-          <button class="filter" type="button" data-filter="overdue">Em atraso</button>
-          <button class="filter" type="button" data-filter="pending">Pendentes</button>
-          <button class="filter" type="button" data-filter="due_soon">Vence em 7 dias</button>
+      <nav class="navigation" id="navigation">
+        <button class="nav-button active" type="button" data-view="overview"><span class="nav-icon">▦</span><span class="nav-label">Visão geral</span><span class="nav-badge" id="nav-attention">0</span></button>
+        <button class="nav-button" type="button" data-view="clients"><span class="nav-icon">♟</span><span class="nav-label">Clientes</span><span class="nav-badge" id="nav-clients">0</span></button>
+        <button class="nav-button" type="button" data-view="finance"><span class="nav-icon">$</span><span class="nav-label">Financeiro</span><span class="nav-badge" id="nav-overdue">0</span></button>
+        <button class="nav-button" type="button" data-view="channels"><span class="nav-icon">◉</span><span class="nav-label">Canais</span><span class="nav-badge" id="nav-channels">0</span></button>
+      </nav>
+      <div class="sidebar-foot">Acesso protegido por sessão administrativa. Todas as alterações importantes são auditadas.</div>
+    </aside>
+    <div class="content">
+      <header>
+        <div>
+          <div class="eyebrow" id="page-eyebrow">Painel administrativo</div>
+          <h1 id="page-title">Visão geral</h1>
+          <p class="subtitle" id="page-subtitle">O que precisa da sua atenção agora.</p>
         </div>
-      </div>
-      <div class="list" id="user-list"></div>
-      <h2 class="section-title">Canais de sinais</h2>
-      <p class="section-copy">Entre no canal com a conta principal, confira o padrão da mensagem e só então aprove a solicitação.</p>
-      <div class="list" id="channel-list"></div>
-    </section>
+        <div class="header-actions">
+          <button class="refresh" id="refresh" type="button">↻ Atualizar</button>
+          <button class="logout" id="logout" type="button" hidden>Sair</button>
+        </div>
+      </header>
+      <div class="notice" id="notice">Validando seu acesso administrativo pelo Telegram…</div>
+      <section id="workspace" hidden>
+        <section class="view" id="view-overview" data-view-panel="overview">
+          <section class="summary" id="summary" aria-label="Resumo operacional"></section>
+          <div class="overview-grid">
+            <article class="overview-panel"><h3>⚠️ Precisa de atenção</h3><p>Contas desconectadas, falhas e clientes em atraso.</p><div class="quick-list" id="attention-list"></div></article>
+            <article class="overview-panel"><h3>⏳ Próximos vencimentos</h3><p>Clientes que vencem nos próximos sete dias.</p><div class="quick-list" id="due-list"></div></article>
+            <article class="overview-panel"><h3>📡 Canais</h3><p>Solicitações aguardando análise e situação do catálogo.</p><div class="quick-list" id="channel-overview"></div></article>
+            <article class="overview-panel"><h3>⚡ Operação</h3><p>Resumo das contas conectadas e sinais em andamento.</p><div class="quick-list" id="operation-overview"></div></article>
+          </div>
+        </section>
+        <section class="view" id="view-clients" data-view-panel="clients" hidden>
+          <div class="view-head"><div><h2>Clientes</h2><p>Contas, conexão MT5, acesso e configurações operacionais.</p></div></div>
+          <div class="toolbar">
+            <input class="search" id="search" type="search" placeholder="Buscar nome, Telegram, conta ou servidor" aria-label="Buscar clientes">
+            <div class="filters" id="filters" aria-label="Filtrar clientes">
+              <button class="filter active" type="button" data-filter="all">Todos</button>
+              <button class="filter" type="button" data-filter="active">Ativos</button>
+              <button class="filter" type="button" data-filter="paused">Pausados</button>
+              <button class="filter" type="button" data-filter="attention">Atenção</button>
+            </div>
+          </div>
+          <div class="list" id="user-list"></div>
+        </section>
+        <section class="view" id="view-finance" data-view-panel="finance" hidden>
+          <div class="view-head"><div><h2>Financeiro</h2><p>Mensalidades, pagamentos, vencimentos e liberações de acesso.</p></div></div>
+          <div class="toolbar">
+            <input class="search" id="finance-search" type="search" placeholder="Buscar cliente, plano, e-mail ou telefone" aria-label="Buscar no financeiro">
+            <div class="filters" id="finance-filters" aria-label="Filtrar financeiro">
+              <button class="filter active" type="button" data-finance-filter="all">Todos</button>
+              <button class="filter" type="button" data-finance-filter="paid">Pagos</button>
+              <button class="filter" type="button" data-finance-filter="pending">Pendentes</button>
+              <button class="filter" type="button" data-finance-filter="overdue">Em atraso</button>
+              <button class="filter" type="button" data-finance-filter="due_soon">Vence em 7 dias</button>
+              <button class="filter" type="button" data-finance-filter="unconfigured">Sem cadastro</button>
+            </div>
+          </div>
+          <div class="list" id="finance-list"></div>
+        </section>
+        <section class="view" id="view-channels" data-view-panel="channels" hidden>
+          <div class="view-head"><div><h2>Canais de sinais</h2><p>Analise solicitações, controle o monitoramento e organize os nomes exibidos.</p></div></div>
+          <div class="list" id="channel-list"></div>
+        </section>
+      </section>
+    </div>
     <dialog id="finance-dialog">
       <div class="dialog-head">
         <h2 id="finance-title">Financeiro do cliente</h2>
@@ -924,14 +1007,18 @@ def render_admin_script() -> str:
 (function () {
   "use strict";
   var tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
-  var state = { users: [], summary: {}, channels: { requests: [], channels: [] }, csrf: "", filter: "all", query: "", busy: false, browser: false };
+  var state = { users: [], summary: {}, channels: { requests: [], channels: [] }, csrf: "", filter: "all", query: "", financeFilter: "all", financeQuery: "", view: "overview", busy: false, browser: false };
   var notice = document.getElementById("notice");
   var summary = document.getElementById("summary");
   var workspace = document.getElementById("workspace");
   var list = document.getElementById("user-list");
+  var financeList = document.getElementById("finance-list");
   var channelList = document.getElementById("channel-list");
   var search = document.getElementById("search");
+  var financeSearch = document.getElementById("finance-search");
   var filters = document.getElementById("filters");
+  var financeFilters = document.getElementById("finance-filters");
+  var navigation = document.getElementById("navigation");
   var refresh = document.getElementById("refresh");
   var logout = document.getElementById("logout");
   var dialog = document.getElementById("finance-dialog");
@@ -1007,23 +1094,96 @@ def render_admin_script() -> str:
   function renderSummary() {
     var items = [
       ["Clientes", state.summary.users],
-      ["Ativos", state.summary.active],
       ["Acessos liberados", state.summary.approved_accesses],
       ["MT5 conectadas", state.summary.connected_accounts],
       ["Precisam atenção", state.summary.attention_accounts],
       ["Sinais ativos", state.summary.active_groups],
-      ["Pagos", state.summary.billing_paid],
-      ["Pendentes", state.summary.billing_pending],
       ["Em atraso", state.summary.billing_overdue],
-      ["Vencem em 7 dias", state.summary.billing_due_soon],
-      ["Sem financeiro", state.summary.billing_unconfigured],
-      ["Receita mensal", money(state.summary.monthly_total)]
-      ,["Canais ativos", state.summary.active_channels]
-      ,["Canais aguardando", state.summary.pending_channel_requests]
+      ["Receita mensal", money(state.summary.monthly_total)],
+      ["Canais aguardando", state.summary.pending_channel_requests]
     ];
     summary.innerHTML = items.map(function (item) {
       return '<article class="metric"><span>' + esc(item[0]) + '</span><strong>' + esc(item[1] || 0) + '</strong></article>';
     }).join("");
+  }
+
+  function userName(user) {
+    var billing = user.billing || {};
+    return billing.customer_name || (user.username ? "@" + user.username : "Cliente #" + user.id);
+  }
+
+  function needsAttention(user) {
+    var account = user.account;
+    var billing = user.billing || {};
+    return !account || account.connection_status !== "connected" || !!account.last_error || billing.effective_status === "overdue";
+  }
+
+  function dueSoon(user) {
+    var billing = user.billing || {};
+    if (!billing.due_date) { return false; }
+    var due = new Date(billing.due_date + "T12:00:00");
+    var today = new Date(todayIso() + "T12:00:00");
+    var days = Math.round((due - today) / 86400000);
+    return days >= 0 && days <= 7;
+  }
+
+  function quickEmpty(message) {
+    return '<div class="empty" style="padding:20px">' + esc(message) + '</div>';
+  }
+
+  function renderOverview() {
+    var attention = state.users.filter(needsAttention).slice(0, 6);
+    document.getElementById("attention-list").innerHTML = attention.length ? attention.map(function (user) {
+      var account = user.account || {};
+      var reason = (user.billing || {}).effective_status === "overdue" ? "Pagamento em atraso" :
+        (!user.account ? "Sem conta MT5" : (account.last_error || statusLabel(account.connection_status)));
+      return '<div class="quick-row"><span><strong>' + esc(userName(user)) + '</strong><br>' + esc(reason) + '</span>' +
+        '<button class="quick-action" type="button" data-find-user="' + esc(user.telegram_user_id) + '">Ver cliente</button></div>';
+    }).join("") : quickEmpty("Nenhuma pendência operacional.");
+
+    var dueUsers = state.users.filter(dueSoon).sort(function (a, b) {
+      return String(a.billing.due_date).localeCompare(String(b.billing.due_date));
+    }).slice(0, 6);
+    document.getElementById("due-list").innerHTML = dueUsers.length ? dueUsers.map(function (user) {
+      return '<div class="quick-row"><span><strong>' + esc(userName(user)) + '</strong><br>Vence em ' + dateOnly(user.billing.due_date) + '</span>' +
+        '<button class="quick-action" type="button" data-open-finance="' + esc(user.id) + '">Abrir</button></div>';
+    }).join("") : quickEmpty("Nenhum vencimento nos próximos 7 dias.");
+
+    var channelSummary = state.channels || { requests: [], channels: [] };
+    document.getElementById("channel-overview").innerHTML =
+      '<div class="quick-row"><span><strong>' + esc((channelSummary.channels || []).filter(function (item) { return item.status === "active"; }).length) + '</strong><br>Canais ativos</span></div>' +
+      '<div class="quick-row"><span><strong>' + esc((channelSummary.requests || []).length) + '</strong><br>Solicitações aguardando</span><button class="quick-action" type="button" data-go-view="channels">Gerenciar</button></div>';
+
+    document.getElementById("operation-overview").innerHTML =
+      '<div class="quick-row"><span><strong>' + esc(state.summary.connected_accounts || 0) + '</strong><br>Contas MT5 conectadas</span></div>' +
+      '<div class="quick-row"><span><strong>' + esc(state.summary.active_groups || 0) + '</strong><br>Sinais em andamento</span><button class="quick-action" type="button" data-go-view="clients">Ver contas</button></div>';
+  }
+
+  function updateNavigation() {
+    document.getElementById("nav-attention").textContent = state.summary.attention_accounts || 0;
+    document.getElementById("nav-clients").textContent = state.summary.users || 0;
+    document.getElementById("nav-overdue").textContent = state.summary.billing_overdue || 0;
+    document.getElementById("nav-channels").textContent = state.summary.pending_channel_requests || 0;
+  }
+
+  function setView(view) {
+    var labels = {
+      overview: ["Visão geral", "O que precisa da sua atenção agora."],
+      clients: ["Clientes", "Acesso, conexão MT5 e gestão operacional."],
+      finance: ["Financeiro", "Pagamentos, vencimentos e liberações."],
+      channels: ["Canais", "Fontes de sinais e solicitações pendentes."]
+    };
+    if (!labels[view]) { view = "overview"; }
+    state.view = view;
+    Array.prototype.forEach.call(document.querySelectorAll("[data-view-panel]"), function (panel) {
+      panel.hidden = panel.getAttribute("data-view-panel") !== view;
+    });
+    Array.prototype.forEach.call(document.querySelectorAll("[data-view]"), function (button) {
+      button.classList.toggle("active", button.getAttribute("data-view") === view);
+    });
+    document.getElementById("page-title").textContent = labels[view][0];
+    document.getElementById("page-subtitle").textContent = labels[view][1];
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   function matches(user) {
@@ -1099,6 +1259,35 @@ def render_admin_script() -> str:
     list.innerHTML = visible.length ? visible.map(userCard).join("") : '<div class="empty">Nenhum cliente encontrado neste filtro.</div>';
   }
 
+  function matchesFinance(user) {
+    var billing = user.billing || {};
+    var unconfigured = !billing.due_date && Number(billing.monthly_amount || 0) <= 0;
+    if (state.financeFilter === "unconfigured" && !unconfigured) { return false; }
+    if (state.financeFilter === "due_soon" && !dueSoon(user)) { return false; }
+    if (["paid", "pending", "overdue"].indexOf(state.financeFilter) !== -1 && billing.effective_status !== state.financeFilter) { return false; }
+    var haystack = [userName(user), user.username, user.telegram_user_id, billing.email, billing.phone, billing.plan_name].join(" ").toLowerCase();
+    return !state.financeQuery || haystack.indexOf(state.financeQuery) !== -1;
+  }
+
+  function financeCard(user) {
+    var billing = user.billing || {};
+    var access = user.access || {};
+    return '<article class="finance-card">' +
+      '<div class="identity"><h2>' + esc(userName(user)) + '</h2><div class="meta">' +
+        esc(billing.email || "Sem e-mail") + ' · ' + esc(billing.phone || "Sem telefone") + '</div></div>' +
+      '<div class="detail"><span class="status ' + esc(billing.effective_status) + '">' + esc(statusLabel(billing.effective_status)) + '</span><br>' + esc(billing.plan_name || "Mensal") + '</div>' +
+      '<div class="detail"><span class="account-name">' + money(billing.monthly_amount || "0") + '</span><br>Último: ' + money(access.amount_paid) + '</div>' +
+      '<div class="detail">Vence: <strong>' + dateOnly(billing.due_date) + '</strong><br>' +
+        '<span style="color:' + (access.allowed ? 'var(--green)' : 'var(--red)') + '">' + (access.allowed ? 'Acesso liberado' : 'Acesso bloqueado') + '</span></div>' +
+      '<div class="actions"><button class="action finance" type="button" data-finance-user="' + esc(user.id) + '">Gerenciar</button></div>' +
+      '</article>';
+  }
+
+  function renderFinance() {
+    var visible = state.users.filter(matchesFinance);
+    financeList.innerHTML = visible.length ? visible.map(financeCard).join("") : '<div class="empty">Nenhum cliente encontrado neste filtro financeiro.</div>';
+  }
+
   function channelRequestStatus(value) {
     return {
       pending_access: "Verificação solicitada",
@@ -1154,8 +1343,12 @@ def render_admin_script() -> str:
     summary.hidden = false;
     workspace.hidden = false;
     renderSummary();
+    renderOverview();
     renderUsers();
+    renderFinance();
     renderChannels();
+    updateNavigation();
+    setView(state.view);
   }
 
   function load() {
@@ -1295,6 +1488,23 @@ def render_admin_script() -> str:
     });
     renderUsers();
   });
+  navigation.addEventListener("click", function (event) {
+    var button = event.target.closest("[data-view]");
+    if (button) { setView(button.getAttribute("data-view")); }
+  });
+  financeSearch.addEventListener("input", function () {
+    state.financeQuery = financeSearch.value.trim().toLowerCase();
+    renderFinance();
+  });
+  financeFilters.addEventListener("click", function (event) {
+    var button = event.target.closest("[data-finance-filter]");
+    if (!button) { return; }
+    state.financeFilter = button.getAttribute("data-finance-filter");
+    Array.prototype.forEach.call(financeFilters.querySelectorAll(".filter"), function (item) {
+      item.classList.toggle("active", item === button);
+    });
+    renderFinance();
+  });
   list.addEventListener("click", function (event) {
     var button = event.target.closest("[data-action-status]");
     if (button) {
@@ -1303,6 +1513,28 @@ def render_admin_script() -> str:
     }
     var finance = event.target.closest("[data-finance-user]");
     if (finance) { openFinance(finance.getAttribute("data-finance-user")); }
+  });
+  financeList.addEventListener("click", function (event) {
+    var finance = event.target.closest("[data-finance-user]");
+    if (finance) { openFinance(finance.getAttribute("data-finance-user")); }
+  });
+  document.getElementById("view-overview").addEventListener("click", function (event) {
+    var findUser = event.target.closest("[data-find-user]");
+    if (findUser) {
+      state.filter = "all";
+      state.query = findUser.getAttribute("data-find-user").toLowerCase();
+      search.value = state.query;
+      Array.prototype.forEach.call(filters.querySelectorAll(".filter"), function (item) {
+        item.classList.toggle("active", item.getAttribute("data-filter") === "all");
+      });
+      renderUsers();
+      setView("clients");
+      return;
+    }
+    var goTo = event.target.closest("[data-go-view]");
+    if (goTo) { setView(goTo.getAttribute("data-go-view")); return; }
+    var finance = event.target.closest("[data-open-finance]");
+    if (finance) { openFinance(finance.getAttribute("data-open-finance")); }
   });
   channelList.addEventListener("click", function (event) {
     var button = event.target.closest("[data-channel-action]");
