@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
+import logging
 from pathlib import Path
 import time
 from typing import Callable
@@ -41,6 +42,8 @@ from .symbol_resolver import SymbolResolver
 from .trade_comment import build_trade_comment, parse_trade_comment
 
 MT5_MAGIC_NUMBER = 27071301
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -386,6 +389,8 @@ class PendingOrderExecutor:
         ]
         check_results = []
         for request in requests:
+            comment = request.get("comment", "")
+            LOGGER.info("order_check comment=%r len=%d", comment, len(str(comment)))
             try:
                 check_results.append(client.order_check(request))
             except Exception as exc:
