@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from decimal import Decimal
 import json
+import os
 from pathlib import Path
+import sys
 import tempfile
 import time
 import unittest
@@ -468,6 +470,22 @@ class MT5OnboardingTests(unittest.TestCase):
         finally:
             first.close()
             second.close()
+
+    @unittest.skipUnless(sys.platform == "win32", "Comportamento específico do Windows")
+    def test_lock_de_worker_descarta_pid_reutilizado_sem_handle_ativo(self) -> None:
+        account_dir = self.root / "reused-pid"
+        account_dir.mkdir(parents=True)
+        (account_dir / "worker.lock").write_text(str(os.getpid()), encoding="ascii")
+        lock = AccountWorkerLock(account_dir)
+
+        try:
+            lock.acquire()
+            self.assertEqual(
+                (account_dir / "worker.lock").read_text(encoding="ascii"),
+                str(os.getpid()),
+            )
+        finally:
+            lock.close()
 
     def test_worker_atualiza_heartbeat(self) -> None:
         user = self.create_user()
