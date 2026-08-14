@@ -71,7 +71,7 @@ class PositionManager:
         self.settlement_monitor = settlement_monitor
         self.notifier = notifier
         self._last_settlement_check: dict[int, float] = {}
-        self._daily_loss_notifications: set[tuple[int, str]] = set()
+        self._daily_limit_notifications: set[tuple[int, str, str]] = set()
 
     def manage_account(self, account: MT5Account, profile: ExecutionProfile) -> int:
         if account.terminal_path is None:
@@ -97,17 +97,17 @@ class PositionManager:
                 for order in pending_orders
                 if int(value(order, "magic", 0) or 0) == MT5_MAGIC_NUMBER
             )
-            daily_stop_changes = self._enforce_daily_loss_limit(
+            daily_limit_changes = self._enforce_daily_result_limits(
                 client,
                 account,
                 profile,
                 copier_positions,
                 copier_pending_orders,
             )
-            if daily_stop_changes is not None:
+            if daily_limit_changes is not None:
                 if self.settlement_monitor is not None:
                     self.settlement_monitor.reconcile(client, account)
-                return daily_stop_changes
+                return daily_limit_changes
 
             managed_positions: list[tuple[object, ManagedOrder]] = []
             for position in positions:
@@ -238,7 +238,7 @@ class PositionManager:
             client.shutdown()
             operation_lock.close()
 
-    def _enforce_daily_loss_limit(
+    def _enforce_daily_result_limits(
         self,
         client: object,
         account: MT5Account,
@@ -246,13 +246,16 @@ class PositionManager:
         positions: tuple[object, ...],
         pending_orders: tuple[object, ...],
     ) -> int | None:
-        """Enforce the configured account-wide daily loss as a live kill switch.
+        """Enforce account-wide daily profit/loss thresholds as a live kill switch.
 
         The entry validator prevents *new* signals after the realized result reaches
-        the limit. This guard also includes floating P/L and removes existing copier
-        exposure as soon as the configured threshold is observed.
+        a threshold. This guard also includes floating P/L and removes existing
+        copier exposure as soon as the configured threshold is observed.
         """
-        if profile.daily_loss_limit <= 0 or not (positions or pending_orders):
+        if (
+            profile.daily_profit_target <= 0
+            and profile.daily_loss_limit <= 0
+        ) or not (positions or pending_orders):
             return None
 
         now = datetime.now(tz=timezone.utc)
@@ -270,7 +273,21 @@ class PositionManager:
             floating_result += Decimal(str(value(position, "swap", 0) or 0))
 
         observed_result = realized_result + floating_result
-        if observed_result > -profile.daily_loss_limit:
+        trigger_kind: str | None = None
+        configured_limit = Decimal("0")
+        if (
+            profile.daily_profit_target > 0
+            and observed_result >= profile.daily_profit_target
+        ):
+            trigger_kind = "profit_target"
+            configured_limit = profile.daily_profit_target
+        elif (
+            profile.daily_loss_limit > 0
+            and observed_result <= -profile.daily_loss_limit
+        ):
+            trigger_kind = "loss_limit"
+            configured_limit = profile.daily_loss_limit
+        if trigger_kind is None:
             return None
 
         pause_until = next_daily_signal_resume_at(now)
@@ -286,6 +303,9 @@ class PositionManager:
 
         changed = 0
         failures: list[str] = []
+        trade_comment = (
+            "tgcp daily target" if trigger_kind == "profit_target" else "tgcp daily stop"
+        )
         for pending_order in pending_orders:
             ticket = int(value(pending_order, "ticket", value(pending_order, "order", 0)) or 0)
             result = client.order_send(
@@ -293,7 +313,7 @@ class PositionManager:
                     "action": mt5_constant(client, "TRADE_ACTION_REMOVE", 8),
                     "order": ticket,
                     "magic": MT5_MAGIC_NUMBER,
-                    "comment": "tgcp daily stop",
+                    "comment": trade_comment,
                 }
             )
             if is_successful_mt5_result(client, result, check=False):
@@ -329,7 +349,7 @@ class PositionManager:
                     "price": float(close_price),
                     "deviation": int(profile.max_slippage_points),
                     "magic": MT5_MAGIC_NUMBER,
-                    "comment": "tgcp daily stop",
+                    "comment": trade_comment,
                     "type_time": mt5_constant(client, "ORDER_TIME_GTC", 0),
                     "type_filling": market_filling_constant(client, info),
                 }
@@ -339,28 +359,31 @@ class PositionManager:
             else:
                 failures.append(f"posição {ticket}: {mt5_failure_message(client, result)}")
 
-        self._notify_daily_loss_limit(
+        self._notify_daily_result_limit(
             account,
-            profile.daily_loss_limit,
+            trigger_kind,
+            configured_limit,
             observed_result,
             pause_until,
             failures,
             session_start,
         )
         LOGGER.warning(
-            "Limite de perda diária acionado. account=%s limite=%s resultado=%s "
-            "alteracoes=%s falhas=%s",
+            "Trava financeira diária acionada. account=%s tipo=%s limite=%s "
+            "resultado=%s alteracoes=%s falhas=%s",
             account.id,
-            profile.daily_loss_limit,
+            trigger_kind,
+            configured_limit,
             observed_result,
             changed,
             len(failures),
         )
         return changed
 
-    def _notify_daily_loss_limit(
+    def _notify_daily_result_limit(
         self,
         account: MT5Account,
+        trigger_kind: str,
         configured_limit: Decimal,
         observed_result: Decimal,
         pause_until: datetime,
@@ -369,10 +392,10 @@ class PositionManager:
     ) -> None:
         if self.notifier is None:
             return
-        notification_key = (account.id, session_start.isoformat())
-        if notification_key in self._daily_loss_notifications:
+        notification_key = (account.id, session_start.isoformat(), trigger_kind)
+        if notification_key in self._daily_limit_notifications:
             return
-        self._daily_loss_notifications.add(notification_key)
+        self._daily_limit_notifications.add(notification_key)
         with connect_database(self.database_path) as connection:
             row = connection.execute(
                 "SELECT telegram_user_id FROM users WHERE id = ?",
@@ -387,10 +410,13 @@ class PositionManager:
             else "A proteção foi acionada, mas algumas exposições não puderam ser encerradas. "
             "Verifique imediatamente o MetaTrader 5."
         )
+        is_profit_target = trigger_kind == "profit_target"
+        title = "🎯 META DIÁRIA ATINGIDA" if is_profit_target else "🛑 LIMITE DE PERDA DIÁRIA ACIONADO"
+        limit_label = "Meta configurada" if is_profit_target else "Limite configurado"
         message = (
-            "🛑 LIMITE DE PERDA DIÁRIA ACIONADO\n\n"
+            f"{title}\n\n"
             f"Conta: {account.masked_login}\n"
-            f"Limite configurado: US$ {configured_limit:.2f}\n"
+            f"{limit_label}: US$ {configured_limit:.2f}\n"
             f"Resultado observado: US$ {observed_result:.2f}\n\n"
             f"{status}\n"
             f"Novos sinais ficam bloqueados até "

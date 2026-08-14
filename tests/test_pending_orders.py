@@ -1739,6 +1739,108 @@ class PendingOrderTests(unittest.TestCase):
         self.assertEqual(changed, 0)
         self.assertEqual(client.order_send_requests, [])
 
+    def test_worker_protege_meta_diaria_com_lucro_flutuante(self) -> None:
+        profile = self.accounts.update_execution_profile_field(
+            self.user.id,
+            self.account.id,
+            "daily_profit_target",
+            "30",
+        )
+
+        class RecordingNotifier:
+            def __init__(self) -> None:
+                self.messages: list[tuple[int, str]] = []
+
+            def send(self, telegram_user_id: int, message: str) -> bool:
+                self.messages.append((telegram_user_id, message))
+                return True
+
+        notifier = RecordingNotifier()
+        client = SimulatedMT5Client(
+            positions=(
+                {
+                    "magic": MT5_MAGIC_NUMBER,
+                    "ticket": 9651,
+                    "symbol": "XAUUSD",
+                    "type": 0,
+                    "volume": 0.01,
+                    "profit": 18,
+                },
+                {
+                    "magic": MT5_MAGIC_NUMBER,
+                    "ticket": 9652,
+                    "symbol": "XAUUSD",
+                    "type": 1,
+                    "volume": 0.01,
+                    "profit": 13,
+                },
+            ),
+            orders=(
+                {
+                    "magic": MT5_MAGIC_NUMBER,
+                    "ticket": 7653,
+                    "symbol": "XAUUSD",
+                },
+            ),
+        )
+
+        changed = PositionManager(
+            self.database_path,
+            self.accounts,
+            lambda: client,
+            notifier=notifier,  # type: ignore[arg-type]
+        ).manage_account(self.account, profile)
+
+        self.assertEqual(changed, 3)
+        self.assertEqual(
+            [request["action"] for request in client.order_send_requests],
+            [8, 1, 1],
+        )
+        self.assertTrue(
+            all(
+                request["comment"] == "tgcp daily target"
+                for request in client.order_send_requests
+            )
+        )
+        self.assertEqual(len(notifier.messages), 1)
+        self.assertIn("META DIÁRIA ATINGIDA", notifier.messages[0][1])
+        self.assertIn("US$ 31.00", notifier.messages[0][1])
+        with connect_database(self.database_path) as connection:
+            pause_until = connection.execute(
+                "SELECT daily_signal_pause_until FROM users WHERE id = ?",
+                (self.user.id,),
+            ).fetchone()[0]
+        self.assertIsNotNone(pause_until)
+
+    def test_worker_nao_fecha_antes_da_meta_diaria(self) -> None:
+        profile = self.accounts.update_execution_profile_field(
+            self.user.id,
+            self.account.id,
+            "daily_profit_target",
+            "30",
+        )
+        client = SimulatedMT5Client(
+            positions=(
+                {
+                    "magic": MT5_MAGIC_NUMBER,
+                    "ticket": 9661,
+                    "symbol": "XAUUSD",
+                    "type": 0,
+                    "volume": 0.01,
+                    "profit": 29,
+                },
+            ),
+        )
+
+        changed = PositionManager(
+            self.database_path,
+            self.accounts,
+            lambda: client,
+        ).manage_account(self.account, profile)
+
+        self.assertEqual(changed, 0)
+        self.assertEqual(client.order_send_requests, [])
+
     def test_limite_diario_nao_fecha_operacao_manual(self) -> None:
         profile = self.accounts.update_execution_profile_field(
             self.user.id,

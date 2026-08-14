@@ -1234,6 +1234,13 @@ class BotService:
                     "",
                     "Meta diária:",
                     money_value(daily_profit_target),
+                    (
+                        "Proteção ativa: ao atingir a meta no resultado realizado + flutuante "
+                        "do copiador, encerra posições, cancela pendentes e bloqueia novos "
+                        "sinais até 23h."
+                        if daily_profit_target > 0
+                        else "Proteção de lucro diária desativada."
+                    ),
                     "",
                     "Limite de perda diária:",
                     money_value(daily_loss_limit),
@@ -1271,6 +1278,9 @@ class BotService:
             else settings.tp1_breakeven_enabled
         )
         daily_loss_limit = profile.daily_loss_limit if profile else settings.daily_loss_limit
+        daily_profit_target = (
+            profile.daily_profit_target if profile else settings.daily_profit_target
+        )
         return BotResponse(
             "\n".join(
                 [
@@ -1292,6 +1302,15 @@ class BotService:
                         "A proteção considera lucro/prejuízo realizado e flutuante do copiador."
                         if daily_loss_limit > 0
                         else "Defina um valor na Gestão de risco para ativar o stop financeiro."
+                    ),
+                    "",
+                    "Meta diária:",
+                    configured_label(daily_profit_target > 0),
+                    (
+                        f"Valor protegido: {money_value(daily_profit_target)}. "
+                        "Ao atingir a meta, o lucro flutuante também será protegido."
+                        if daily_profit_target > 0
+                        else "Defina uma meta na Gestão de risco para ativar a proteção de lucro."
                     ),
                     "",
                     "Com o BE após TP1 ativado, o Worker move as posições restantes do mesmo sinal para a entrada. O BE antecipado e o trailing são avaliados após avanço de 1R; o trailing nunca afasta o stop.",
@@ -1737,7 +1756,11 @@ def custom_value_prompt(field: str) -> str:
     instructions = {
         "lot": "Envie o lote entre 0,01 e 100. Exemplo: 0,07",
         "risk": "Envie o risco percentual entre 0,1% e 10%. Exemplo: 0,75",
-        "target": "Envie a meta diária em dólar, ou 0 para desativar. Exemplo: $ 150",
+        "target": (
+            "Envie a meta financeira diária em dólar, ou 0 para desativar. Exemplo: $ 150\n"
+            "Ao atingir esse valor no resultado realizado + flutuante do copiador, "
+            "as posições serão encerradas e os sinais bloqueados até 23h."
+        ),
         "loss": (
             "Envie o stop financeiro diário em dólar, ou 0 para desativar. Exemplo: $ 75\n"
             "Ao atingir esse valor no resultado realizado + flutuante do copiador, "
