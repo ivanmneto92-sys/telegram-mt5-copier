@@ -1637,6 +1637,136 @@ class PendingOrderTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(status, "expired")
 
+    def test_worker_fecha_exposicao_ao_atingir_limite_diario_com_flutuante(self) -> None:
+        profile = self.accounts.update_execution_profile_field(
+            self.user.id,
+            self.account.id,
+            "daily_loss_limit",
+            "30",
+        )
+
+        class RecordingNotifier:
+            def __init__(self) -> None:
+                self.messages: list[tuple[int, str]] = []
+
+            def send(self, telegram_user_id: int, message: str) -> bool:
+                self.messages.append((telegram_user_id, message))
+                return True
+
+        notifier = RecordingNotifier()
+        client = SimulatedMT5Client(
+            positions=(
+                {
+                    "magic": MT5_MAGIC_NUMBER,
+                    "ticket": 9501,
+                    "symbol": "XAUUSD",
+                    "type": 0,
+                    "volume": 0.01,
+                    "profit": -16,
+                    "swap": 0,
+                },
+                {
+                    "magic": MT5_MAGIC_NUMBER,
+                    "ticket": 9502,
+                    "symbol": "XAUUSD",
+                    "type": 0,
+                    "volume": 0.01,
+                    "profit": -15,
+                    "swap": 0,
+                },
+            ),
+            orders=(
+                {
+                    "magic": MT5_MAGIC_NUMBER,
+                    "ticket": 7503,
+                    "symbol": "XAUUSD",
+                },
+            ),
+        )
+
+        changed = PositionManager(
+            self.database_path,
+            self.accounts,
+            lambda: client,
+            notifier=notifier,  # type: ignore[arg-type]
+        ).manage_account(self.account, profile)
+
+        self.assertEqual(changed, 3)
+        self.assertEqual(
+            [request["action"] for request in client.order_send_requests],
+            [8, 1, 1],
+        )
+        self.assertEqual(
+            [request.get("position") for request in client.order_send_requests[1:]],
+            [9501, 9502],
+        )
+        with connect_database(self.database_path) as connection:
+            pause_until = connection.execute(
+                "SELECT daily_signal_pause_until FROM users WHERE id = ?",
+                (self.user.id,),
+            ).fetchone()[0]
+        self.assertIsNotNone(pause_until)
+        self.assertEqual(len(notifier.messages), 1)
+        self.assertIn("LIMITE DE PERDA DIÁRIA ACIONADO", notifier.messages[0][1])
+        self.assertIn("US$ -31.00", notifier.messages[0][1])
+
+    def test_worker_nao_fecha_antes_do_limite_diario(self) -> None:
+        profile = self.accounts.update_execution_profile_field(
+            self.user.id,
+            self.account.id,
+            "daily_loss_limit",
+            "30",
+        )
+        client = SimulatedMT5Client(
+            positions=(
+                {
+                    "magic": MT5_MAGIC_NUMBER,
+                    "ticket": 9601,
+                    "symbol": "XAUUSD",
+                    "type": 0,
+                    "volume": 0.01,
+                    "profit": -29,
+                },
+            ),
+        )
+
+        changed = PositionManager(
+            self.database_path,
+            self.accounts,
+            lambda: client,
+        ).manage_account(self.account, profile)
+
+        self.assertEqual(changed, 0)
+        self.assertEqual(client.order_send_requests, [])
+
+    def test_limite_diario_nao_fecha_operacao_manual(self) -> None:
+        profile = self.accounts.update_execution_profile_field(
+            self.user.id,
+            self.account.id,
+            "daily_loss_limit",
+            "30",
+        )
+        client = SimulatedMT5Client(
+            positions=(
+                {
+                    "magic": 0,
+                    "ticket": 9701,
+                    "symbol": "XAUUSD",
+                    "type": 0,
+                    "volume": 0.01,
+                    "profit": -100,
+                },
+            ),
+        )
+
+        PositionManager(
+            self.database_path,
+            self.accounts,
+            lambda: client,
+        ).manage_account(self.account, profile)
+
+        self.assertEqual(client.order_send_requests, [])
+
     def executor(
         self,
         *,

@@ -9,6 +9,11 @@ import time
 from typing import Callable
 
 from ..database import connect_database, utc_now
+from ..daily_schedule import (
+    SAO_PAULO_TIMEZONE,
+    current_daily_signal_session_start_at,
+    next_daily_signal_resume_at,
+)
 from .account_service import MT5AccountService
 from .models import ExecutionProfile, MT5Account
 from .ipc_lock import MT5OperationLock
@@ -66,6 +71,7 @@ class PositionManager:
         self.settlement_monitor = settlement_monitor
         self.notifier = notifier
         self._last_settlement_check: dict[int, float] = {}
+        self._daily_loss_notifications: set[tuple[int, str]] = set()
 
     def manage_account(self, account: MT5Account, profile: ExecutionProfile) -> int:
         if account.terminal_path is None:
@@ -79,8 +85,32 @@ class PositionManager:
             password = self.accounts.decrypted_password_for_account(account)
             if not client.initialize(account.terminal_path, int(account.login), password, account.server_name):
                 return 0
+            positions = tuple(client.positions_get())
+            pending_orders = tuple(client.orders_get())
+            copier_positions = tuple(
+                position
+                for position in positions
+                if int(value(position, "magic", 0) or 0) == MT5_MAGIC_NUMBER
+            )
+            copier_pending_orders = tuple(
+                order
+                for order in pending_orders
+                if int(value(order, "magic", 0) or 0) == MT5_MAGIC_NUMBER
+            )
+            daily_stop_changes = self._enforce_daily_loss_limit(
+                client,
+                account,
+                profile,
+                copier_positions,
+                copier_pending_orders,
+            )
+            if daily_stop_changes is not None:
+                if self.settlement_monitor is not None:
+                    self.settlement_monitor.reconcile(client, account)
+                return daily_stop_changes
+
             managed_positions: list[tuple[object, ManagedOrder]] = []
-            for position in client.positions_get():
+            for position in positions:
                 if int(value(position, "magic", 0) or 0) != MT5_MAGIC_NUMBER:
                     continue
                 order_record = self._find_order_for_item(account.id, position)
@@ -134,7 +164,7 @@ class PositionManager:
                 if force_breakeven:
                     self._record_be_outcome(order_record, outcome)
                     group_protection.setdefault(order_record.group_id, []).append(outcome)
-            for pending_order in client.orders_get():
+            for pending_order in pending_orders:
                 if int(value(pending_order, "magic", 0) or 0) != MT5_MAGIC_NUMBER:
                     continue
                 order_record = self._find_order_for_item(account.id, pending_order)
@@ -207,6 +237,169 @@ class PositionManager:
             password = None
             client.shutdown()
             operation_lock.close()
+
+    def _enforce_daily_loss_limit(
+        self,
+        client: object,
+        account: MT5Account,
+        profile: ExecutionProfile,
+        positions: tuple[object, ...],
+        pending_orders: tuple[object, ...],
+    ) -> int | None:
+        """Enforce the configured account-wide daily loss as a live kill switch.
+
+        The entry validator prevents *new* signals after the realized result reaches
+        the limit. This guard also includes floating P/L and removes existing copier
+        exposure as soon as the configured threshold is observed.
+        """
+        if profile.daily_loss_limit <= 0 or not (positions or pending_orders):
+            return None
+
+        now = datetime.now(tz=timezone.utc)
+        session_start = current_daily_signal_session_start_at(now)
+        realized_result = Decimal("0")
+        for deal in client.history_deals_get(session_start, now):
+            if int(value(deal, "magic", 0) or 0) != MT5_MAGIC_NUMBER:
+                continue
+            for field_name in ("profit", "commission", "swap", "fee"):
+                realized_result += Decimal(str(value(deal, field_name, 0) or 0))
+
+        floating_result = Decimal("0")
+        for position in positions:
+            floating_result += Decimal(str(value(position, "profit", 0) or 0))
+            floating_result += Decimal(str(value(position, "swap", 0) or 0))
+
+        observed_result = realized_result + floating_result
+        if observed_result > -profile.daily_loss_limit:
+            return None
+
+        pause_until = next_daily_signal_resume_at(now)
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                """
+                UPDATE users
+                SET daily_signal_pause_until = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (pause_until.isoformat(), utc_now(), account.user_id),
+            ).close()
+
+        changed = 0
+        failures: list[str] = []
+        for pending_order in pending_orders:
+            ticket = int(value(pending_order, "ticket", value(pending_order, "order", 0)) or 0)
+            result = client.order_send(
+                {
+                    "action": mt5_constant(client, "TRADE_ACTION_REMOVE", 8),
+                    "order": ticket,
+                    "magic": MT5_MAGIC_NUMBER,
+                    "comment": "tgcp daily stop",
+                }
+            )
+            if is_successful_mt5_result(client, result, check=False):
+                order_record = self._find_order_for_item(account.id, pending_order)
+                if order_record is not None:
+                    self._mark_cancelled(order_record.order_id, order_record.group_id)
+                changed += 1
+            else:
+                failures.append(
+                    f"ordem pendente {ticket}: {mt5_failure_message(client, result)}"
+                )
+
+        for position in positions:
+            ticket = int(value(position, "ticket", 0) or 0)
+            symbol = str(value(position, "symbol", ""))
+            info = client.symbol_info(symbol)
+            tick = client.symbol_info_tick(symbol)
+            if info is None or tick is None:
+                failures.append(f"posição {ticket}: cotação indisponível")
+                continue
+            position_type = int(value(position, "type", 0) or 0)
+            buy_type = mt5_constant(client, "POSITION_TYPE_BUY", 0)
+            direction = "BUY" if position_type == buy_type else "SELL"
+            close_direction = "SELL" if direction == "BUY" else "BUY"
+            close_price = tick.bid if direction == "BUY" else tick.ask
+            result = client.order_send(
+                {
+                    "action": mt5_constant(client, "TRADE_ACTION_DEAL", 1),
+                    "position": ticket,
+                    "symbol": symbol,
+                    "volume": float(value(position, "volume", 0) or 0),
+                    "type": pending_order_type_constant(client, close_direction),
+                    "price": float(close_price),
+                    "deviation": int(profile.max_slippage_points),
+                    "magic": MT5_MAGIC_NUMBER,
+                    "comment": "tgcp daily stop",
+                    "type_time": mt5_constant(client, "ORDER_TIME_GTC", 0),
+                    "type_filling": market_filling_constant(client, info),
+                }
+            )
+            if is_successful_mt5_result(client, result, check=False):
+                changed += 1
+            else:
+                failures.append(f"posição {ticket}: {mt5_failure_message(client, result)}")
+
+        self._notify_daily_loss_limit(
+            account,
+            profile.daily_loss_limit,
+            observed_result,
+            pause_until,
+            failures,
+            session_start,
+        )
+        LOGGER.warning(
+            "Limite de perda diária acionado. account=%s limite=%s resultado=%s "
+            "alteracoes=%s falhas=%s",
+            account.id,
+            profile.daily_loss_limit,
+            observed_result,
+            changed,
+            len(failures),
+        )
+        return changed
+
+    def _notify_daily_loss_limit(
+        self,
+        account: MT5Account,
+        configured_limit: Decimal,
+        observed_result: Decimal,
+        pause_until: datetime,
+        failures: list[str],
+        session_start: datetime,
+    ) -> None:
+        if self.notifier is None:
+            return
+        notification_key = (account.id, session_start.isoformat())
+        if notification_key in self._daily_loss_notifications:
+            return
+        self._daily_loss_notifications.add(notification_key)
+        with connect_database(self.database_path) as connection:
+            row = connection.execute(
+                "SELECT telegram_user_id FROM users WHERE id = ?",
+                (account.user_id,),
+            ).fetchone()
+        if row is None:
+            return
+        local_resume = pause_until.astimezone(SAO_PAULO_TIMEZONE)
+        status = (
+            "As posições do copiador foram encerradas e as ordens pendentes canceladas."
+            if not failures
+            else "A proteção foi acionada, mas algumas exposições não puderam ser encerradas. "
+            "Verifique imediatamente o MetaTrader 5."
+        )
+        message = (
+            "🛑 LIMITE DE PERDA DIÁRIA ACIONADO\n\n"
+            f"Conta: {account.masked_login}\n"
+            f"Limite configurado: US$ {configured_limit:.2f}\n"
+            f"Resultado observado: US$ {observed_result:.2f}\n\n"
+            f"{status}\n"
+            f"Novos sinais ficam bloqueados até "
+            f"{local_resume.strftime('%d/%m às %H:%M')} (Brasília).\n\n"
+            "O fechamento é executado a mercado e pode variar por spread e slippage."
+        )
+        if failures:
+            message += "\n\nFalhas: " + "; ".join(failures[:3])
+        self.notifier.send(int(row[0]), message)
 
     def _protect_position(
         self,

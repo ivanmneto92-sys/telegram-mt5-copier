@@ -1237,6 +1237,13 @@ class BotService:
                     "",
                     "Limite de perda diária:",
                     money_value(daily_loss_limit),
+                    (
+                        "Proteção ativa: soma o resultado realizado e o prejuízo flutuante "
+                        "das operações do copiador. Ao atingir o limite, encerra posições, "
+                        "cancela pendentes e bloqueia novos sinais até 23h."
+                        if daily_loss_limit > 0
+                        else "Proteção diária desativada."
+                    ),
                     "",
                     "Máximo de operações:",
                     str(max_open_trades) if max_open_trades else "Não configurado",
@@ -1280,6 +1287,12 @@ class BotService:
                     "",
                     "Limite diário:",
                     configured_label(daily_loss_limit > 0),
+                    (
+                        f"Valor protegido: {money_value(daily_loss_limit)}. "
+                        "A proteção considera lucro/prejuízo realizado e flutuante do copiador."
+                        if daily_loss_limit > 0
+                        else "Defina um valor na Gestão de risco para ativar o stop financeiro."
+                    ),
                     "",
                     "Com o BE após TP1 ativado, o Worker move as posições restantes do mesmo sinal para a entrada. O BE antecipado e o trailing são avaliados após avanço de 1R; o trailing nunca afasta o stop.",
                 ]
@@ -1725,7 +1738,11 @@ def custom_value_prompt(field: str) -> str:
         "lot": "Envie o lote entre 0,01 e 100. Exemplo: 0,07",
         "risk": "Envie o risco percentual entre 0,1% e 10%. Exemplo: 0,75",
         "target": "Envie a meta diária em dólar, ou 0 para desativar. Exemplo: $ 150",
-        "loss": "Envie o limite diário em dólar, ou 0 para desativar. Exemplo: $ 75",
+        "loss": (
+            "Envie o stop financeiro diário em dólar, ou 0 para desativar. Exemplo: $ 75\n"
+            "Ao atingir esse valor no resultado realizado + flutuante do copiador, "
+            "as posições serão encerradas e os sinais bloqueados até 23h."
+        ),
         "max": "Envie um número inteiro entre 1 e 100.",
         "spread": "Envie o spread máximo em pontos, usando um número inteiro.",
         "slippage": "Envie o slippage máximo em pontos, usando um número inteiro.",
