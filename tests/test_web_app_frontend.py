@@ -23,6 +23,8 @@ from telegram_mt5_copier.web_app import (
 )
 from telegram_mt5_copier.admin_panel import AdminPanelService, render_admin_panel, render_admin_script
 from telegram_mt5_copier.admin_auth import AdminBrowserAuthService
+from telegram_mt5_copier.client_auth import ClientBrowserAuthService
+from telegram_mt5_copier.client_portal import ClientPortalService
 from telegram_mt5_copier.users import UserRepository
 from telegram_mt5_copier.web_server import OnboardingHandler, safe_reason
 
@@ -404,6 +406,52 @@ class MiniAppFrontendTests(unittest.TestCase):
         self.assertTrue(approval_payload["ok"])
         self.assertEqual(approval_payload["approval"]["status"], "active")
 
+    def test_cadastro_e_login_web_criam_sessao_segura_pendente(self) -> None:
+        with mini_app_server() as base_url:
+            registration = Request(
+                f"{base_url}/api/v1/auth/register",
+                data=urlencode(
+                    {
+                        "customer_name": "Cliente Portal",
+                        "email": "portal@example.com",
+                        "phone": "11999990000",
+                        "password": "SenhaPortal123",
+                        "accepted_terms": "true",
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                method="POST",
+            )
+            with urlopen(registration, timeout=5) as response:
+                registered = json.loads(response.read().decode("utf-8"))
+                set_cookie = response.headers.get("Set-Cookie", "")
+            cookie = set_cookie.split(";", 1)[0]
+            dashboard_request = Request(
+                f"{base_url}/api/v1/dashboard",
+                headers={"Cookie": cookie},
+            )
+            with urlopen(dashboard_request, timeout=5) as response:
+                dashboard = json.loads(response.read().decode("utf-8"))
+            login = Request(
+                f"{base_url}/api/v1/auth/login",
+                data=urlencode(
+                    {"email": "PORTAL@example.com", "password": "SenhaPortal123"}
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                method="POST",
+            )
+            with urlopen(login, timeout=5) as response:
+                logged_in = json.loads(response.read().decode("utf-8"))
+
+        self.assertTrue(registered["ok"])
+        self.assertEqual("paused", registered["user"]["status"])
+        self.assertTrue(dashboard["ok"])
+        self.assertEqual("Instituto Trader", dashboard["brand"])
+        self.assertTrue(logged_in["ok"])
+        self.assertIn("HttpOnly", set_cookie)
+        self.assertIn("Secure", set_cookie)
+        self.assertIn("SameSite=Strict", set_cookie)
+
     def test_navegador_comum_mostra_mensagem_clara(self) -> None:
         html = render_onboarding_form("test-nonce")
 
@@ -448,6 +496,11 @@ class mini_app_server:
         OnboardingHandler.admin_browser_auth = AdminBrowserAuthService(
             database_path,
             admin_ids=self.admin_ids,
+        )
+        OnboardingHandler.client_browser_auth = ClientBrowserAuthService(database_path)
+        OnboardingHandler.client_portal = ClientPortalService(
+            database_path,
+            brand_name="Instituto Trader",
         )
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), OnboardingHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)

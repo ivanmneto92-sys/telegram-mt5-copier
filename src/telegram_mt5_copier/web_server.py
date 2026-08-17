@@ -144,6 +144,9 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         try:
             path = self.route_path()
             length = int(self.headers.get("Content-Length", "0"))
+            if length < 0 or length > 65_536:
+                self.send_json({"ok": False, "error": "Requisição muito grande."}, status=413)
+                return
             body = self.rfile.read(length).decode("utf-8")
             fields = {key: values[0] for key, values in parse_qs(body, keep_blank_values=True).items()}
             if path == "/api/log":
@@ -193,6 +196,15 @@ class OnboardingHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/v1/auth/browser-login":
                 self.handle_client_browser_login(fields)
+                return
+            if path == "/api/v1/auth/login":
+                self.handle_client_password_login(fields)
+                return
+            if path == "/api/v1/auth/register":
+                self.handle_client_registration(fields)
+                return
+            if path == "/api/v1/auth/password":
+                self.handle_client_password_setup(fields)
                 return
             if path == "/api/v1/auth/logout":
                 self.handle_client_logout()
@@ -280,10 +292,48 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             session = self.client_browser_auth.consume_login_token(fields.get("token", ""))
         except ValueError as exc:
             raise WebAppValidationError(str(exc)) from exc
-        payload = self.client_portal.dashboard(session.user_id)
+        self.send_client_session(session.user_id, session.session_token)
+
+    def handle_client_password_login(self, fields: dict[str, str]) -> None:
+        try:
+            session = self.client_browser_auth.login(
+                email=fields.get("email", ""),
+                password=fields.get("password", ""),
+            )
+        except ValueError as exc:
+            safe_log("client_password_login_rejected", reason="credentials")
+            self.send_json({"ok": False, "error": str(exc)}, status=401)
+            return
+        safe_log("client_password_login_accepted")
+        self.send_client_session(session.user_id, session.session_token)
+
+    def handle_client_registration(self, fields: dict[str, str]) -> None:
+        if fields.get("accepted_terms") != "true":
+            raise ValueError("Confirme os Termos de Uso e a Política de Privacidade.")
+        session = self.client_browser_auth.register(
+            customer_name=fields.get("customer_name", ""),
+            email=fields.get("email", ""),
+            phone=fields.get("phone", ""),
+            password=fields.get("password", ""),
+        )
+        safe_log("client_registration_accepted")
+        self.send_client_session(session.user_id, session.session_token)
+
+    def handle_client_password_setup(self, fields: dict[str, str]) -> None:
+        user_id = self.authenticate_client()
+        self.client_browser_auth.set_password_for_user(
+            user_id,
+            email=fields.get("email", ""),
+            password=fields.get("password", ""),
+        )
+        safe_log("client_password_configured", user_id=str(user_id))
+        self.send_json({"ok": True})
+
+    def send_client_session(self, user_id: int, session_token: str) -> None:
+        payload = self.client_portal.dashboard(user_id)
         self.send_json(
             {"ok": True, **payload},
-            extra_headers=(("Set-Cookie", client_session_cookie(session.session_token)),),
+            extra_headers=(("Set-Cookie", client_session_cookie(session_token)),),
         )
 
     def handle_client_logout(self) -> None:

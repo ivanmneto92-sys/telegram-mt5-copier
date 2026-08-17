@@ -488,6 +488,20 @@ daquela instância antes do `git pull`, evitando Workers órfãos e disputas pel
 arquivo `worker.lock`. Os processos de outra marca e os terminais MT5 não são
 encerrados.
 
+## Portal do cliente
+
+Configure `CLIENT_APP_URL` com o endereço HTTPS do frontend. O cliente pode
+entrar por um link descartável emitido pelo bot ou por e-mail e senha. Senhas
+são armazenadas somente como hash `scrypt`; após cinco tentativas inválidas, o
+acesso fica bloqueado por 15 minutos.
+
+Cadastros feitos diretamente no portal são criados com usuário pausado e
+financeiro pendente. Eles aparecem no painel administrativo e somente passam a
+receber sinais depois da aprovação e da conexão de uma conta MT5. Se o e-mail
+já pertence a um cliente cadastrado pelo Telegram, o portal não cria uma conta
+duplicada: esse cliente deve entrar pelo bot e configurar o acesso web na sua
+sessão autenticada.
+
 ## Supervisor e inicialização automática no Windows
 
 A partir da versão `0.12.0`, o comando `telegram-mt5-supervisor` inicia e

@@ -681,6 +681,18 @@ def initialize_database(database_path: Path) -> None:
                 FOREIGN KEY (user_id) REFERENCES users(id)
             );
 
+            CREATE TABLE IF NOT EXISTS client_credentials (
+                user_id INTEGER PRIMARY KEY,
+                email TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                password_hash TEXT NOT NULL,
+                failed_attempts INTEGER NOT NULL DEFAULT 0,
+                locked_until TEXT,
+                password_changed_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            );
+
             CREATE TABLE IF NOT EXISTS source_channels (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 telegram_chat_id TEXT UNIQUE,
@@ -826,6 +838,8 @@ def initialize_database(database_path: Path) -> None:
                 ON client_login_tokens(expires_at, used_at);
             CREATE INDEX IF NOT EXISTS idx_client_browser_sessions_expiration
                 ON client_browser_sessions(expires_at, revoked_at);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_client_credentials_email
+                ON client_credentials(email COLLATE NOCASE);
 
             CREATE UNIQUE INDEX IF NOT EXISTS idx_source_channels_username
                 ON source_channels(username COLLATE NOCASE)
