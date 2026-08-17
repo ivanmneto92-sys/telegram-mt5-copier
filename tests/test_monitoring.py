@@ -565,6 +565,39 @@ Take Profit (TP):
         )
         self.assertEqual(validate_signal(decision.signal).status, DecisionStatus.ACCEPTED)
 
+    def test_gold_sell_now_com_faixa_separada_por_underscore(self) -> None:
+        decision = parse_signal_text(
+            """GOLD SELL
+XAUUSD SELL NOW 🔻 4398_4402
+
+TP1: 🔻 4394
+TP2: 🔻 4390
+TP3: 🔻 4386
+TP4: 🔻 4380
+TP5: 🔻 4375
+
+❌ SL 4411
+Use Proper Money & Risk Management."""
+        )
+
+        self.assertEqual(decision.status, DecisionStatus.ACCEPTED)
+        self.assertEqual(decision.signal.symbol, "XAUUSD")
+        self.assertEqual(decision.signal.direction, Direction.SELL)
+        self.assertEqual(decision.signal.entry_low, Decimal("4398"))
+        self.assertEqual(decision.signal.entry_high, Decimal("4402"))
+        self.assertEqual(decision.signal.stop_loss, Decimal("4411"))
+        self.assertEqual(
+            decision.signal.take_profits,
+            (
+                Decimal("4394"),
+                Decimal("4390"),
+                Decimal("4386"),
+                Decimal("4380"),
+                Decimal("4375"),
+            ),
+        )
+        self.assertEqual(validate_signal(decision.signal).status, DecisionStatus.ACCEPTED)
+
     def test_gold_buy_now_in_zone_com_tp_open(self) -> None:
         decision = parse_signal_text(
             """GOLD BUY NOW IN ZONE 4027.00-4020.00

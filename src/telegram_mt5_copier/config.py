@@ -96,6 +96,9 @@ class AppConfig:
     market_news_minutes_before: int
     market_news_minutes_after: int
     market_news_poll_seconds: int
+    telegram_image_ocr_enabled: bool
+    telegram_image_ocr_chat_ids: tuple[str, ...] = field(repr=False)
+    tesseract_command: str | None = field(repr=False)
 
     @classmethod
     def load(
@@ -212,6 +215,16 @@ class AppConfig:
             market_news_poll_seconds=parse_positive_int(
                 _value("MARKET_NEWS_POLL_SECONDS", file_values, runtime_env, "30"),
                 "MARKET_NEWS_POLL_SECONDS",
+            ),
+            telegram_image_ocr_enabled=parse_bool(
+                _value("TELEGRAM_IMAGE_OCR_ENABLED", file_values, runtime_env, "false"),
+                default=False,
+            ),
+            telegram_image_ocr_chat_ids=parse_source_chat_ids(
+                _optional_value("TELEGRAM_IMAGE_OCR_CHAT_IDS", file_values, runtime_env)
+            ),
+            tesseract_command=_optional_value(
+                "TESSERACT_CMD", file_values, runtime_env
             ),
         )
 

@@ -62,6 +62,8 @@ def run_check(config: AppConfig) -> int:
     print(f"GLOBAL_EXECUTION_KILL_SWITCH={str(config.global_execution_kill_switch).lower()}")
     print(f"ONBOARDING_LOCAL_URL={config.local_onboarding_url}")
     print(f"MARKET_NEWS_ENABLED={str(config.market_news_enabled).lower()}")
+    print(f"TELEGRAM_IMAGE_OCR_ENABLED={str(config.telegram_image_ocr_enabled).lower()}")
+    print(f"TELEGRAM_IMAGE_OCR_CHAT_IDS={','.join(config.telegram_image_ocr_chat_ids) or 'nenhum'}")
     print(
         "ECONOMIC_CALENDAR_API_KEY="
         + ("configurada" if config.economic_calendar_api_key else "ausente")

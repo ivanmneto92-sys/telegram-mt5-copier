@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import json
 import logging
 from pathlib import Path
+from dataclasses import replace
 from typing import Any, Awaitable, Callable
 from urllib import parse, request
 
@@ -18,6 +19,11 @@ from .database import (
 )
 from .models import DecisionStatus, IncomingMessage, ProcessingDecision
 from .market_news import MarketNewsService
+from .image_ocr import (
+    extract_image_text,
+    find_tesseract_command,
+    validated_ocr_signal,
+)
 from .parser import parse_signal_text
 from .publisher import TelegramPublisher, format_signal
 from .telegram_login import validate_telegram_credentials
@@ -272,6 +278,7 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
                 )
                 logger.info("ignored: stale_telegram_message")
                 return
+            incoming = await enrich_photo_with_ocr(event, incoming, config, logger)
             await processor.process(incoming, client=client)
 
         @client.on(events.MessageEdited())
@@ -298,6 +305,7 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
                     incoming=incoming,
                 )
                 return
+            incoming = await enrich_photo_with_ocr(event, incoming, config, logger)
             await processor.process(incoming, client=client)
 
         heartbeat_task = asyncio.create_task(
@@ -572,6 +580,59 @@ def incoming_from_telethon_event(event: Any) -> IncomingMessage:
         caption=message_text if media_type == "photo" else None,
         media_type=media_type,
     )
+
+
+async def enrich_photo_with_ocr(
+    event: Any,
+    incoming: IncomingMessage,
+    config: AppConfig,
+    logger: logging.Logger,
+) -> IncomingMessage:
+    if incoming.media_type != "photo" or not config.telegram_image_ocr_enabled:
+        return incoming
+    source_chat_id = str(incoming.source_chat_id)
+    if source_chat_id not in config.telegram_image_ocr_chat_ids:
+        return incoming
+
+    tesseract_command = find_tesseract_command(config.tesseract_command)
+    if tesseract_command is None:
+        logger.error(
+            "OCR indisponível. Instale o Tesseract ou configure TESSERACT_CMD. origem=%s",
+            source_chat_id,
+        )
+        return incoming
+
+    try:
+        image_bytes = await event.message.download_media(file=bytes)
+    except Exception as exc:
+        logger.error("Falha ao baixar foto para OCR. origem=%s erro=%s", source_chat_id, exc)
+        return incoming
+    if not isinstance(image_bytes, bytes):
+        logger.error("Telegram não retornou bytes da foto para OCR. origem=%s", source_chat_id)
+        return incoming
+
+    ocr_text = await asyncio.to_thread(
+        extract_image_text,
+        image_bytes,
+        tesseract_command=tesseract_command,
+    )
+    signal = validated_ocr_signal(ocr_text, incoming.caption)
+    if signal is None:
+        logger.warning(
+            "OCR rejeitado por falta de validação cruzada. origem=%s mensagem_id=%s",
+            source_chat_id,
+            incoming.source_message_id,
+        )
+        return incoming
+
+    logger.info(
+        "OCR validado. origem=%s mensagem_id=%s ativo=%s direcao=%s",
+        source_chat_id,
+        incoming.source_message_id,
+        signal.symbol,
+        signal.direction.value,
+    )
+    return replace(incoming, caption=ocr_text)
 
 
 def classify_telethon_message(message: Any) -> str:

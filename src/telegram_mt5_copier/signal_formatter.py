@@ -4,7 +4,11 @@ import re
 
 from .models import TradeSignal, decimal_to_text
 
-PRICE_VALUE_PATTERN = r"\d+(?:[\.,]\d+)?(?:\s*[-–—]\s*\d+(?:[\.,]\d+)?)?"
+PRICE_RANGE_SEPARATOR_PATTERN = r"[-–—_]"
+PRICE_VALUE_PATTERN = (
+    rf"\d+(?:[\.,]\d+)?"
+    rf"(?:\s*{PRICE_RANGE_SEPARATOR_PATTERN}\s*\d+(?:[\.,]\d+)?)?"
+)
 GOLD_ASSET_PATTERN = r"(?:XAU\s*[-/]?\s*USD|GOLD)"
 FOREX_CURRENCY_PATTERN = r"(?:AUD|CAD|CHF|EUR|GBP|JPY|NZD|USD)"
 FOREX_ASSET_PATTERN = rf"(?:{FOREX_CURRENCY_PATTERN}\s*[-/]?\s*{FOREX_CURRENCY_PATTERN})"
@@ -30,6 +34,11 @@ HEADER_TAIL_ENTRY_RE = re.compile(
     re.IGNORECASE,
 )
 ENTRY_LINE_RE = re.compile(r"\b(?:ENTRY|ENTRADA)\b\s*[:\-]?\s*@?\s*(?P<value>\d+(?:[\.,]\d+)?(?:\s*[-–—]\s*\d+(?:[\.,]\d+)?)?)", re.IGNORECASE)
+NOW_ENTRY_RE = re.compile(
+    rf"\b{SUPPORTED_ASSET_PATTERN}\b[^\w]{{1,12}}\b{DIRECTION_PATTERN}\b"
+    rf"[ \t]+NOW\b[^\d\r\n]{{0,12}}(?P<value>{PRICE_VALUE_PATTERN})",
+    re.IGNORECASE,
+)
 SL_LINE_RE = re.compile(
     r"\b(?:SL|STOP[ \t]+LOSS)\b(?:\s*\(\s*SL\s*\))?\s*[:\-]?\s*"
     r"(?P<value>\d+(?:[\.,]\d+)?)",
@@ -72,6 +81,10 @@ def clean_signal_text(text: str) -> str | None:
         if header_entry_match
         else None
     )
+    if entry_value is None:
+        now_entry_match = NOW_ENTRY_RE.search(text)
+        if now_entry_match:
+            entry_value = normalize_range_spacing(now_entry_match.group("value"))
     stop_loss_value: str | None = None
     take_profit_values: list[str] = []
 
@@ -129,7 +142,7 @@ def strip_noise(value: str) -> str:
 
 
 def normalize_range_spacing(value: str) -> str:
-    return re.sub(r"\s*[-–—]\s*", "-", value.strip())
+    return re.sub(r"\s*[-–—_]\s*", "-", value.strip())
 
 
 def extract_signal_symbol(text: str) -> str | None:

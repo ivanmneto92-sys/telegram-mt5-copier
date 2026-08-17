@@ -598,3 +598,23 @@ Se o provedor estiver indisponível, o sistema registra o erro e opera em modo
 aberto: ele não inventa eventos nem bloqueia entradas sem informação válida.
 O supervisor inicia o componente `market-news` somente quando
 `MARKET_NEWS_ENABLED=true`.
+
+## Leitura segura de sinais desenhados em imagens
+
+A partir da versão `0.34.0`, canais previamente analisados podem usar OCR local
+quando o Telegram entrega uma legenda corrompida por custom emojis. A leitura é
+opt-in por ID de canal e utiliza o Tesseract instalado na própria VPS, sem enviar
+a imagem ou os dados da operação para uma API externa.
+
+O OCR não é aceito sozinho: entrada, Stop Loss e pelo menos dois Take Profits
+extraídos da imagem também precisam aparecer numericamente na legenda original.
+Se a validação cruzada falhar, o sinal é rejeitado e nenhuma ordem é enviada.
+
+```dotenv
+TELEGRAM_IMAGE_OCR_ENABLED=true
+TELEGRAM_IMAGE_OCR_CHAT_IDS=-1002849262979
+TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe
+```
+
+Não habilite OCR globalmente para canais ainda não analisados. Cada novo formato
+de imagem deve ser testado antes de seu ID ser incluído na configuração.

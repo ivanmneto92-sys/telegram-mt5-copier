@@ -8,7 +8,7 @@ from .signal_formatter import HEADER_RE, clean_signal_text, extract_signal_symbo
 
 NUMBER_TEXT = r"\d+(?:[\.,]\d+)?"
 NUMBER_RE = re.compile(NUMBER_TEXT)
-RANGE_RE = re.compile(rf"(?P<first>{NUMBER_TEXT})\s*[-–—]\s*(?P<second>{NUMBER_TEXT})")
+RANGE_RE = re.compile(rf"(?P<first>{NUMBER_TEXT})\s*[-–—_]\s*(?P<second>{NUMBER_TEXT})")
 
 OTHER_ASSET_RE = re.compile(
     r"\b(?:EUR\s*/?\s*USD|GBP\s*/?\s*USD|USD\s*/?\s*JPY|BTC\s*/?\s*USD|"
