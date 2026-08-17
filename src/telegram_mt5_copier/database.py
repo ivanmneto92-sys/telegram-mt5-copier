@@ -660,6 +660,27 @@ def initialize_database(database_path: Path) -> None:
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS client_login_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_hash TEXT NOT NULL UNIQUE,
+                user_id INTEGER NOT NULL,
+                expires_at TEXT NOT NULL,
+                used_at TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS client_browser_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_hash TEXT NOT NULL UNIQUE,
+                user_id INTEGER NOT NULL,
+                expires_at TEXT NOT NULL,
+                revoked_at TEXT,
+                last_seen_at TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            );
+
             CREATE TABLE IF NOT EXISTS source_channels (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 telegram_chat_id TEXT UNIQUE,
@@ -801,6 +822,10 @@ def initialize_database(database_path: Path) -> None:
 
             CREATE INDEX IF NOT EXISTS idx_admin_browser_sessions_expiration
                 ON admin_browser_sessions(expires_at, revoked_at);
+            CREATE INDEX IF NOT EXISTS idx_client_login_tokens_expiration
+                ON client_login_tokens(expires_at, used_at);
+            CREATE INDEX IF NOT EXISTS idx_client_browser_sessions_expiration
+                ON client_browser_sessions(expires_at, revoked_at);
 
             CREATE UNIQUE INDEX IF NOT EXISTS idx_source_channels_username
                 ON source_channels(username COLLATE NOCASE)

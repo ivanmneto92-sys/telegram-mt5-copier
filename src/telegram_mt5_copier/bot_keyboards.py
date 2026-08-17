@@ -40,6 +40,7 @@ CB_MT5_REMOVE = "v1:mt5:remove"
 CB_MT5_CONFIRM_REMOVE = "v1:mt5:remove:ok"
 CB_SIGNAL_EXECUTION = "v1:ex"
 CB_ADMIN_BROWSER_ACCESS = "v1:admin:pc"
+CB_CLIENT_BROWSER_ACCESS = "v1:app:pc"
 CB_CHANNELS = "v1:ch"
 CB_CHANNEL_ADD = "v1:ch:add"
 CB_CHANNEL_MODE_ALL = "v1:ch:all"
@@ -264,13 +265,19 @@ def mt5_connect_menu(web_app_url: str | None = None) -> tuple[tuple[Button, ...]
     )
 
 
-def main_menu(admin_panel_url: str | None = None) -> tuple[tuple[Button, ...], ...]:
-    if not admin_panel_url:
-        return MAIN_MENU
-    return MAIN_MENU + (
-        (Button("🛡️ Painel Admin", web_app_url=admin_panel_url),),
-        (Button("🖥️ Acessar pelo PC", CB_ADMIN_BROWSER_ACCESS),),
-    )
+def main_menu(
+    admin_panel_url: str | None = None,
+    client_app_url: str | None = None,
+) -> tuple[tuple[Button, ...], ...]:
+    rows = MAIN_MENU
+    if client_app_url:
+        rows += ((Button("🌐 Acessar aplicativo", CB_CLIENT_BROWSER_ACCESS),),)
+    if admin_panel_url:
+        rows += (
+            (Button("🛡️ Painel Admin", web_app_url=admin_panel_url),),
+            (Button("🖥️ Acessar pelo PC", CB_ADMIN_BROWSER_ACCESS),),
+        )
+    return rows
 
 
 MT5_ACCOUNTS_MENU: tuple[tuple[Button, ...], ...] = (
@@ -393,6 +400,7 @@ STATIC_CALLBACKS.update(
         CB_SIGNAL_EXECUTION,
         CB_EXEC_SPLIT_TPS,
         CB_ADMIN_BROWSER_ACCESS,
+        CB_CLIENT_BROWSER_ACCESS,
         CB_CHANNELS,
         CB_CHANNEL_ADD,
         CB_CHANNEL_MODE_ALL,

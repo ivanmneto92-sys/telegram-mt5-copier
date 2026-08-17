@@ -10,6 +10,7 @@ from urllib.parse import urlsplit, urlunsplit
 from .account_service import AccountService
 from .access_control import ACCESS_EXPIRED, paid_access_decision
 from .admin_auth import AdminBrowserAuthService
+from .client_auth import ClientBrowserAuthService
 from .channel_catalog import (
     ChannelCatalogService,
     REQUEST_APPROVED,
@@ -27,6 +28,7 @@ from .bot_keyboards import (
     ACCOUNT_MENU,
     CB_ACCOUNT,
     CB_ADMIN_BROWSER_ACCESS,
+    CB_CLIENT_BROWSER_ACCESS,
     CB_ACTIVATE,
     CB_CANCEL,
     CB_CHANNELS,
@@ -177,6 +179,7 @@ class BotService:
         account_service: AccountService | None = None,
         mt5_account_service: MT5AccountService | None = None,
         mt5_onboarding_url: str | None = None,
+        client_app_url: str | None = None,
         brand_name: str = "Instituto Trader",
         market_news_available: bool = False,
         market_news_minutes_before: int = 10,
@@ -190,6 +193,7 @@ class BotService:
         self.channels = ChannelCatalogService(database_path)
         self.database_path = database_path
         self.mt5_onboarding_url = mt5_onboarding_url
+        self.client_app_url = client_app_url
         self.brand_name = brand_name.strip() or "Instituto Trader"
         self.market_news_available = market_news_available
         self.market_news_minutes_before = market_news_minutes_before
@@ -199,6 +203,7 @@ class BotService:
             database_path,
             admin_ids=admin_ids,
         )
+        self.client_browser_auth = ClientBrowserAuthService(database_path)
         self.rate_limiter = rate_limiter or RateLimiter()
         self._pending_custom_values: dict[int, str] = {}
         self._closed = False
@@ -407,7 +412,7 @@ class BotService:
             if not panel_url:
                 return BotResponse(
                     "URL HTTPS do painel administrativo não configurada.",
-                    main_menu(None),
+                    main_menu(None, self.client_app_url),
                 )
             access_url = self.admin_browser_auth.create_login_url(
                 telegram_user_id,
@@ -426,8 +431,34 @@ class BotService:
                         "Depois de entrar, sua sessão permanece ativa por até 12 horas.",
                     ]
                 ),
-                main_menu(panel_url),
+                main_menu(panel_url, self.client_app_url),
                 screen="admin_access",
+            )
+        if callback == CB_CLIENT_BROWSER_ACCESS:
+            if not self.client_app_url:
+                return BotResponse(
+                    "Aplicativo web ainda nao configurado.",
+                    main_menu(None, None),
+                )
+            access_url = self.client_browser_auth.create_login_url(
+                user.id,
+                self.client_app_url,
+            )
+            return BotResponse(
+                "\n".join(
+                    [
+                        f"🌐 ACESSO AO {self.brand_name.upper()}",
+                        "",
+                        "Abra o link abaixo no navegador:",
+                        "",
+                        access_url,
+                        "",
+                        "🔐 O link funciona uma unica vez e expira em 5 minutos.",
+                        "A sessao fica vinculada somente a sua conta.",
+                    ]
+                ),
+                main_menu(None, self.client_app_url),
+                screen="client_app_access",
             )
         if callback == CB_ACCOUNT:
             return self._account_screen(user)
@@ -1089,7 +1120,7 @@ class BotService:
                     "bot privado de gestão.",
                 ]
             ),
-            main_menu(admin_url),
+            main_menu(admin_url, self.client_app_url),
             screen="main",
         )
 

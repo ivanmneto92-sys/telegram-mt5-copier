@@ -9,6 +9,8 @@ from urllib.parse import parse_qs, urlsplit
 
 from .admin_auth import AdminBrowserAuthService
 from .admin_panel import AdminIdentity, AdminPanelService, render_admin_panel, render_admin_script
+from .client_auth import ClientBrowserAuthService
+from .client_portal import ClientPortalService
 from .config import AppConfig
 from .credential_service import CredentialService
 from .mt5.account_service import MT5AccountService
@@ -28,6 +30,8 @@ class OnboardingHandler(BaseHTTPRequestHandler):
     onboarding: MT5OnboardingService
     admin_panel: AdminPanelService
     admin_browser_auth: AdminBrowserAuthService
+    client_browser_auth: ClientBrowserAuthService
+    client_portal: ClientPortalService
     csrf: CSRFTokenService
     bot_token: str
     broker_options: tuple[str, ...] = ()
@@ -43,6 +47,9 @@ class OnboardingHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = self.route_path()
+        if path.startswith("/api/v1/"):
+            self.handle_client_api_get(path)
+            return
         if path == "/health":
             safe_log("health_check")
             self.send_json(
@@ -184,14 +191,21 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             if path == "/api/admin/channel-status":
                 self.handle_admin_channel_status(fields)
                 return
+            if path == "/api/v1/auth/browser-login":
+                self.handle_client_browser_login(fields)
+                return
+            if path == "/api/v1/auth/logout":
+                self.handle_client_logout()
+                return
             self.send_error(404)
         except WebAppValidationError as exc:
             safe_log("validation_rejected", reason=safe_reason(str(exc)))
-            error = (
-                "Acesso administrativo não autorizado."
-                if path.startswith("/api/admin/")
-                else "Não foi possível validar sua sessão do Telegram."
-            )
+            if path.startswith("/api/admin/"):
+                error = "Acesso administrativo não autorizado."
+            elif path.startswith("/api/v1/"):
+                error = "Link de acesso inválido ou expirado."
+            else:
+                error = "Não foi possível validar sua sessão do Telegram."
             self.send_json({"ok": False, "error": error}, status=403)
         except ValueError as exc:
             safe_log("api_rejected", endpoint=safe_endpoint(path), reason=safe_reason(str(exc)))
@@ -243,6 +257,43 @@ class OnboardingHandler(BaseHTTPRequestHandler):
     def handle_admin_session(self, fields: dict[str, str]) -> None:
         identity = self.authenticate_admin(fields)
         self.send_admin_dashboard(identity)
+
+    def handle_client_api_get(self, path: str) -> None:
+        try:
+            user_id = self.authenticate_client()
+            if path in {"/api/v1/session", "/api/v1/dashboard"}:
+                payload = self.client_portal.dashboard(user_id)
+            elif path == "/api/v1/channels":
+                payload = self.client_portal.channels(user_id)
+            elif path == "/api/v1/operations":
+                payload = self.client_portal.operations(user_id)
+            else:
+                self.send_error(404)
+                return
+            self.send_json({"ok": True, **payload})
+        except ValueError as exc:
+            safe_log("client_session_rejected", reason=safe_reason(str(exc)))
+            self.send_json({"ok": False, "error": "Sessao expirada."}, status=401)
+
+    def handle_client_browser_login(self, fields: dict[str, str]) -> None:
+        try:
+            session = self.client_browser_auth.consume_login_token(fields.get("token", ""))
+        except ValueError as exc:
+            raise WebAppValidationError(str(exc)) from exc
+        payload = self.client_portal.dashboard(session.user_id)
+        self.send_json(
+            {"ok": True, **payload},
+            extra_headers=(("Set-Cookie", client_session_cookie(session.session_token)),),
+        )
+
+    def handle_client_logout(self) -> None:
+        session_token = self.client_session_cookie()
+        if session_token:
+            self.client_browser_auth.revoke_session(session_token)
+        self.send_json(
+            {"ok": True},
+            extra_headers=(("Set-Cookie", clear_client_session_cookie()),),
+        )
 
     def handle_admin_browser_login(self, fields: dict[str, str]) -> None:
         try:
@@ -457,6 +508,18 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         morsel = cookie.get("admin_session")
         return morsel.value if morsel is not None else ""
 
+    def authenticate_client(self) -> int:
+        return self.client_browser_auth.authenticate_session(self.client_session_cookie())
+
+    def client_session_cookie(self) -> str:
+        cookie = SimpleCookie()
+        try:
+            cookie.load(self.headers.get("Cookie", ""))
+        except Exception:
+            return ""
+        morsel = cookie.get("client_session")
+        return morsel.value if morsel is not None else ""
+
     def route_path(self) -> str:
         return urlsplit(self.path).path
 
@@ -570,6 +633,11 @@ def main() -> int:
             config.database_path,
             admin_ids=config.bot_admin_ids,
         )
+        client_browser_auth = ClientBrowserAuthService(config.database_path)
+        client_portal = ClientPortalService(
+            config.database_path,
+            brand_name=config.brand_name,
+        )
         OnboardingHandler.bot_token = config.telegram_bot_token
         OnboardingHandler.broker_options = broker_options
         OnboardingHandler.broker_servers = broker_servers
@@ -579,6 +647,8 @@ def main() -> int:
         OnboardingHandler.onboarding = onboarding
         OnboardingHandler.admin_panel = admin_panel
         OnboardingHandler.admin_browser_auth = admin_browser_auth
+        OnboardingHandler.client_browser_auth = client_browser_auth
+        OnboardingHandler.client_portal = client_portal
 
         server = ThreadingHTTPServer(
             (config.onboarding_host, config.onboarding_port),
@@ -706,6 +776,20 @@ def admin_session_cookie(token: str) -> str:
 def clear_admin_session_cookie() -> str:
     return (
         "admin_session=; Path=/; Max-Age=0; "
+        "Secure; HttpOnly; SameSite=Strict"
+    )
+
+
+def client_session_cookie(token: str) -> str:
+    return (
+        f"client_session={token}; Path=/; Max-Age=43200; "
+        "Secure; HttpOnly; SameSite=Strict"
+    )
+
+
+def clear_client_session_cookie() -> str:
+    return (
+        "client_session=; Path=/; Max-Age=0; "
         "Secure; HttpOnly; SameSite=Strict"
     )
 

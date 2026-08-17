@@ -61,6 +61,7 @@ def main() -> int:
         admin_ids=config.bot_admin_ids,
         mt5_account_service=mt5_account_service,
         mt5_onboarding_url=config.mt5_onboarding_url,
+        client_app_url=config.client_app_url,
         brand_name=config.brand_name,
         market_news_available=config.market_news_enabled,
         market_news_minutes_before=config.market_news_minutes_before,

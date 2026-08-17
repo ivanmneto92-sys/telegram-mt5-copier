@@ -81,6 +81,7 @@ class AppConfig:
     mt5_execution_mode: str
     mt5_max_accounts_per_vps: int
     mt5_onboarding_url: str | None = field(repr=False)
+    client_app_url: str | None = field(repr=False)
     onboarding_host: str
     onboarding_port: int
     allow_live_accounts: bool
@@ -159,6 +160,7 @@ class AppConfig:
                 "MT5_MAX_ACCOUNTS_PER_VPS",
             ),
             mt5_onboarding_url=_optional_value("MT5_ONBOARDING_URL", file_values, runtime_env),
+            client_app_url=_optional_value("CLIENT_APP_URL", file_values, runtime_env),
             onboarding_host=onboarding_host,
             onboarding_port=parse_port(
                 _value("ONBOARDING_PORT", file_values, runtime_env, "8080")

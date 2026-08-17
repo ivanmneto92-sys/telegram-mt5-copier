@@ -61,6 +61,7 @@ def run_check(config: AppConfig) -> int:
     print(f"DEFAULT_PENDING_EXPIRATION_MINUTES={config.default_pending_expiration_minutes}")
     print(f"GLOBAL_EXECUTION_KILL_SWITCH={str(config.global_execution_kill_switch).lower()}")
     print(f"ONBOARDING_LOCAL_URL={config.local_onboarding_url}")
+    print(f"CLIENT_APP_URL={config.client_app_url or 'ausente'}")
     print(f"MARKET_NEWS_ENABLED={str(config.market_news_enabled).lower()}")
     print(f"TELEGRAM_IMAGE_OCR_ENABLED={str(config.telegram_image_ocr_enabled).lower()}")
     print(f"TELEGRAM_IMAGE_OCR_CHAT_IDS={','.join(config.telegram_image_ocr_chat_ids) or 'nenhum'}")
