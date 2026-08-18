@@ -698,7 +698,7 @@ class ChannelCatalogService:
         target_status: str | None,
         admin_id: int | None,
         now: str,
-    ) -> None:
+    ) -> list[dict[str, object]]:
         """Replica apelido e status de aprovação para instâncias white-label irmãs.
 
         Casa o canal pelo `telegram_chat_id` real do Telegram, que é o mesmo em
@@ -708,7 +708,12 @@ class ChannelCatalogService:
         contrário, apenas o apelido é sincronizado e o status fica para o admin
         confirmar manualmente naquela instância. Falhas de propagação nunca
         interrompem a ação local (a instância de origem já foi salva).
+
+        Retorna um resultado por instância peer, usado pelo relatório de
+        `resync_active_channels_with_peers`; chamadas do dia a dia (aprovar,
+        renomear, suspender um canal) ignoram o retorno.
         """
+        outcomes: list[dict[str, object]] = []
         for peer_path in self.peer_database_paths:
             try:
                 with connect_database(peer_path) as connection:
@@ -717,6 +722,7 @@ class ChannelCatalogService:
                         (telegram_chat_id,),
                     ).fetchone()
                     if row is None:
+                        outcomes.append({"peer": str(peer_path), "outcome": "not_found"})
                         continue
                     peer_channel_id, peer_access_status = int(row[0]), str(row[1])
                     if display_name is not None:
@@ -735,6 +741,7 @@ class ChannelCatalogService:
                                 """,
                                 (now, admin_id, now, peer_channel_id),
                             )
+                            outcomes.append({"peer": str(peer_path), "outcome": "activated"})
                         else:
                             logger.warning(
                                 "Canal %s aprovado, mas instancia peer %s ainda nao confirmou "
@@ -742,17 +749,60 @@ class ChannelCatalogService:
                                 telegram_chat_id,
                                 peer_path,
                             )
+                            outcomes.append({"peer": str(peer_path), "outcome": "pending_confirmation"})
                     elif target_status == CHANNEL_STATUS_SUSPENDED:
                         connection.execute(
                             "UPDATE source_channels SET status = 'suspended', updated_at = ? WHERE id = ?",
                             (now, peer_channel_id),
                         )
+                        outcomes.append({"peer": str(peer_path), "outcome": "suspended"})
+                    else:
+                        outcomes.append({"peer": str(peer_path), "outcome": "display_name_only"})
             except Exception:
                 logger.exception(
                     "Falha ao propagar canal %s para a instancia peer %s",
                     telegram_chat_id,
                     peer_path,
                 )
+                outcomes.append({"peer": str(peer_path), "outcome": "error"})
+        return outcomes
+
+    def resync_active_channels_with_peers(self) -> list[dict[str, object]]:
+        """Reconciliação única: replica o estado atual de todo canal ativo aqui.
+
+        Uso pontual, disparado manualmente (CLI `--sync-channels`), para
+        alinhar catálogos que já divergiram antes de `PEER_CHANNEL_SYNC_DATABASES`
+        existir ou antes de ser configurado numa instância. Aprovações,
+        renomeações e suspensões novas já propagam sozinhas; isto não precisa
+        rodar de novo depois disso, exceto para varrer divergência histórica.
+        """
+        now = utc_now()
+        with connect_database(self.database_path) as connection:
+            rows = connection.execute(
+                "SELECT id, telegram_chat_id, display_name FROM source_channels WHERE status = 'active'"
+            ).fetchall()
+
+        report: list[dict[str, object]] = []
+        for row in rows:
+            channel_id, telegram_chat_id, display_name = int(row[0]), row[1], row[2]
+            if telegram_chat_id is None:
+                continue
+            outcomes = self._propagate_to_peers(
+                telegram_chat_id=str(telegram_chat_id),
+                display_name=display_name,
+                target_status=CHANNEL_STATUS_ACTIVE,
+                admin_id=None,
+                now=now,
+            )
+            report.append(
+                {
+                    "channel_id": channel_id,
+                    "display_name": public_channel_title(channel_id, display_name),
+                    "telegram_chat_id": str(telegram_chat_id),
+                    "peers": outcomes,
+                }
+            )
+        return report
 
     @staticmethod
     def _enable_subscription(connection: object, user_id: int, channel_id: int, now: str) -> None:

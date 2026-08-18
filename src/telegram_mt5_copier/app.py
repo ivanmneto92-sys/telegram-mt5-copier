@@ -14,6 +14,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="telegram-mt5-copier")
     parser.add_argument("--check", action="store_true", help="Valida configuracao e cria pastas.")
     parser.add_argument(
+        "--sync-channels",
+        action="store_true",
+        help=(
+            "Reconciliacao unica: replica o estado atual dos canais ativos desta "
+            "instancia para as instancias listadas em PEER_CHANNEL_SYNC_DATABASES."
+        ),
+    )
+    parser.add_argument(
         "--telegram-login",
         action="store_true",
         help="Executa login interativo no Telegram e salva a sessao em SESSION_DIR.",
@@ -30,6 +38,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.check:
         return run_check(config)
+
+    if args.sync_channels:
+        return run_sync_channels(config)
 
     if args.telegram_login:
         return run_telegram_login(config)
@@ -78,6 +89,38 @@ def run_check(config: AppConfig) -> int:
 
     if missing:
         print("Valores do Telegram ainda nao configurados; permitido porque DRY_RUN=true.")
+
+    return 0
+
+
+def run_sync_channels(config: AppConfig) -> int:
+    if not config.peer_channel_sync_database_paths:
+        print(
+            "PEER_CHANNEL_SYNC_DATABASES nao configurado nesta instancia; nada para sincronizar.",
+            file=sys.stderr,
+        )
+        return 2
+
+    from .channel_catalog import ChannelCatalogService
+
+    catalog = ChannelCatalogService(
+        config.database_path,
+        peer_database_paths=config.peer_channel_sync_database_paths,
+    )
+    report = catalog.resync_active_channels_with_peers()
+
+    print(f"Canais ativos nesta instancia ({config.instance_id}): {len(report)}")
+    for item in report:
+        print(f"- {item['display_name']} ({item['telegram_chat_id']})")
+        for peer_result in item["peers"]:
+            outcome = peer_result["outcome"]
+            label = {
+                "activated": "sincronizado e ativado no peer",
+                "pending_confirmation": "peer ainda nao confirmou acesso; so o apelido foi sincronizado",
+                "not_found": "peer ainda nao conhece este canal (conta tecnica precisa entrar la primeiro)",
+                "error": "falha ao conectar no banco peer",
+            }.get(str(outcome), str(outcome))
+            print(f"    peer {peer_result['peer']}: {label}")
 
     return 0
 

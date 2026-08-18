@@ -502,6 +502,23 @@ instância), só o apelido é sincronizado e a aprovação fica pendente até es
 confirmação acontecer também lá. Uma instância peer temporariamente
 indisponível nunca bloqueia a aprovação na instância de origem.
 
+Isso cobre só as próximas aprovações. Canais que já haviam divergido antes de
+`PEER_CHANNEL_SYNC_DATABASES` existir continuam divergentes até uma
+reconciliação manual. Depois de configurar a variável nas duas instâncias,
+rode uma vez em cada uma delas:
+
+```powershell
+.\.venv\Scripts\python.exe -m telegram_mt5_copier --sync-channels
+```
+
+O comando lista os canais ativos localmente e, para cada um, o resultado em
+cada instância peer: sincronizado e ativado, apelido sincronizado mas
+aguardando a conta técnica do peer confirmar acesso, ou o peer ainda nem
+conhece aquele canal (nesse caso, o admin entra manualmente com a conta
+técnica daquela instância no canal antes de repetir o comando). Rode o
+`--sync-channels` nas duas direções — o que existe só no Instituto Trader
+precisa ser rodado a partir dele, e vice-versa.
+
 O script `install_windows_startup.ps1` lê `INSTANCE_ID`: a instância `main`
 mantém a tarefa `Telegram MT5 Copier`; as demais recebem automaticamente nomes
 como `Telegram MT5 Copier - mesa_alpha`. Cada porta local precisa de uma rota

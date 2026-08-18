@@ -350,6 +350,69 @@ class ChannelCatalogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(peer_pending[0]["id"], int(peer_request.request_id))
         self.assertEqual(peer_pending[0]["status"], "pending_access")
 
+    async def test_resync_reconcilia_canais_ja_divergentes_antes_da_sincronizacao(self) -> None:
+        # Simula o cenario real: Instituto e Robo Braba aprovaram e apelidaram
+        # o mesmo canal de forma independente antes de configurar
+        # PEER_CHANNEL_SYNC_DATABASES.
+        peer_database_path = Path(self.temp_dir.name) / "peer.sqlite3"
+        peer_catalog = ChannelCatalogService(peer_database_path)
+        peer_user = UserRepository(peer_database_path).get_or_create_user(303, "carol")
+        peer_catalog.submit_request(peer_user.id, "@SNIPERGOLD_SIGNALS")
+        await validate_pending_channels_once(
+            FakeTelegramClient(left=False),
+            peer_catalog,
+            CaptureLogger(),
+        )
+        # O peer ja tinha confirmado acesso, mas nunca chegou a aprovar: fica
+        # pendente ate o resync desta instancia empurrar o estado atual.
+
+        catalog = ChannelCatalogService(
+            self.database_path,
+            peer_database_paths=(peer_database_path,),
+        )
+        request = catalog.submit_request(self.user.id, "@SNIPERGOLD_SIGNALS")
+        await validate_pending_channels_once(
+            FakeTelegramClient(left=False),
+            catalog,
+            CaptureLogger(),
+        )
+        # Aprovado ANTES de existir sincronizacao (sem peer_database_paths),
+        # como aconteceu de fato nas duas instancias em producao.
+        ChannelCatalogService(self.database_path).approve_request(
+            int(request.request_id), 9001
+        )
+        catalog.set_display_name(
+            int(catalog.admin_channels()["channels"][0]["id"]), "Sala Ouro Premium"
+        )
+
+        report = catalog.resync_active_channels_with_peers()
+
+        self.assertEqual(len(report), 1)
+        self.assertEqual(report[0]["peers"], [{"peer": str(peer_database_path), "outcome": "activated"}])
+        peer_channel = peer_catalog.admin_channels()["channels"][0]
+        self.assertEqual(peer_channel["status"], "active")
+        self.assertEqual(peer_channel["display_name"], "Sala Ouro Premium")
+
+    async def test_resync_reporta_canal_que_peer_ainda_nao_conhece(self) -> None:
+        peer_database_path = Path(self.temp_dir.name) / "peer.sqlite3"
+        ChannelCatalogService(peer_database_path)  # inicializa o schema, sem canais
+
+        catalog = ChannelCatalogService(
+            self.database_path,
+            peer_database_paths=(peer_database_path,),
+        )
+        request = catalog.submit_request(self.user.id, "@SNIPERGOLD_SIGNALS")
+        await validate_pending_channels_once(
+            FakeTelegramClient(left=False),
+            catalog,
+            CaptureLogger(),
+        )
+        catalog.approve_request(int(request.request_id), 9001)
+
+        report = catalog.resync_active_channels_with_peers()
+
+        self.assertEqual(report[0]["peers"], [{"peer": str(peer_database_path), "outcome": "not_found"}])
+
     def test_propagacao_para_peer_indisponivel_nao_quebra_aprovacao_local(self) -> None:
         catalog = ChannelCatalogService(
             self.database_path,
