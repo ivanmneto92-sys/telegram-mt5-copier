@@ -251,11 +251,16 @@ class PositionManager:
         The entry validator prevents *new* signals after the realized result reaches
         a threshold. This guard also includes floating P/L and removes existing
         copier exposure as soon as the configured threshold is observed.
+
+        Detection and pausing must run even with zero open exposure: a target
+        commonly gets reached by the very deal that closes the account's last
+        open position, leaving nothing to close on this same pass. Skipping
+        detection in that case used to leave `daily_signal_pause_until` unset
+        and the warning/notification unfired, relying entirely on the entry
+        validator to catch the next signal reactively instead of pausing the
+        moment the threshold is observed.
         """
-        if (
-            profile.daily_profit_target <= 0
-            and profile.daily_loss_limit <= 0
-        ) or not (positions or pending_orders):
+        if profile.daily_profit_target <= 0 and profile.daily_loss_limit <= 0:
             return None
 
         now = datetime.now(tz=timezone.utc)

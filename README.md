@@ -352,6 +352,15 @@ Para validar uma conta na VPS:
 
 O modo real aplica antes do envio: lote fixo ou risco percentual, spread máximo, limite/meta diária, máximo de sinais, volume mínimo/step, distância mínima de stops e `order_check`. Ordens de múltiplos TPs são verificadas antes do primeiro envio; se uma submissão intermediária falhar, o serviço tenta remover as pendentes já criadas.
 
+A partir da versão `0.37.1`, atingir a meta diária ou o limite diário pausa
+novos sinais imediatamente, mesmo quando o negócio que cruzou o limiar
+encerrou a última posição aberta da conta. Antes, a trava financeira só
+verificava o resultado do dia quando havia posição ou ordem pendente aberta
+na varredura do Worker; se o Take Profit fechasse a única operação da conta
+naquele instante, a meta diária ficava sem detectar o próprio acionamento até
+o próximo sinal tentar entrar — sem aviso no Telegram e sem `daily_signal_pause_until`
+registrado nesse intervalo.
+
 Em `⚙️ Configurações > 🎯 Execução do sinal > Quantidade de TPs`, o usuário escolhe os primeiros 1, 2, 3 ou 4 alvos do sinal, ou todos os alvos disponíveis. O lote total configurado é dividido somente entre os TPs selecionados. A seleção não inventa alvos quando o sinal possui menos TPs.
 
 O `telegram-mt5-worker` detecta quando o TP1 é atingido usando o preço atual e o histórico do MT5, inclusive após uma breve reconexão. Em `🛡️ Proteções > 🎯 BE após TP1`, cada cliente escolhe se o Stop Loss das posições restantes deve ser movido para o preço real de entrada. A preferência começa ativada para preservar o comportamento existente. Ordens daquele grupo que ainda não foram ativadas são canceladas após o TP1 para evitar entradas tardias em um sinal já desenvolvido. A proteção é aplicada apenas a posições do copiador, identificadas por `magic` e comentário; operações manuais não são alteradas. O BE antecipado em 1R e o trailing são preferências separadas e complementares.

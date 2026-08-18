@@ -1812,6 +1812,80 @@ class PendingOrderTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertIsNotNone(pause_until)
 
+    def test_worker_pausa_meta_diaria_mesmo_sem_exposicao_aberta(self) -> None:
+        # Regressao: o TP que fecha a ULTIMA posicao da conta nao deixa
+        # posicao nem pendente aberta na proxima varredura do worker. Antes
+        # do fix, a funcao retornava cedo demais e nunca detectava que a
+        # meta diaria ja tinha sido atingida pelo resultado realizado —
+        # nada era pausado, nada era avisado, e o proximo sinal continuava
+        # sendo aceito normalmente.
+        profile = self.accounts.update_execution_profile_field(
+            self.user.id,
+            self.account.id,
+            "daily_profit_target",
+            "30",
+        )
+
+        class RecordingNotifier:
+            def __init__(self) -> None:
+                self.messages: list[tuple[int, str]] = []
+
+            def send(self, telegram_user_id: int, message: str) -> bool:
+                self.messages.append((telegram_user_id, message))
+                return True
+
+        notifier = RecordingNotifier()
+        client = SimulatedMT5Client(
+            positions=(),
+            orders=(),
+            history_deals=({"magic": MT5_MAGIC_NUMBER, "profit": 31},),
+        )
+
+        changed = PositionManager(
+            self.database_path,
+            self.accounts,
+            lambda: client,
+            notifier=notifier,  # type: ignore[arg-type]
+        ).manage_account(self.account, profile)
+
+        self.assertEqual(changed, 0)
+        self.assertEqual(client.order_send_requests, [])
+        self.assertEqual(len(notifier.messages), 1)
+        self.assertIn("META DIÁRIA ATINGIDA", notifier.messages[0][1])
+        with connect_database(self.database_path) as connection:
+            pause_until = connection.execute(
+                "SELECT daily_signal_pause_until FROM users WHERE id = ?",
+                (self.user.id,),
+            ).fetchone()[0]
+        self.assertIsNotNone(pause_until)
+
+    def test_worker_pausa_limite_diario_mesmo_sem_exposicao_aberta(self) -> None:
+        profile = self.accounts.update_execution_profile_field(
+            self.user.id,
+            self.account.id,
+            "daily_loss_limit",
+            "30",
+        )
+        client = SimulatedMT5Client(
+            positions=(),
+            orders=(),
+            history_deals=({"magic": MT5_MAGIC_NUMBER, "profit": -31},),
+        )
+
+        changed = PositionManager(
+            self.database_path,
+            self.accounts,
+            lambda: client,
+        ).manage_account(self.account, profile)
+
+        self.assertEqual(changed, 0)
+        with connect_database(self.database_path) as connection:
+            pause_until = connection.execute(
+                "SELECT daily_signal_pause_until FROM users WHERE id = ?",
+                (self.user.id,),
+            ).fetchone()[0]
+        self.assertIsNotNone(pause_until)
+
     def test_worker_nao_fecha_antes_da_meta_diaria(self) -> None:
         profile = self.accounts.update_execution_profile_field(
             self.user.id,
