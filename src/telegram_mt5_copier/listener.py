@@ -22,6 +22,7 @@ from .market_news import MarketNewsService
 from .image_ocr import (
     extract_image_text,
     find_tesseract_command,
+    recover_direction_from_ocr,
     validated_ocr_signal,
 )
 from .parser import parse_signal_text
@@ -617,6 +618,11 @@ async def enrich_photo_with_ocr(
         tesseract_command=tesseract_command,
     )
     signal = validated_ocr_signal(ocr_text, incoming.caption)
+    effective_caption = ocr_text
+    if signal is None:
+        recovered = recover_direction_from_ocr(ocr_text, incoming.caption)
+        if recovered is not None:
+            signal, effective_caption = recovered
     if signal is None:
         logger.warning(
             "OCR rejeitado por falta de validação cruzada. origem=%s mensagem_id=%s",
@@ -632,7 +638,7 @@ async def enrich_photo_with_ocr(
         signal.symbol,
         signal.direction.value,
     )
-    return replace(incoming, caption=ocr_text)
+    return replace(incoming, caption=effective_caption)
 
 
 def classify_telethon_message(message: Any) -> str:

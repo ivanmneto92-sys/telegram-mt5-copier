@@ -683,3 +683,16 @@ TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe
 
 Não habilite OCR globalmente para canais ainda não analisados. Cada novo formato
 de imagem deve ser testado antes de seu ID ser incluído na configuração.
+
+A partir da versão `0.38.0`, existe um segundo modo de recuperação por OCR
+para salas cujo emoji customizado apaga só a palavra BUY/SELL/COMPRA/VENDA da
+legenda — por exemplo, quando a sala usa um selo colorido para "SELL" em vez
+de escrever a palavra, e a imagem em si não traz entrada, SL nem TPs (só um
+banner como "GOLD SELL"). Nesse caso o OCR da imagem inteira não basta para
+formar um sinal completo, então o sistema lê da imagem somente a palavra de
+direção e a reinsere no lugar exato onde o emoji estava, mantendo entrada,
+Stop Loss e Take Profits vindos exclusivamente da legenda original, com as
+mesmas validações de sempre. Se a legenda já tiver uma direção reconhecível,
+nada é alterado; se o OCR não conseguir ler nenhuma palavra de direção na
+imagem, o sinal continua sendo rejeitado. Esse modo usa a mesma configuração
+de opt-in por canal acima — não é preciso nenhuma variável adicional.
