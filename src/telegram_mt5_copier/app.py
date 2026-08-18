@@ -65,6 +65,8 @@ def run_check(config: AppConfig) -> int:
     print(f"MARKET_NEWS_ENABLED={str(config.market_news_enabled).lower()}")
     print(f"TELEGRAM_IMAGE_OCR_ENABLED={str(config.telegram_image_ocr_enabled).lower()}")
     print(f"TELEGRAM_IMAGE_OCR_CHAT_IDS={','.join(config.telegram_image_ocr_chat_ids) or 'nenhum'}")
+    peer_databases = ",".join(str(path) for path in config.peer_channel_sync_database_paths)
+    print(f"PEER_CHANNEL_SYNC_DATABASES={peer_databases or 'nenhum'}")
     print(
         "ECONOMIC_CALENDAR_API_KEY="
         + ("configurada" if config.economic_calendar_api_key else "ausente")
