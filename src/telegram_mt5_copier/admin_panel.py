@@ -727,7 +727,7 @@ def render_admin_panel(
       --line: #213954;
       --text: #eef6ff;
       --muted: #8fa8c2;
-      --cyan: #39d7c4;
+      --gold: #c9a227;
       --blue: #4b8fff;
       --green: #45d483;
       --yellow: #f2bd4f;
@@ -740,7 +740,7 @@ def render_admin_panel(
       min-height: 100vh;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       background:
-        radial-gradient(circle at 15% -10%, rgba(57, 215, 196, .16), transparent 34rem),
+        radial-gradient(circle at 15% -10%, rgba(201, 162, 39, .18), transparent 34rem),
         radial-gradient(circle at 100% 10%, rgba(75, 143, 255, .14), transparent 30rem),
         var(--bg);
       color: var(--text);
@@ -749,20 +749,31 @@ def render_admin_panel(
     .shell {{ max-width: 1500px; margin: 0 auto; padding: 18px; display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 20px; }}
     .sidebar {{ position: sticky; top: 18px; align-self: start; min-height: calc(100vh - 36px); padding: 22px 14px; border: 1px solid var(--line); border-radius: 20px; background: rgba(8, 23, 39, .94); box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 22px; }}
     .brand-block {{ padding: 0 8px; }}
+    .brand-mark {{ display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }}
+    .brand-badge {{
+      width: 38px; height: 38px; flex: none; border-radius: 10px;
+      background: linear-gradient(160deg, var(--gold) 0%, #16213e 62%);
+      color: #0b1220; font-weight: 900; font-size: 14px; letter-spacing: -.02em;
+      display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 6px 16px rgba(201, 162, 39, .25);
+    }}
+    .brand-wordmark {{ display: flex; flex-direction: column; line-height: 1.15; }}
+    .brand-wordmark strong {{ font-size: 12px; letter-spacing: .14em; color: var(--text); font-weight: 800; }}
+    .brand-wordmark em {{ font-style: normal; font-size: 15px; letter-spacing: .08em; color: var(--gold); font-weight: 800; }}
     .brand-title {{ margin-top: 7px; font-size: 20px; font-weight: 850; letter-spacing: -.02em; }}
     .brand-copy {{ color: var(--muted); font-size: 12px; margin-top: 5px; line-height: 1.45; }}
     .navigation {{ display: grid; gap: 7px; }}
     .nav-button {{ display: grid; grid-template-columns: 26px 1fr auto; align-items: center; gap: 9px; width: 100%; padding: 12px; border: 1px solid transparent; border-radius: 12px; color: var(--muted); background: transparent; text-align: left; cursor: pointer; }}
     .nav-button:hover {{ color: var(--text); background: rgba(17, 36, 59, .72); }}
-    .nav-button.active {{ color: var(--text); border-color: rgba(57,215,196,.32); background: rgba(57,215,196,.1); }}
+    .nav-button.active {{ color: var(--text); border-color: rgba(201,162,39,.32); background: rgba(201,162,39,.12); }}
     .nav-icon {{ font-size: 18px; text-align: center; }}
     .nav-label {{ font-weight: 750; }}
     .nav-badge {{ min-width: 23px; padding: 3px 6px; border-radius: 999px; background: var(--panel-soft); color: var(--text); font-size: 11px; text-align: center; }}
-    .nav-button.active .nav-badge {{ background: var(--cyan); color: #06151a; }}
+    .nav-button.active .nav-badge {{ background: var(--gold); color: #06151a; }}
     .sidebar-foot {{ margin-top: auto; padding: 12px 9px 0; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; line-height: 1.5; }}
     .content {{ min-width: 0; padding: 8px 4px 60px; }}
     header {{ display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; margin-bottom: 22px; }}
-    .eyebrow {{ color: var(--cyan); font-size: 12px; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; }}
+    .eyebrow {{ color: var(--gold); font-size: 12px; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; }}
     h1 {{ margin: 6px 0 4px; font-size: clamp(28px, 5vw, 44px); line-height: 1; letter-spacing: -.035em; }}
     .subtitle {{ color: var(--muted); margin: 0; }}
     .header-actions {{ display: flex; gap: 8px; }}
@@ -770,7 +781,7 @@ def render_admin_panel(
       border: 1px solid var(--line); border-radius: 12px; padding: 11px 15px;
       color: var(--text); background: rgba(17, 36, 59, .82); cursor: pointer;
     }}
-    .refresh:hover, .logout:hover {{ border-color: var(--cyan); }}
+    .refresh:hover, .logout:hover {{ border-color: var(--gold); }}
     .notice {{ padding: 14px 16px; border: 1px solid var(--line); background: var(--panel); border-radius: 14px; color: var(--muted); }}
     .notice.error {{ color: #ffd9dd; border-color: rgba(255,107,120,.55); background: rgba(92, 25, 38, .45); }}
     .summary {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 0 0 22px; }}
@@ -789,13 +800,13 @@ def render_admin_panel(
     .quick-list {{ display: grid; gap: 8px; }}
     .quick-row {{ display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 11px 12px; border-radius: 11px; background: #091727; color: var(--muted); font-size: 13px; }}
     .quick-row strong {{ color: var(--text); overflow-wrap: anywhere; }}
-    .quick-action {{ border: 1px solid var(--line); border-radius: 9px; padding: 7px 9px; color: var(--cyan); background: transparent; cursor: pointer; white-space: nowrap; }}
+    .quick-action {{ border: 1px solid var(--line); border-radius: 9px; padding: 7px 9px; color: var(--gold); background: transparent; cursor: pointer; white-space: nowrap; }}
     .finance-card {{ display: grid; grid-template-columns: minmax(190px, 1.3fr) minmax(140px, .8fr) minmax(150px, .8fr) minmax(130px, .7fr) auto; gap: 16px; align-items: center; padding: 17px; border: 1px solid var(--line); border-radius: 16px; background: rgba(13, 27, 46, .94); }}
     .search {{ flex: 1 1 280px; min-width: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: #091727; color: var(--text); outline: none; }}
-    .search:focus {{ border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(57,215,196,.1); }}
+    .search:focus {{ border-color: var(--gold); box-shadow: 0 0 0 3px rgba(201,162,39,.12); }}
     .filters {{ display: flex; gap: 7px; overflow-x: auto; }}
     .filter {{ border: 1px solid var(--line); border-radius: 999px; padding: 9px 12px; color: var(--muted); background: transparent; cursor: pointer; white-space: nowrap; }}
-    .filter.active {{ color: #06151a; background: var(--cyan); border-color: var(--cyan); font-weight: 800; }}
+    .filter.active {{ color: #06151a; background: var(--gold); border-color: var(--gold); font-weight: 800; }}
     .list {{ display: grid; gap: 12px; }}
     .section-title {{ margin: 32px 0 6px; font-size: 24px; }}
     .section-copy {{ margin: 0 0 15px; color: var(--muted); }}
@@ -830,14 +841,14 @@ def render_admin_panel(
     .close {{ border: 0; background: transparent; color: var(--muted); font-size: 24px; cursor: pointer; }}
     .dialog-body {{ padding: 20px; display: grid; gap: 22px; }}
     .form-section {{ display: grid; gap: 12px; }}
-    .form-section h3 {{ margin: 0; font-size: 15px; color: var(--cyan); }}
+    .form-section h3 {{ margin: 0; font-size: 15px; color: var(--gold); }}
     .form-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }}
     label {{ display: grid; gap: 6px; color: var(--muted); font-size: 12px; }}
     label.wide {{ grid-column: 1 / -1; }}
     label input, label select, label textarea {{ width: 100%; color: var(--text); background: #091727; border: 1px solid var(--line); border-radius: 10px; padding: 10px 11px; outline: none; }}
     label textarea {{ min-height: 72px; resize: vertical; }}
     .form-actions {{ display: flex; justify-content: flex-end; gap: 9px; }}
-    .save {{ border: 0; border-radius: 10px; padding: 11px 15px; color: #06151a; background: var(--cyan); font-weight: 800; cursor: pointer; }}
+    .save {{ border: 0; border-radius: 10px; padding: 11px 15px; color: #06151a; background: var(--gold); font-weight: 800; cursor: pointer; }}
     .payment {{ background: var(--green); }}
     .payment-history {{ display: grid; gap: 7px; color: var(--muted); font-size: 13px; }}
     .payment-row {{ display: flex; justify-content: space-between; gap: 12px; padding: 9px 11px; background: #091727; border: 1px solid var(--line); border-radius: 10px; }}
@@ -884,6 +895,10 @@ def render_admin_panel(
   <main class="shell">
     <aside class="sidebar" aria-label="Menu administrativo">
       <div class="brand-block">
+        <div class="brand-mark">
+          <span class="brand-badge">IT</span>
+          <span class="brand-wordmark"><strong>INSTITUTO</strong><em>TRADER</em></span>
+        </div>
         <div class="eyebrow">{safe_brand} · Master</div>
         <div class="brand-title">Central de clientes</div>
         <div class="brand-copy">Gestão administrativa e operacional.</div>
@@ -1303,7 +1318,7 @@ def render_admin_script() -> str:
       var canApprove = request.status === "ready_for_admin_review";
       return '<article class="channel-card">' +
         '<div class="identity"><h2>' + esc(request.title || (request.username ? "@" + request.username : "Canal privado")) + '</h2>' +
-        '<div class="meta"><a href="' + esc(request.canonical_link) + '" target="_blank" rel="noopener" style="color:var(--cyan)">' +
+        '<div class="meta"><a href="' + esc(request.canonical_link) + '" target="_blank" rel="noopener" style="color:var(--gold)">' +
         esc(request.canonical_link) + '</a><br>Solicitado por @' + esc(request.telegram_username || request.telegram_user_id) + '</div></div>' +
         '<div class="detail"><strong>' + esc(channelRequestStatus(request.status)) + '</strong><br>' +
         'ID: ' + esc(request.telegram_chat_id || "aguardando") + '<br>Histórico: ' +

@@ -308,6 +308,16 @@ def render_onboarding_form(
     :root {{ color-scheme: light; }}
     body {{ font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif; margin: 0; padding: 24px; background: #f6f7f9; color: #15171a; }}
     main {{ max-width: 520px; margin: 0 auto; }}
+    .brand-mark {{ display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }}
+    .brand-badge {{
+      width: 36px; height: 36px; flex: none; border-radius: 9px;
+      background: linear-gradient(160deg, #c9a227 0%, #16213e 62%);
+      color: #fff; font-weight: 900; font-size: 13px; letter-spacing: -.02em;
+      display: flex; align-items: center; justify-content: center;
+    }}
+    .brand-wordmark {{ display: flex; flex-direction: column; line-height: 1.15; }}
+    .brand-wordmark strong {{ font-size: 11px; letter-spacing: .14em; color: #16213e; font-weight: 800; }}
+    .brand-wordmark em {{ font-style: normal; font-size: 14px; letter-spacing: .08em; color: #c9a227; font-weight: 800; }}
     h1 {{ font-size: 24px; margin: 0 0 10px; }}
     p {{ line-height: 1.45; }}
     .panel {{ background: #ffffff; border: 1px solid #dde2ea; border-radius: 8px; padding: 18px; }}
@@ -318,7 +328,7 @@ def render_onboarding_form(
     form {{ display: block; }}
     label {{ display: block; margin-top: 14px; font-weight: 600; }}
     input, select {{ width: 100%; box-sizing: border-box; padding: 12px; border: 1px solid #c9ced6; border-radius: 8px; margin-top: 6px; background: #fff; }}
-    button {{ margin-top: 20px; width: 100%; padding: 13px; border: 0; border-radius: 8px; background: #1473e6; color: white; font-weight: 700; }}
+    button {{ margin-top: 20px; width: 100%; padding: 13px; border: 0; border-radius: 8px; background: #16213e; color: #fff; font-weight: 700; }}
     button:disabled {{ opacity: .62; }}
     [hidden] {{ display: none !important; }}
   </style>
@@ -345,6 +355,10 @@ def render_onboarding_form(
 <body>
   <main>
     <section class="panel">
+      <div class="brand-mark">
+        <span class="brand-badge">IT</span>
+        <span class="brand-wordmark"><strong>INSTITUTO</strong><em>TRADER</em></span>
+      </div>
       <h1>Conectar conta MT5</h1>
       <p><strong>{safe_brand}</strong></p>
       <p id="intro">Preencha os dados da sua conta MT5 pelo ambiente seguro do Telegram.</p>
