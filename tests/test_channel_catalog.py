@@ -290,6 +290,82 @@ class ChannelCatalogTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(database.has_duplicate(signal.content_signature, "-100111"))
         self.assertFalse(database.has_duplicate(signal.content_signature, "-100222"))
 
+    async def test_aprovacao_propaga_para_instancia_peer_ja_confirmada(self) -> None:
+        peer_database_path = Path(self.temp_dir.name) / "peer.sqlite3"
+        peer_catalog = ChannelCatalogService(peer_database_path)
+        peer_user = UserRepository(peer_database_path).get_or_create_user(303, "carol")
+        peer_catalog.submit_request(peer_user.id, "@SNIPERGOLD_SIGNALS")
+        await validate_pending_channels_once(
+            FakeTelegramClient(left=False),
+            peer_catalog,
+            CaptureLogger(),
+        )
+        peer_channel_id = int(
+            peer_catalog.admin_channels()["requests"][0]["source_channel_id"]
+        )
+        self.assertEqual(
+            peer_catalog.admin_channels()["channels"][0]["status"],
+            "pending_review",
+        )
+
+        catalog = ChannelCatalogService(
+            self.database_path,
+            peer_database_paths=(peer_database_path,),
+        )
+        request = catalog.submit_request(self.user.id, "@SNIPERGOLD_SIGNALS")
+        await validate_pending_channels_once(
+            FakeTelegramClient(left=False),
+            catalog,
+            CaptureLogger(),
+        )
+        channel_id = catalog.approve_request(int(request.request_id), 9001)
+        catalog.set_display_name(channel_id, "Sala Ouro Premium")
+
+        peer_channel = peer_catalog.admin_channels()["channels"][0]
+        self.assertEqual(peer_channel["id"], peer_channel_id)
+        self.assertEqual(peer_channel["status"], "active")
+        self.assertEqual(peer_channel["display_name"], "Sala Ouro Premium")
+
+    async def test_aprovacao_nao_ativa_peer_que_ainda_nao_confirmou_acesso(self) -> None:
+        peer_database_path = Path(self.temp_dir.name) / "peer.sqlite3"
+        peer_catalog = ChannelCatalogService(peer_database_path)
+        peer_user = UserRepository(peer_database_path).get_or_create_user(303, "carol")
+        peer_request = peer_catalog.submit_request(peer_user.id, "@SNIPERGOLD_SIGNALS")
+
+        catalog = ChannelCatalogService(
+            self.database_path,
+            peer_database_paths=(peer_database_path,),
+        )
+        request = catalog.submit_request(self.user.id, "@SNIPERGOLD_SIGNALS")
+        await validate_pending_channels_once(
+            FakeTelegramClient(left=False),
+            catalog,
+            CaptureLogger(),
+        )
+        catalog.approve_request(int(request.request_id), 9001)
+
+        # A conta tecnica do peer ainda nao confirmou acesso ao canal: a
+        # aprovacao nao pode ser propagada, apenas registrada localmente aqui.
+        peer_pending = peer_catalog.admin_channels()["requests"]
+        self.assertEqual(peer_pending[0]["id"], int(peer_request.request_id))
+        self.assertEqual(peer_pending[0]["status"], "pending_access")
+
+    def test_propagacao_para_peer_indisponivel_nao_quebra_aprovacao_local(self) -> None:
+        catalog = ChannelCatalogService(
+            self.database_path,
+            peer_database_paths=(Path(self.temp_dir.name),),  # diretorio, nao arquivo
+        )
+        channel_id = catalog.register_configured_channel(
+            telegram_chat_id="-1001234567890",
+            title="Canal principal",
+            username="CanalPrincipal",
+            content_protected=False,
+            history_accessible=True,
+            last_message_id=1,
+        )
+
+        self.assertEqual(catalog.set_display_name(channel_id, "Sala X"), "Sala X")
+
     async def test_painel_admin_aprova_somente_apos_validacao(self) -> None:
         request = self.catalog.submit_request(self.user.id, "@SNIPERGOLD_SIGNALS")
         panel = AdminPanelService(

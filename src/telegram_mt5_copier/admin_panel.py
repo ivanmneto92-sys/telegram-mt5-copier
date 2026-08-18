@@ -34,12 +34,16 @@ class AdminPanelService:
         *,
         bot_token: str,
         admin_ids: tuple[int, ...],
+        peer_channel_sync_database_paths: tuple[Path, ...] = (),
     ) -> None:
         self.database_path = database_path
         self.bot_token = bot_token
         self.admin_ids = frozenset(admin_ids)
         initialize_database(database_path)
-        self.channels = ChannelCatalogService(database_path)
+        self.channels = ChannelCatalogService(
+            database_path,
+            peer_database_paths=peer_channel_sync_database_paths,
+        )
 
     def authenticate(self, init_data: str) -> AdminIdentity:
         parsed = validate_telegram_web_app_init_data(init_data, self.bot_token)

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 import re
 from urllib.parse import urlsplit
 
 from .database import connect_database, initialize_database, utc_now
+
+logger = logging.getLogger(__name__)
 
 CHANNEL_STATUS_PENDING = "pending_review"
 CHANNEL_STATUS_ACTIVE = "active"
@@ -41,8 +44,14 @@ class ChannelRequestResult:
 
 
 class ChannelCatalogService:
-    def __init__(self, database_path: Path) -> None:
+    def __init__(
+        self,
+        database_path: Path,
+        *,
+        peer_database_paths: tuple[Path, ...] = (),
+    ) -> None:
         self.database_path = database_path
+        self.peer_database_paths = peer_database_paths
         initialize_database(database_path)
 
     def submit_request(self, user_id: int, raw_link: str) -> ChannelRequestResult:
@@ -222,34 +231,54 @@ class ChannelCatalogService:
 
     def set_display_name(self, channel_id: int, display_name: str) -> str:
         normalized = normalize_channel_display_name(display_name)
+        now = utc_now()
         with connect_database(self.database_path) as connection:
             row = connection.execute(
-                "SELECT id FROM source_channels WHERE id = ?",
+                "SELECT telegram_chat_id FROM source_channels WHERE id = ?",
                 (channel_id,),
             ).fetchone()
             if row is None:
                 raise ValueError("Canal não encontrado.")
+            telegram_chat_id = row[0]
             connection.execute(
                 "UPDATE source_channels SET display_name = ?, updated_at = ? WHERE id = ?",
-                (normalized, utc_now(), channel_id),
+                (normalized, now, channel_id),
+            )
+        if telegram_chat_id is not None:
+            self._propagate_to_peers(
+                telegram_chat_id=str(telegram_chat_id),
+                display_name=normalized,
+                target_status=None,
+                admin_id=None,
+                now=now,
             )
         return public_channel_title(channel_id, normalized)
 
     def set_channel_status(self, channel_id: int, status: str) -> str:
         if status not in {CHANNEL_STATUS_ACTIVE, CHANNEL_STATUS_SUSPENDED}:
             raise ValueError("Status de canal inválido.")
+        now = utc_now()
         with connect_database(self.database_path) as connection:
             row = connection.execute(
-                "SELECT access_status FROM source_channels WHERE id = ?",
+                "SELECT access_status, telegram_chat_id, display_name FROM source_channels WHERE id = ?",
                 (channel_id,),
             ).fetchone()
             if row is None:
                 raise ValueError("Canal não encontrado.")
             if status == CHANNEL_STATUS_ACTIVE and str(row[0]) != "confirmed":
                 raise ValueError("O acesso da conta de monitoramento não está confirmado.")
+            telegram_chat_id, display_name = row[1], row[2]
             connection.execute(
                 "UPDATE source_channels SET status = ?, updated_at = ? WHERE id = ?",
-                (status, utc_now(), channel_id),
+                (status, now, channel_id),
+            )
+        if telegram_chat_id is not None:
+            self._propagate_to_peers(
+                telegram_chat_id=str(telegram_chat_id),
+                display_name=display_name,
+                target_status=status,
+                admin_id=None,
+                now=now,
             )
         return status
 
@@ -550,6 +579,10 @@ class ChannelCatalogService:
                 """,
                 (now, admin_id, now, channel_id),
             )
+            channel_identity = connection.execute(
+                "SELECT telegram_chat_id, display_name FROM source_channels WHERE id = ?",
+                (channel_id,),
+            ).fetchone()
             requesters = connection.execute(
                 """
                 SELECT DISTINCT user_id FROM channel_requests
@@ -579,6 +612,14 @@ class ChannelCatalogService:
             )
             for requester in requesters:
                 self._enable_subscription(connection, int(requester[0]), channel_id, now)
+        if channel_identity is not None and channel_identity[0] is not None:
+            self._propagate_to_peers(
+                telegram_chat_id=str(channel_identity[0]),
+                display_name=channel_identity[1],
+                target_status=CHANNEL_STATUS_ACTIVE,
+                admin_id=admin_id,
+                now=now,
+            )
         return channel_id
 
     def reject_request(self, request_id: int, notes: str = "") -> None:
@@ -648,6 +689,70 @@ class ChannelCatalogService:
             """,
             (user_id, now, now),
         )
+
+    def _propagate_to_peers(
+        self,
+        *,
+        telegram_chat_id: str,
+        display_name: object | None,
+        target_status: str | None,
+        admin_id: int | None,
+        now: str,
+    ) -> None:
+        """Replica apelido e status de aprovação para instâncias white-label irmãs.
+
+        Casa o canal pelo `telegram_chat_id` real do Telegram, que é o mesmo em
+        todas as marcas. Nunca cria um canal na instância peer: só atualiza um
+        canal que a conta técnica daquela instância já conhece. Uma ativação só
+        é propagada quando o peer já confirmou o próprio acesso ao canal; caso
+        contrário, apenas o apelido é sincronizado e o status fica para o admin
+        confirmar manualmente naquela instância. Falhas de propagação nunca
+        interrompem a ação local (a instância de origem já foi salva).
+        """
+        for peer_path in self.peer_database_paths:
+            try:
+                with connect_database(peer_path) as connection:
+                    row = connection.execute(
+                        "SELECT id, access_status FROM source_channels WHERE telegram_chat_id = ?",
+                        (telegram_chat_id,),
+                    ).fetchone()
+                    if row is None:
+                        continue
+                    peer_channel_id, peer_access_status = int(row[0]), str(row[1])
+                    if display_name is not None:
+                        connection.execute(
+                            "UPDATE source_channels SET display_name = ?, updated_at = ? WHERE id = ?",
+                            (display_name, now, peer_channel_id),
+                        )
+                    if target_status == CHANNEL_STATUS_ACTIVE:
+                        if peer_access_status == "confirmed":
+                            connection.execute(
+                                """
+                                UPDATE source_channels SET status = 'active', approved_at = ?,
+                                    approved_by_admin_id = COALESCE(?, approved_by_admin_id),
+                                    updated_at = ?
+                                WHERE id = ?
+                                """,
+                                (now, admin_id, now, peer_channel_id),
+                            )
+                        else:
+                            logger.warning(
+                                "Canal %s aprovado, mas instancia peer %s ainda nao confirmou "
+                                "acesso; aprovacao nao propagada, apenas o apelido.",
+                                telegram_chat_id,
+                                peer_path,
+                            )
+                    elif target_status == CHANNEL_STATUS_SUSPENDED:
+                        connection.execute(
+                            "UPDATE source_channels SET status = 'suspended', updated_at = ? WHERE id = ?",
+                            (now, peer_channel_id),
+                        )
+            except Exception:
+                logger.exception(
+                    "Falha ao propagar canal %s para a instancia peer %s",
+                    telegram_chat_id,
+                    peer_path,
+                )
 
     @staticmethod
     def _enable_subscription(connection: object, user_id: int, channel_id: int, now: str) -> None:

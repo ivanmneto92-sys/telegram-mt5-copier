@@ -100,6 +100,7 @@ class AppConfig:
     telegram_image_ocr_enabled: bool
     telegram_image_ocr_chat_ids: tuple[str, ...] = field(repr=False)
     tesseract_command: str | None = field(repr=False)
+    peer_channel_sync_database_paths: tuple[Path, ...] = field(repr=False)
 
     @classmethod
     def load(
@@ -227,6 +228,10 @@ class AppConfig:
             ),
             tesseract_command=_optional_value(
                 "TESSERACT_CMD", file_values, runtime_env
+            ),
+            peer_channel_sync_database_paths=parse_peer_database_paths(
+                _optional_value("PEER_CHANNEL_SYNC_DATABASES", file_values, runtime_env),
+                root,
             ),
         )
 
@@ -382,6 +387,18 @@ def parse_broker_servers(value: str | None) -> dict[str, tuple[str, ...]]:
             raise ValueError(f"Servidores MT5 duplicados para a corretora {broker}.")
         catalog[key] = servers
     return catalog
+
+
+def parse_peer_database_paths(value: str | None, project_root: Path) -> tuple[Path, ...]:
+    if not value:
+        return ()
+
+    paths: list[Path] = []
+    for raw_item in value.split(","):
+        item = raw_item.strip()
+        if item:
+            paths.append(project_path(item, project_root))
+    return tuple(paths)
 
 
 def configured_source_chat_ids(

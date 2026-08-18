@@ -34,6 +34,30 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.instance_id, "main")
             self.assertEqual(config.brand_name, "Instituto Trader")
             self.assertEqual(config.local_onboarding_url, "http://127.0.0.1:8080")
+            self.assertEqual(config.peer_channel_sync_database_paths, ())
+
+    def test_peer_channel_sync_databases_sao_resolvidos_a_partir_da_raiz(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp)
+
+            config = AppConfig.load(
+                project_root=project_root,
+                env={
+                    "PEER_CHANNEL_SYNC_DATABASES": (
+                        "../robo_braba/data/telegram_mt5_copier.sqlite3,"
+                        "/abs/peer.sqlite3"
+                    )
+                },
+                create_dirs=True,
+            )
+
+            self.assertEqual(
+                config.peer_channel_sync_database_paths,
+                (
+                    project_root / "../robo_braba/data/telegram_mt5_copier.sqlite3",
+                    Path("/abs/peer.sqlite3"),
+                ),
+            )
 
     def test_env_file_is_utf8_and_runtime_environment_wins(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

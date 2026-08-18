@@ -477,6 +477,31 @@ instâncias. `TELEGRAM_BOT_TOKEN` deve ser de outro bot e a segunda instância d
 executar `telegram-login`, criando sua própria sessão de monitoramento. Nunca
 aponte duas instâncias para o mesmo `MT5_BASE_DIR`, banco ou `SESSION_DIR`.
 
+A partir da versão `0.37.0`, cada instância pode sincronizar aprovações de
+canal com uma instância irmã. Por padrão, cada instância mantém seu próprio
+catálogo de canais: aprovar ou
+renomear uma sala no painel de uma marca não altera a outra, mesmo quando as
+duas monitoram o mesmo canal real do Telegram. Para sincronizar isso
+automaticamente, defina `PEER_CHANNEL_SYNC_DATABASES` no `.env` de cada
+instância com o caminho do arquivo `.sqlite3` da(s) instância(s) irmã(s):
+
+```env
+# Na instância main
+PEER_CHANNEL_SYNC_DATABASES=C:\Apps\telegram-mt5-copier-robo_braba\telegram-mt5-copier\data\telegram_mt5_copier_robo_braba.sqlite3
+
+# Na instância robo_braba
+PEER_CHANNEL_SYNC_DATABASES=C:\Apps\telegram-mt5-copier-main\telegram-mt5-copier\data\telegram_mt5_copier.sqlite3
+```
+
+Com isso, aprovar, suspender ou renomear um canal em uma instância replica a
+mudança na instância peer, casando pelo `telegram_chat_id` real do canal. A
+sincronização nunca cria um canal do zero na outra instância nem o ativa antes
+da hora: se a conta técnica da instância peer ainda não confirmou acesso
+àquele canal (o "admin entra manualmente no canal" continua sendo por
+instância), só o apelido é sincronizado e a aprovação fica pendente até essa
+confirmação acontecer também lá. Uma instância peer temporariamente
+indisponível nunca bloqueia a aprovação na instância de origem.
+
 O script `install_windows_startup.ps1` lê `INSTANCE_ID`: a instância `main`
 mantém a tarefa `Telegram MT5 Copier`; as demais recebem automaticamente nomes
 como `Telegram MT5 Copier - mesa_alpha`. Cada porta local precisa de uma rota

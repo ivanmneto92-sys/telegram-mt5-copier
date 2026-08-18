@@ -678,6 +678,7 @@ def main() -> int:
             config.database_path,
             bot_token=config.telegram_bot_token,
             admin_ids=config.bot_admin_ids,
+            peer_channel_sync_database_paths=config.peer_channel_sync_database_paths,
         )
         admin_browser_auth = AdminBrowserAuthService(
             config.database_path,
