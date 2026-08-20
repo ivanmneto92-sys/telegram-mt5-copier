@@ -164,6 +164,7 @@ class PositionManager:
                 if force_breakeven:
                     self._record_be_outcome(order_record, outcome)
                     group_protection.setdefault(order_record.group_id, []).append(outcome)
+            user_paused = bool(pending_orders) and self._is_user_paused(account.user_id)
             for pending_order in pending_orders:
                 if int(value(pending_order, "magic", 0) or 0) != MT5_MAGIC_NUMBER:
                     continue
@@ -175,6 +176,23 @@ class PositionManager:
                 if tick is None:
                     continue
                 ticket = int(value(pending_order, "ticket", value(pending_order, "order", 0)) or 0)
+                if user_paused:
+                    # Cliente pausado/desativado nao deve receber novas entradas: uma
+                    # ordem pendente ainda nao preenchida e exatamente isso, mesmo
+                    # tendo sido enviada antes da pausa. Posicoes ja preenchidas
+                    # continuam gerenciadas normalmente (fora deste loop).
+                    result = client.order_send(
+                        {
+                            "action": mt5_constant(client, "TRADE_ACTION_REMOVE", 8),
+                            "order": ticket,
+                            "magic": MT5_MAGIC_NUMBER,
+                            "comment": "tgcp user paused",
+                        }
+                    )
+                    if is_successful_mt5_result(client, result, check=False):
+                        self._mark_cancelled(order_record.order_id, order_record.group_id)
+                        changed += 1
+                    continue
                 if order_record.group_id in tp1_reached_groups:
                     result = client.order_send(
                         {
@@ -928,6 +946,18 @@ class PositionManager:
             take_profit=Decimal(str(row[5])),
             expiration_at=str(row[6]),
         )
+
+    def _is_user_paused(self, user_id: int) -> bool:
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                "SELECT status FROM users WHERE id = ?",
+                (user_id,),
+            )
+            try:
+                row = cursor.fetchone()
+            finally:
+                cursor.close()
+        return row is not None and str(row[0]) != "active"
 
     def _find_order_for_item(
         self,

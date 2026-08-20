@@ -379,6 +379,16 @@ horário de Brasília. Acionamentos a partir das 23:00 aguardam a abertura do di
 seguinte; sexta-feira e sábado aguardam domingo às 23:00. O cliente também pode
 usar `▶️ Retomar sinais agora` para remover a parada antes desse horário.
 
+A partir da versão `0.38.1`, pausar um cliente — pelo `🛑 Parar sinais hoje`,
+pela meta/limite diário ou pelo admin pausando a conta — também cancela no
+próprio MT5 qualquer ordem pendente daquele cliente que ainda não tinha sido
+preenchida. Antes, a pausa só impedia sinais novos de serem aceitos: uma ordem
+pendente já enviada ao corretor antes da pausa continuava viva lá e podia ser
+preenchida depois normalmente, como se o cliente não estivesse pausado.
+Posições já abertas continuam sendo geridas normalmente (BE, trailing,
+fechamento por meta/limite), só a entrada futura ainda não confirmada é
+cancelada.
+
 O parser também reconhece entradas escritas no cabeçalho como
 `GOLD BUY NOW IN ZONE 4027-4020`. Alvos sem preço, como `TP 3: OPEN`, são
 ignorados; os demais TPs numéricos continuam sendo executados normalmente.

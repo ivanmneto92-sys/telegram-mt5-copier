@@ -46,7 +46,7 @@ from telegram_mt5_copier.mt5.trade_comment import (
 )
 from telegram_mt5_copier.mt5.volume_allocator import VolumeAllocationError, allocate_volume
 from telegram_mt5_copier.parser import parse_signal_text
-from telegram_mt5_copier.users import USER_STATUS_ACTIVE, UserRepository
+from telegram_mt5_copier.users import USER_STATUS_ACTIVE, USER_STATUS_PAUSED, UserRepository
 from tests.access_helpers import grant_paid_access
 
 
@@ -1600,6 +1600,61 @@ class PendingOrderTests(unittest.TestCase):
                 (result.group_result.group.id,),
             ).fetchone()[0]
         self.assertEqual(status, "cancelled")
+
+    def test_worker_cancela_pendente_de_cliente_pausado(self) -> None:
+        # Regressao: pausar um cliente so bloqueava sinais NOVOS. Uma ordem
+        # pendente enviada antes da pausa continuava viva no broker e podia
+        # ser preenchida depois — o cliente "desativado" recebia a operacao
+        # mesmo assim.
+        signal = parse_signal_text(BUY_SIGNAL).signal
+        result = self.executor().execute_for_account(signal, self.account, self.profile())
+        self.users.set_status(self.user.id, USER_STATUS_PAUSED)
+        client = SimulatedMT5Client(
+            tick=TickInfo(bid=Decimal("4059"), ask=Decimal("4061")),
+            orders=(
+                {
+                    "magic": 27071301,
+                    "comment": f"tgcp {signal.signature[:8]} TP1",
+                    "ticket": 7101,
+                    "symbol": "XAUUSD",
+                },
+            ),
+        )
+        manager = PositionManager(self.database_path, self.accounts, lambda: client)
+
+        changed = manager.manage_account(self.account, self.profile())
+
+        self.assertEqual(changed, 1)
+        self.assertEqual(client.order_send_requests[-1]["action"], 8)
+        self.assertEqual(client.order_send_requests[-1]["order"], 7101)
+        self.assertEqual(client.order_send_requests[-1]["comment"], "tgcp user paused")
+        with connect_database(self.database_path) as connection:
+            status = connection.execute(
+                "SELECT status FROM execution_orders WHERE execution_group_id = ? AND tp_index = 1",
+                (result.group_result.group.id,),
+            ).fetchone()[0]
+        self.assertEqual(status, "cancelled")
+
+    def test_worker_nao_mexe_em_pendente_de_cliente_ativo(self) -> None:
+        signal = parse_signal_text(BUY_SIGNAL).signal
+        self.executor().execute_for_account(signal, self.account, self.profile())
+        client = SimulatedMT5Client(
+            tick=TickInfo(bid=Decimal("4059"), ask=Decimal("4061")),
+            orders=(
+                {
+                    "magic": 27071301,
+                    "comment": f"tgcp {signal.signature[:8]} TP1",
+                    "ticket": 7102,
+                    "symbol": "XAUUSD",
+                },
+            ),
+        )
+        manager = PositionManager(self.database_path, self.accounts, lambda: client)
+
+        changed = manager.manage_account(self.account, self.profile())
+
+        self.assertEqual(changed, 0)
+        self.assertEqual(client.order_send_requests, [])
 
     def test_worker_remove_pendente_gtc_ao_vencer_no_banco(self) -> None:
         signal = parse_signal_text(BUY_SIGNAL).signal
