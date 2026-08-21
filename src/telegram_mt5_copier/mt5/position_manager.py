@@ -277,11 +277,22 @@ class PositionManager:
         and the warning/notification unfired, relying entirely on the entry
         validator to catch the next signal reactively instead of pausing the
         moment the threshold is observed.
+
+        Once the pause is already in effect and there is nothing left to
+        close, there is nothing further to do until the next session: skip
+        the broker history query, DB write and log line that would otherwise
+        repeat every worker tick (about once a second) for the rest of the
+        day. Any open exposure still routes through the full check below, so
+        it is still closed immediately if it appears after the pause.
         """
         if profile.daily_profit_target <= 0 and profile.daily_loss_limit <= 0:
             return None
 
         now = datetime.now(tz=timezone.utc)
+        if not (positions or pending_orders) and self._daily_pause_already_active(
+            account.user_id, now
+        ):
+            return None
         session_start = current_daily_signal_session_start_at(now)
         realized_result = Decimal("0")
         for deal in client.history_deals_get(session_start, now):
@@ -946,6 +957,26 @@ class PositionManager:
             take_profit=Decimal(str(row[5])),
             expiration_at=str(row[6]),
         )
+
+    def _daily_pause_already_active(self, user_id: int, now: datetime) -> bool:
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                "SELECT daily_signal_pause_until FROM users WHERE id = ?",
+                (user_id,),
+            )
+            try:
+                row = cursor.fetchone()
+            finally:
+                cursor.close()
+        if row is None or row[0] is None:
+            return False
+        try:
+            pause_until = datetime.fromisoformat(str(row[0]))
+        except ValueError:
+            return False
+        if pause_until.tzinfo is None:
+            pause_until = pause_until.replace(tzinfo=timezone.utc)
+        return pause_until > now
 
     def _is_user_paused(self, user_id: int) -> bool:
         with connect_database(self.database_path) as connection:

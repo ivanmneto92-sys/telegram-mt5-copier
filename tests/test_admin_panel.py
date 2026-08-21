@@ -13,6 +13,7 @@ from telegram_mt5_copier.admin_panel import (
     render_admin_script,
 )
 from telegram_mt5_copier.database import connect_database
+from telegram_mt5_copier.mt5.account_service import MT5AccountService
 from telegram_mt5_copier.users import USER_STATUS_ACTIVE, USER_STATUS_PAUSED, UserRepository
 from telegram_mt5_copier.web_app import WebAppValidationError, build_signed_init_data
 from tests.access_helpers import grant_paid_access
@@ -120,6 +121,68 @@ class AdminPanelTests(unittest.TestCase):
             tuple(action),
             ("admin_panel_set_user_status", 9001, self.bob.id),
         )
+
+    def _insert_account_with_profile(self, user_id: int, login: str) -> int:
+        now = "2026-01-01T00:00:00+00:00"
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO mt5_accounts (
+                    user_id, broker_name, server_name, login, encrypted_password,
+                    account_alias, account_type, account_mode, connection_status,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (user_id, "Broker", "Broker-Live", login, "encrypted", "Principal",
+                 "real", "hedging", "disconnected", now, now),
+            )
+            account_id = int(cursor.lastrowid)
+            cursor.close()
+            connection.execute(
+                """
+                INSERT INTO execution_profiles (
+                    user_id, mt5_account_id, enabled, risk_mode, fixed_lot, risk_percent,
+                    max_spread_points, max_slippage_points, daily_profit_target,
+                    daily_loss_limit, max_open_signals, split_tps, breakeven_enabled,
+                    trailing_enabled, entry_execution_mode, entry_price_mode,
+                    pending_expiration_minutes, take_profit_limit,
+                    tp1_breakeven_enabled, updated_at
+                )
+                VALUES (?, ?, 1, 'fixed_lot', '0.01', '1', 300, 30, '0', '0', 1, 1, 0, 0,
+                        'pending_order', 'first_touch', 120, 0, 1, ?)
+                """,
+                (user_id, account_id, now),
+            ).close()
+        return account_id
+
+    def test_pausar_cliente_libera_vaga_e_reativar_devolve(self) -> None:
+        grant_paid_access(self.database_path, self.bob.id)
+        self.users.set_status(self.bob.id, USER_STATUS_ACTIVE)
+        self._insert_account_with_profile(self.bob.id, "445566")
+        accounts = MT5AccountService(self.database_path)
+
+        self.assertEqual(accounts.count_accounts(), 1)
+
+        self.service.set_user_status(
+            admin_telegram_user_id=9001,
+            target_user_id=self.bob.id,
+            status=USER_STATUS_PAUSED,
+        )
+        self.assertEqual(accounts.count_accounts(), 0)
+        with connect_database(self.database_path) as connection:
+            enabled = connection.execute(
+                "SELECT enabled FROM execution_profiles WHERE user_id = ?",
+                (self.bob.id,),
+            ).fetchone()[0]
+        self.assertEqual(enabled, 0)
+
+        self.service.set_user_status(
+            admin_telegram_user_id=9001,
+            target_user_id=self.bob.id,
+            status=USER_STATUS_ACTIVE,
+        )
+        self.assertEqual(accounts.count_accounts(), 1)
 
     def test_status_invalido_e_rejeitado(self) -> None:
         with self.assertRaises(ValueError):

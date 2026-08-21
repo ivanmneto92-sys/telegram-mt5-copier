@@ -12,7 +12,7 @@ from .access_control import (
     AccessDecision,
     paid_access_decision,
 )
-from .database import connect_database, initialize_database
+from .database import connect_database, initialize_database, utc_now
 from .channel_catalog import ChannelCatalogService
 from .mt5.models import mask_login
 from .users import USER_STATUS_ACTIVE, USER_STATUS_PAUSED, UserRepository
@@ -318,6 +318,7 @@ class AdminPanelService:
         try:
             target = users.get_by_id(target_user_id)
             updated = users.set_status(target.id, status)
+            self._set_execution_profiles_enabled(target.id, status == USER_STATUS_ACTIVE)
             users.log_admin_action(
                 admin_telegram_user_id=admin_telegram_user_id,
                 target_user_id=target.id,
@@ -334,6 +335,24 @@ class AdminPanelService:
             "id": updated.id,
             "status": updated.status,
         }
+
+    def _set_execution_profiles_enabled(self, user_id: int, enabled: bool) -> None:
+        """Libera ou reocupa a vaga do limite MT5_MAX_ACCOUNTS_PER_VPS.
+
+        Quando o admin pausa um cliente por aqui, as contas MT5 dele deixam de
+        contar para o limite da VPS (`count_accounts`), abrindo vaga para
+        outro cliente — sem apagar a conta, o histórico nem exigir reconexão.
+        Reativar o cliente volta a contar e a operar normalmente. Isto nunca
+        roda para a autopausa do cliente (🛑 Parar sinais hoje) nem para a
+        pausa automática de meta/limite diário, que usam `daily_signal_pause_until`
+        e não devem afetar as contas MT5.
+        """
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                "UPDATE execution_profiles SET enabled = ?, updated_at = ? WHERE user_id = ?",
+                (int(enabled), utc_now(), user_id),
+            )
+            cursor.close()
 
     def approve_paid_access(
         self,

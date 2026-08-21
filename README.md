@@ -107,6 +107,23 @@ temporário do bot é verificado novamente em cada chamada da API. Nesta versão
 os pagamentos são registrados manualmente pelo admin; integração automática
 com PIX/cartão depende da escolha futura do provedor de pagamento.
 
+A partir da versão `0.38.1`, pausar um cliente pelo painel também cancela
+imediatamente as ordens pendentes ainda não preenchidas daquele cliente em
+todas as contas MT5 dele — uma ordem pendente enviada antes da pausa continua
+sendo uma entrada nova esperando pra acontecer, então ela é removida junto,
+mesmo que o preço só alcance aquele nível depois. Posições já preenchidas
+continuam sendo geridas e protegidas normalmente; só entradas ainda não
+executadas são afetadas.
+
+A partir da versão `0.38.2`, pausar um cliente pelo painel também libera a
+vaga dele no limite `MT5_MAX_ACCOUNTS_PER_VPS`: a conta MT5 do cliente pausado
+deixa de contar para o limite, sem apagar nada — cadastro, credenciais e
+pasta do terminal continuam guardados, prontos pra voltar a funcionar assim
+que o cliente for reativado. Isso vale só para a pausa manual do admin (o
+botão "Pausar"), nunca para a autopausa do cliente (`🛑 Parar sinais hoje`)
+nem para a pausa automática de meta/limite diário, que continuam bloqueando
+só sinais novos sem tocar na conta MT5.
+
 ## Catálogo de canais sugeridos pelos clientes
 
 O monitoramento usa uma única conta técnica do Telegram. O cliente não conecta
@@ -364,6 +381,13 @@ na varredura do Worker; se o Take Profit fechasse a única operação da conta
 naquele instante, a meta diária ficava sem detectar o próprio acionamento até
 o próximo sinal tentar entrar — sem aviso no Telegram e sem `daily_signal_pause_until`
 registrado nesse intervalo.
+
+Esse fix, por sua vez, fazia a checagem rodar a cada varredura do Worker (cerca
+de uma vez por segundo) pelo resto do dia inteiro, mesmo já com a pausa
+confirmada e nada mais para fechar. A partir da versão `0.38.2`, sem exposição
+aberta e com a pausa diária já em vigor, o Worker para de reconsultar o
+histórico do MT5 e de reescrever a mesma pausa — só volta a checar de verdade
+quando aparecer posição ou ordem pendente nova para aquela conta.
 
 Em `⚙️ Configurações > 🎯 Execução do sinal > Quantidade de TPs`, o usuário escolhe os primeiros 1, 2, 3 ou 4 alvos do sinal, ou todos os alvos disponíveis. O lote total configurado é dividido somente entre os TPs selecionados. A seleção não inventa alvos quando o sinal possui menos TPs.
 

@@ -637,8 +637,22 @@ class MT5AccountService:
         self.record_audit(user_id, "mt5_account_removed", {"account_id": account_id})
 
     def count_accounts(self) -> int:
+        """Conta contas MT5 para o limite MT5_MAX_ACCOUNTS_PER_VPS.
+
+        Contas com o perfil de execução desabilitado (`enabled = 0`) não
+        contam — é assim que pausar um cliente pelo painel admin libera vaga
+        para outro, sem apagar nada. Uma conta sem perfil ainda (registro em
+        andamento) conta normalmente, como sempre contou.
+        """
         with connect_database(self.database_path) as connection:
-            cursor = connection.execute("SELECT COUNT(*) FROM mt5_accounts")
+            cursor = connection.execute(
+                """
+                SELECT COUNT(*) FROM mt5_accounts a
+                LEFT JOIN execution_profiles p
+                    ON p.user_id = a.user_id AND p.mt5_account_id = a.id
+                WHERE COALESCE(p.enabled, 1) = 1
+                """
+            )
             try:
                 return int(cursor.fetchone()[0])
             finally:

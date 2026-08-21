@@ -1941,6 +1941,32 @@ class PendingOrderTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertIsNotNone(pause_until)
 
+    def test_worker_para_de_reconsultar_historico_apos_pausa_ja_ativa(self) -> None:
+        # Regressao: sem exposicao aberta e com a pausa diaria ja ativa, o
+        # worker nao deve mais consultar o historico do MT5 nem reescrever a
+        # mesma pausa a cada tick (uma vez por segundo, pelo resto do dia) —
+        # so ha algo a fazer de novo se aparecer posicao/pendente nova.
+        profile = self.accounts.update_execution_profile_field(
+            self.user.id,
+            self.account.id,
+            "daily_profit_target",
+            "30",
+        )
+        client = SimulatedMT5Client(
+            positions=(),
+            orders=(),
+            history_deals=({"magic": MT5_MAGIC_NUMBER, "profit": 31},),
+        )
+        manager = PositionManager(self.database_path, self.accounts, lambda: client)
+
+        manager.manage_account(self.account, profile)
+        self.assertEqual(len(client.history_deal_queries), 1)
+
+        manager.manage_account(self.account, profile)
+        manager.manage_account(self.account, profile)
+
+        self.assertEqual(len(client.history_deal_queries), 1)
+
     def test_worker_nao_fecha_antes_da_meta_diaria(self) -> None:
         profile = self.accounts.update_execution_profile_field(
             self.user.id,
