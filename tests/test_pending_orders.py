@@ -659,7 +659,7 @@ class PendingOrderTests(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].account.user_id, self.user.id)
 
-    def test_acesso_expirado_bloqueia_novos_sinais_sem_desligar_worker(self) -> None:
+    def test_acesso_expirado_sem_operacoes_desliga_worker(self) -> None:
         with connect_database(self.database_path) as connection:
             connection.execute(
                 "UPDATE customer_billing SET due_date = '2020-01-01' WHERE user_id = ?",
@@ -670,7 +670,7 @@ class PendingOrderTests(unittest.TestCase):
 
         self.assertEqual(results, [])
         self.assertEqual(len(self.accounts.accounts_for_approved_users()), 0)
-        self.assertEqual(len(self.accounts.accounts_for_active_users()), 1)
+        self.assertEqual(len(self.accounts.accounts_for_active_users()), 0)
 
     def test_parada_diaria_bloqueia_novos_sinais_sem_desligar_worker(self) -> None:
         future = (datetime.now(tz=timezone.utc) + timedelta(hours=2)).isoformat()
@@ -700,12 +700,35 @@ class PendingOrderTests(unittest.TestCase):
                 "WHERE execution_group_id=? AND tp_index=1",
                 (result.group_result.group.id,),
             ).close()
+            connection.execute(
+                "UPDATE execution_groups SET status='pending_active' WHERE id=?",
+                (result.group_result.group.id,),
+            ).close()
         self.users.set_status(self.user.id, "paused")
 
         active = self.accounts.accounts_for_active_users()
 
         self.assertEqual(len(active), 1)
         self.assertEqual(active[0][0].id, self.account.id)
+
+    def test_registro_filled_de_grupo_encerrado_nao_mantem_worker(self) -> None:
+        result = self.executor().execute_for_account(
+            parse_signal_text(BUY_SIGNAL).signal,
+            self.account,
+            self.profile(),
+        )
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                "UPDATE execution_orders SET status='filled' WHERE execution_group_id=?",
+                (result.group_result.group.id,),
+            ).close()
+            connection.execute(
+                "UPDATE execution_groups SET status='expired' WHERE id=?",
+                (result.group_result.group.id,),
+            ).close()
+        self.users.set_status(self.user.id, "paused")
+
+        self.assertEqual(self.accounts.accounts_for_active_users(), [])
 
     def test_kill_switch_bloqueia_execucao_demo(self) -> None:
         client = SimulatedMT5Client()

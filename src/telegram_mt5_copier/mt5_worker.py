@@ -13,6 +13,7 @@ from .mt5.client import MT5Client
 from .mt5.position_manager import PositionManager
 from .mt5.settlement_monitor import SettlementMonitor
 from .mt5.pending_order_monitor import PendingOrderMonitor
+from .mt5.terminal_manager import TerminalManager
 from .telegram_notifier import TelegramUserNotifier
 
 POSITION_PROTECTION_POLL_SECONDS = 1
@@ -32,6 +33,12 @@ def main() -> int:
         accounts = MT5AccountService(
             config.database_path,
             credential_service=CredentialService(config.mt5_credential_key),
+            terminal_manager=TerminalManager(
+                config.mt5_base_dir,
+                config.mt5_template_path,
+                config.mt5_broker_template_paths,
+                config.mt5_broker_servers,
+            ),
             client_factory=MT5Client,
             allow_live_accounts=config.allow_live_accounts,
             max_accounts_per_vps=config.mt5_max_accounts_per_vps,
@@ -58,15 +65,49 @@ def main() -> int:
         workers: dict[int, MT5AccountWorker] = {}
         last_account_checks: dict[int, float] = {}
         account_connection_states: dict[int, bool] = {}
+        startup_cleanup_pending = True
         try:
             while True:
                 active_accounts = {
                     account.id: (account, profile)
                     for account, profile in accounts.accounts_for_active_users()
                 }
+                if startup_cleanup_pending:
+                    for account in accounts.all_accounts():
+                        if account.id in active_accounts:
+                            continue
+                        try:
+                            stopped = accounts.stop_terminal(account)
+                            if stopped:
+                                logging.info(
+                                    "Terminal MT5 inelegivel encerrado na inicializacao. "
+                                    "account=%s processos=%s",
+                                    account.id,
+                                    stopped,
+                                )
+                        except Exception:
+                            logging.exception(
+                                "Falha ao limpar terminal MT5 inelegivel na inicializacao. "
+                                "account=%s",
+                                account.id,
+                            )
+                    startup_cleanup_pending = False
                 for account_id in tuple(workers):
                     if account_id not in active_accounts:
-                        workers.pop(account_id).close()
+                        worker = workers.pop(account_id)
+                        try:
+                            stopped = worker.deactivate()
+                            if stopped:
+                                logging.info(
+                                    "Terminal MT5 inativo encerrado. account=%s processos=%s",
+                                    account_id,
+                                    stopped,
+                                )
+                        except Exception:
+                            logging.exception(
+                                "Falha ao encerrar terminal MT5 inativo. account=%s",
+                                account_id,
+                            )
                         last_account_checks.pop(account_id, None)
                         account_connection_states.pop(account_id, None)
 

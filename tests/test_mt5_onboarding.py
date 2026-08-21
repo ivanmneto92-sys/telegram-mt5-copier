@@ -55,6 +55,7 @@ class MT5OnboardingTests(unittest.TestCase):
             credential_service=self.credential_service,
             terminal_manager=self.terminal_manager,
             client_factory=lambda: self.client,
+            terminal_stopper=lambda _path: 0,
         )
 
     def tearDown(self) -> None:
@@ -191,12 +192,63 @@ class MT5OnboardingTests(unittest.TestCase):
 
         self.assertEqual(self.accounts.list_accounts(user.id), [])
 
+    def test_remocao_de_conta_encerra_terminal_exato(self) -> None:
+        stopped: list[Path] = []
+        accounts = MT5AccountService(
+            self.database_path,
+            credential_service=self.credential_service,
+            terminal_manager=self.terminal_manager,
+            client_factory=lambda: SimulatedMT5Client(),
+            terminal_stopper=lambda path: stopped.append(path) or 1,
+        )
+        user = self.create_user()
+        account = accounts.register_account(
+            user.id,
+            MT5AccountForm("Broker", "Broker-Demo", "887766", "secret", "Remover"),
+        )
+
+        try:
+            accounts.remove_account(user.id, account.id)
+        finally:
+            accounts.close()
+
+        self.assertEqual(stopped, [account.terminal_path])
+
+    def test_worker_desativado_encerra_terminal_sem_afetar_shutdown_normal(self) -> None:
+        stopped: list[Path] = []
+        accounts = MT5AccountService(
+            self.database_path,
+            credential_service=self.credential_service,
+            terminal_manager=self.terminal_manager,
+            client_factory=lambda: SimulatedMT5Client(),
+            terminal_stopper=lambda path: stopped.append(path) or 1,
+        )
+        user = self.create_user()
+        account = accounts.register_account(
+            user.id,
+            MT5AccountForm("Broker", "Broker-Demo", "778899", "secret", "Pausar"),
+        )
+        worker = MT5AccountWorker(accounts=accounts, account=account)
+
+        try:
+            worker.start()
+            worker.close()
+            self.assertEqual(stopped, [])
+            worker.start()
+            self.assertEqual(worker.deactivate(), 1)
+        finally:
+            worker.close()
+            accounts.close()
+
+        self.assertEqual(stopped, [account.terminal_path])
+
     def test_bloqueio_de_conta_real(self) -> None:
         real_accounts = MT5AccountService(
             self.database_path,
             credential_service=self.credential_service,
             terminal_manager=self.terminal_manager,
             client_factory=lambda: SimulatedMT5Client(account_type="real"),
+            terminal_stopper=lambda _path: 0,
         )
         user = self.create_user()
 
@@ -437,6 +489,7 @@ class MT5OnboardingTests(unittest.TestCase):
             credential_service=self.credential_service,
             terminal_manager=self.terminal_manager,
             client_factory=lambda: failing_client,
+            terminal_stopper=lambda _path: 0,
         )
 
         try:

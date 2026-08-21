@@ -32,6 +32,14 @@ from .models import (
 )
 from .ipc_lock import MT5OperationLock
 from .terminal_manager import TerminalManager
+from .terminal_process import stop_terminal_processes
+
+
+ACTIVE_EXECUTION_GROUP_STATUSES = (
+    "planned",
+    "pending_submission",
+    "pending_active",
+)
 
 
 @dataclass(repr=False)
@@ -72,6 +80,7 @@ class MT5AccountService:
         allow_live_accounts: bool = False,
         max_accounts_per_vps: int = 10,
         daily_performance_timezone: str = DEFAULT_BROKER_TIMEZONE,
+        terminal_stopper: Callable[[Path], int] = stop_terminal_processes,
     ) -> None:
         self.database_path = database_path
         self.credential_service = credential_service
@@ -80,6 +89,7 @@ class MT5AccountService:
         self.allow_live_accounts = allow_live_accounts
         self.max_accounts_per_vps = max_accounts_per_vps
         self.daily_performance_timezone = daily_performance_timezone
+        self.terminal_stopper = terminal_stopper
         self._closed = False
         initialize_database(database_path)
 
@@ -505,6 +515,21 @@ class MT5AccountService:
                 cursor.close()
         return [account_from_row(row) for row in rows]
 
+    def all_accounts(self) -> list[MT5Account]:
+        """Return every account owned by this isolated application instance."""
+        with connect_database(self.database_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT id, user_id, broker_name, server_name, login, encrypted_password,
+                       account_alias, terminal_path, account_type, connection_status,
+                       last_error, last_connected_at, account_mode, balance, equity,
+                       worker_heartbeat_at
+                FROM mt5_accounts
+                ORDER BY id ASC
+                """
+            ).fetchall()
+        return [account_from_row(row) for row in rows]
+
     def get_account(self, user_id: int, account_id: int) -> MT5Account:
         with connect_database(self.database_path) as connection:
             cursor = connection.execute(
@@ -605,6 +630,27 @@ class MT5AccountService:
         )
 
     def remove_account(self, user_id: int, account_id: int) -> None:
+        account = self.get_account(user_id, account_id)
+        if self.has_active_execution_groups(account_id):
+            raise ValueError(
+                "A conta possui operacoes abertas ou pendentes. "
+                "Encerre-as antes de remover a conta MT5."
+            )
+
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                "UPDATE execution_profiles SET enabled = 0 WHERE user_id = ? AND mt5_account_id = ?",
+                (user_id, account_id),
+            ).close()
+
+        if account.terminal_path is not None:
+            operation_lock = MT5OperationLock(account.terminal_path.parent)
+            try:
+                operation_lock.acquire()
+                self.stop_terminal(account)
+            finally:
+                operation_lock.close()
+
         with connect_database(self.database_path) as connection:
             connection.execute(
                 "DELETE FROM account_daily_performance WHERE mt5_account_id = ?",
@@ -635,6 +681,26 @@ class MT5AccountService:
                 cursor = connection.execute(sql, (user_id, account_id))
                 cursor.close()
         self.record_audit(user_id, "mt5_account_removed", {"account_id": account_id})
+
+    def stop_terminal(self, account: MT5Account) -> int:
+        if account.terminal_path is None:
+            return 0
+        return self.terminal_stopper(account.terminal_path)
+
+    def has_active_execution_groups(self, account_id: int) -> bool:
+        placeholders = ",".join("?" for _ in ACTIVE_EXECUTION_GROUP_STATUSES)
+        with connect_database(self.database_path) as connection:
+            row = connection.execute(
+                f"""
+                SELECT EXISTS (
+                    SELECT 1 FROM execution_groups
+                    WHERE mt5_account_id = ?
+                      AND status IN ({placeholders})
+                )
+                """,
+                (account_id, *ACTIVE_EXECUTION_GROUP_STATUSES),
+            ).fetchone()
+        return bool(row and row[0])
 
     def count_accounts(self) -> int:
         with connect_database(self.database_path) as connection:
@@ -960,16 +1026,26 @@ class MT5AccountService:
                 FROM mt5_accounts a
                 JOIN users u ON u.id = a.user_id
                 JOIN execution_profiles p ON p.user_id = a.user_id AND p.mt5_account_id = a.id
+                LEFT JOIN customer_billing b ON b.user_id = a.user_id
                 WHERE (
-                    (u.status = 'active' AND p.enabled = 1)
+                    (
+                        u.status = 'active' AND p.enabled = 1
+                        AND b.billing_status = 'paid'
+                        AND b.due_date IS NOT NULL
+                        AND date(b.due_date) >= date('now')
+                        AND EXISTS (
+                            SELECT 1 FROM customer_payments cp
+                            WHERE cp.user_id = a.user_id
+                              AND cp.status = 'paid'
+                              AND CAST(cp.amount AS REAL) > 0
+                        )
+                    )
                     OR EXISTS (
                         SELECT 1
                         FROM execution_groups g
-                        JOIN execution_orders o ON o.execution_group_id = g.id
                         WHERE g.mt5_account_id = a.id
-                          AND o.status IN (
-                              'pending_submission', 'pending_active',
-                              'submitted', 'filled'
+                          AND g.status IN (
+                              'planned', 'pending_submission', 'pending_active'
                           )
                     )
                 )
