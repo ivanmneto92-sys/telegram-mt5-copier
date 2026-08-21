@@ -180,7 +180,7 @@ class MT5AccountWorker:
     def deactivate(self) -> int:
         """Release the worker and stop the terminal for an ineligible account."""
         self.stop()
-        return self.accounts.stop_terminal(self.account)
+        return self.accounts.deactivate_terminal(self.account)
 
     def close(self) -> None:
         self.stop()

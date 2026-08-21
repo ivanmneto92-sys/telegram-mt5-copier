@@ -77,7 +77,7 @@ def main() -> int:
                         if account.id in active_accounts:
                             continue
                         try:
-                            stopped = accounts.stop_terminal(account)
+                            stopped = accounts.deactivate_terminal(account)
                             if stopped:
                                 logging.info(
                                     "Terminal MT5 inelegivel encerrado na inicializacao. "

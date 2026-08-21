@@ -236,11 +236,13 @@ class MT5OnboardingTests(unittest.TestCase):
             self.assertEqual(stopped, [])
             worker.start()
             self.assertEqual(worker.deactivate(), 1)
+            updated = accounts.get_account(user.id, account.id)
         finally:
             worker.close()
             accounts.close()
 
         self.assertEqual(stopped, [account.terminal_path])
+        self.assertEqual(updated.connection_status, "disconnected")
 
     def test_bloqueio_de_conta_real(self) -> None:
         real_accounts = MT5AccountService(

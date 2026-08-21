@@ -687,6 +687,21 @@ class MT5AccountService:
             return 0
         return self.terminal_stopper(account.terminal_path)
 
+    def deactivate_terminal(self, account: MT5Account) -> int:
+        """Stop an ineligible terminal and reflect that state in the database."""
+        stopped = self.stop_terminal(account)
+        if account.connection_status == CONNECTION_STATUS_CONNECTED:
+            self.update_connection_status(
+                account.user_id,
+                account.id,
+                status=CONNECTION_STATUS_DISCONNECTED,
+                account_type=account.account_type,
+                account_mode=account.account_mode,
+                last_error=None,
+                connected=False,
+            )
+        return stopped
+
     def has_active_execution_groups(self, account_id: int) -> bool:
         placeholders = ",".join("?" for _ in ACTIVE_EXECUTION_GROUP_STATUSES)
         with connect_database(self.database_path) as connection:
