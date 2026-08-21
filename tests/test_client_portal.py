@@ -44,6 +44,8 @@ class ClientPortalTests(unittest.TestCase):
         portal = ClientPortalService(self.database_path, brand_name="Marca")
         payload = portal.channels(self.user_id)
         self.assertEqual("Nome Original", payload["channels"][0]["name"])
+        self.assertEqual("custom", payload["selection_mode"])
+        self.assertFalse(payload["channels"][0]["enabled"])
 
     def test_web_registration_creates_pending_customer_and_secure_login(self) -> None:
         auth = ClientBrowserAuthService(self.database_path)

@@ -1051,7 +1051,7 @@ class BotService:
         if channels:
             channel_lines = []
             for channel in channels:
-                enabled = mode == "all" or bool(channel["enabled"])
+                enabled = bool(channel["enabled"])
                 marker = "✅" if enabled else "⚪"
                 channel_lines.append(f"{marker} {channel['title']}")
                 if mode == "custom":
@@ -1074,7 +1074,11 @@ class BotService:
             channel_lines.append(
                 f"… e mais {len(all_channels) - len(channels)} canal(is) ativos."
             )
-        mode_label = "todos os canais aprovados" if mode == "all" else "seleção personalizada"
+        mode_label = (
+            "todos os canais disponíveis selecionados"
+            if mode == "all"
+            else "seleção personalizada"
+        )
         keyboard = tuple(toggle_rows) + CHANNEL_MENU
         return BotResponse(
             "\n".join(

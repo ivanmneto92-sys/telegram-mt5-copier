@@ -67,18 +67,17 @@ class ClientPortalService:
                 "SELECT selection_mode FROM user_channel_settings WHERE user_id = ?",
                 (user_id,),
             ).fetchone()
-            mode = str(setting[0]) if setting else "all"
+            mode = str(setting[0]) if setting else "custom"
             rows = db.execute(
                 """
-                SELECT c.id, c.title, c.status,
-                       CASE WHEN ? = 'all' THEN 1 ELSE COALESCE(s.enabled, 0) END AS enabled
+                SELECT c.id, c.title, c.status, COALESCE(s.enabled, 0) AS enabled
                 FROM source_channels c
                 LEFT JOIN user_channel_subscriptions s
                   ON s.source_channel_id = c.id AND s.user_id = ?
                 WHERE c.status = 'active'
                 ORDER BY c.id
                 """,
-                (mode, user_id),
+                (user_id,),
             ).fetchall()
         return {
             "selection_mode": mode,

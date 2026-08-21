@@ -747,6 +747,11 @@ def initialize_database(database_path: Path) -> None:
                 FOREIGN KEY (source_channel_id) REFERENCES source_channels(id)
             );
 
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                migration_key TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS service_heartbeats (
                 service_name TEXT PRIMARY KEY,
                 heartbeat_at TEXT NOT NULL,
@@ -1010,6 +1015,51 @@ def run_schema_migrations(connection: sqlite3.Connection) -> None:
         "execution_orders",
         "be_attempts",
         "INTEGER NOT NULL DEFAULT 0",
+    )
+    migrate_channel_subscriptions_to_explicit_opt_in(connection)
+
+
+def migrate_channel_subscriptions_to_explicit_opt_in(
+    connection: sqlite3.Connection,
+) -> None:
+    """Preserva as salas atuais, mas impede adesao automatica a salas futuras."""
+    migration_key = "explicit_channel_opt_in_v1"
+    applied = connection.execute(
+        "SELECT 1 FROM schema_migrations WHERE migration_key = ?",
+        (migration_key,),
+    ).fetchone()
+    if applied is not None:
+        return
+
+    now = utc_now()
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO user_channel_subscriptions (
+            user_id, source_channel_id, enabled, created_at, updated_at
+        )
+        SELECT u.id, c.id, 1, ?, ?
+        FROM users u
+        CROSS JOIN source_channels c
+        LEFT JOIN user_channel_settings settings ON settings.user_id = u.id
+        WHERE c.status = 'active'
+          AND COALESCE(settings.selection_mode, 'all') = 'all'
+        """,
+        (now, now),
+    )
+    connection.execute(
+        """
+        INSERT INTO user_channel_settings (user_id, selection_mode, updated_at)
+        SELECT id, 'custom', ? FROM users
+        WHERE 1 = 1
+        ON CONFLICT(user_id) DO UPDATE SET
+            selection_mode = 'custom',
+            updated_at = excluded.updated_at
+        """,
+        (now,),
+    )
+    connection.execute(
+        "INSERT INTO schema_migrations (migration_key, applied_at) VALUES (?, ?)",
+        (migration_key, now),
     )
 
 

@@ -1019,23 +1019,15 @@ class MT5AccountService:
 
 def channel_selection_filter_sql() -> str:
     return """
-      AND (
-          COALESCE(
-              (SELECT settings.selection_mode
-               FROM user_channel_settings settings
-               WHERE settings.user_id = a.user_id),
-              'all'
-          ) = 'all'
-          OR EXISTS (
-              SELECT 1
-              FROM user_channel_subscriptions subscription
-              JOIN source_channels channel
-                ON channel.id = subscription.source_channel_id
-              WHERE subscription.user_id = a.user_id
-                AND subscription.enabled = 1
-                AND channel.status = 'active'
-                AND channel.telegram_chat_id = ?
-          )
+      AND EXISTS (
+          SELECT 1
+          FROM user_channel_subscriptions subscription
+          JOIN source_channels channel
+            ON channel.id = subscription.source_channel_id
+          WHERE subscription.user_id = a.user_id
+            AND subscription.enabled = 1
+            AND channel.status = 'active'
+            AND channel.telegram_chat_id = ?
       )
     """
 

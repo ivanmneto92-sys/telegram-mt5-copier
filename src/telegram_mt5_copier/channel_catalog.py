@@ -131,7 +131,7 @@ class ChannelCatalogService:
             ).fetchone()
             channels = connection.execute(
                 """
-                SELECT c.id, c.display_name, COALESCE(s.enabled, 1)
+                SELECT c.id, c.display_name, COALESCE(s.enabled, 0)
                 FROM source_channels c
                 LEFT JOIN user_channel_subscriptions s
                     ON s.source_channel_id = c.id AND s.user_id = ?
@@ -150,7 +150,7 @@ class ChannelCatalogService:
                 (user_id,),
             ).fetchall()
         return {
-            "selection_mode": str(setting[0]) if setting else "all",
+            "selection_mode": str(setting[0]) if setting else "custom",
             "channels": [
                 {
                     "id": int(row[0]),
@@ -186,13 +186,16 @@ class ChannelCatalogService:
                 """,
                 (user_id, mode, now),
             )
-            if mode == "custom":
+            if mode == "all":
                 connection.execute(
                     """
-                    INSERT OR IGNORE INTO user_channel_subscriptions (
+                    INSERT INTO user_channel_subscriptions (
                         user_id, source_channel_id, enabled, created_at, updated_at
                     )
                     SELECT ?, id, 1, ?, ? FROM source_channels WHERE status = 'active'
+                    ON CONFLICT(user_id, source_channel_id) DO UPDATE SET
+                        enabled = 1,
+                        updated_at = excluded.updated_at
                     """,
                     (user_id, now, now),
                 )
@@ -305,6 +308,7 @@ class ChannelCatalogService:
                 (str(telegram_chat_id), username, username),
             ).fetchone()
             if row is None:
+                self._freeze_follow_all_modes(connection, now)
                 cursor = connection.execute(
                     """
                     INSERT INTO source_channels (
@@ -422,6 +426,7 @@ class ChannelCatalogService:
                 (str(telegram_chat_id), username, username),
             ).fetchone()
             if row is None:
+                self._freeze_follow_all_modes(connection, now)
                 cursor = connection.execute(
                     """
                     INSERT INTO source_channels (
@@ -680,14 +685,17 @@ class ChannelCatalogService:
             """,
             (user_id, mode, now),
         )
+
+    @staticmethod
+    def _freeze_follow_all_modes(connection: object, now: str) -> None:
+        """Um canal novo nunca herda automaticamente assinantes antigos."""
         connection.execute(
             """
-            INSERT OR IGNORE INTO user_channel_subscriptions (
-                user_id, source_channel_id, enabled, created_at, updated_at
-            )
-            SELECT ?, id, 1, ?, ? FROM source_channels WHERE status = 'active'
+            UPDATE user_channel_settings
+            SET selection_mode = 'custom', updated_at = ?
+            WHERE selection_mode = 'all'
             """,
-            (user_id, now, now),
+            (now,),
         )
 
     def _propagate_to_peers(

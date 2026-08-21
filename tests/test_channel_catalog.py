@@ -6,7 +6,11 @@ import tempfile
 import unittest
 
 from telegram_mt5_copier.admin_panel import AdminPanelService, render_admin_panel, render_admin_script
-from telegram_mt5_copier.database import SignalDatabase
+from telegram_mt5_copier.database import (
+    SignalDatabase,
+    connect_database,
+    initialize_database,
+)
 from telegram_mt5_copier.bot_keyboards import CB_CHANNELS, CB_CHANNEL_ADD, CB_CHANNEL_MODE_CUSTOM
 from telegram_mt5_copier.bot_service import BotService
 from telegram_mt5_copier.channel_catalog import (
@@ -195,6 +199,72 @@ class ChannelCatalogTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "60"):
             self.catalog.set_display_name(channel_id, "x" * 61)
 
+    def test_canal_novo_exige_adesao_explicita_de_clientes_existentes(self) -> None:
+        first_channel_id = self.catalog.register_configured_channel(
+            telegram_chat_id="-1001111111111",
+            title="Canal atual",
+            username="CanalAtual",
+            content_protected=False,
+            history_accessible=True,
+            last_message_id=1,
+        )
+        self.catalog.set_selection_mode(self.user.id, "all")
+        first_overview = self.catalog.user_overview(self.user.id)
+        self.assertEqual(first_overview["selection_mode"], "all")
+        self.assertTrue(first_overview["channels"][0]["enabled"])
+
+        second_channel_id = self.catalog.register_configured_channel(
+            telegram_chat_id="-1002222222222",
+            title="Canal novo",
+            username="CanalNovo",
+            content_protected=False,
+            history_accessible=True,
+            last_message_id=1,
+        )
+        overview = self.catalog.user_overview(self.user.id)
+        enabled = {channel["id"]: channel["enabled"] for channel in overview["channels"]}
+        self.assertEqual(overview["selection_mode"], "custom")
+        self.assertTrue(enabled[first_channel_id])
+        self.assertFalse(enabled[second_channel_id])
+
+    def test_migracao_preserva_salas_atuais_sem_assinar_salas_futuras(self) -> None:
+        channel_id = self.catalog.register_configured_channel(
+            telegram_chat_id="-1003333333333",
+            title="Canal legado",
+            username="CanalLegado",
+            content_protected=False,
+            history_accessible=True,
+            last_message_id=1,
+        )
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                "DELETE FROM user_channel_subscriptions WHERE user_id = ?",
+                (self.user.id,),
+            )
+            connection.execute(
+                """
+                INSERT INTO user_channel_settings (user_id, selection_mode, updated_at)
+                VALUES (?, 'all', 'legacy')
+                ON CONFLICT(user_id) DO UPDATE SET selection_mode = 'all'
+                """,
+                (self.user.id,),
+            )
+            connection.execute(
+                "DELETE FROM schema_migrations WHERE migration_key = ?",
+                ("explicit_channel_opt_in_v1",),
+            )
+
+        initialize_database(self.database_path)
+        overview = self.catalog.user_overview(self.user.id)
+        self.assertEqual(overview["selection_mode"], "custom")
+        self.assertEqual(overview["channels"], [
+            {
+                "id": channel_id,
+                "title": f"Sala de Sinais {channel_id:02d}",
+                "enabled": True,
+            }
+        ])
+
     def test_admin_desativa_e_reativa_canal_sem_perder_historico(self) -> None:
         channel_id = self.catalog.register_configured_channel(
             telegram_chat_id="-1001234567890",
@@ -263,12 +333,14 @@ class ChannelCatalogTests(unittest.IsolatedAsyncioTestCase):
                 history_accessible=True,
                 last_message_id=1,
             )
+            self.catalog.set_selection_mode(self.user.id, "all")
             self.catalog.set_selection_mode(self.user.id, "custom")
             self.assertFalse(self.catalog.toggle_subscription(self.user.id, channel_id))
+            self.catalog.set_selection_mode(bob.id, "all")
 
             selected = accounts.accounts_for_approved_users("-1001234567890")
             self.assertEqual([account.user_id for account, _profile in selected], [bob.id])
-            self.assertEqual(len(accounts.accounts_for_approved_users("-1009999999999")), 1)
+            self.assertEqual(len(accounts.accounts_for_approved_users("-1009999999999")), 0)
         finally:
             accounts.close()
 

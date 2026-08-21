@@ -121,8 +121,8 @@ O fluxo de segurança é:
 3. o monitor confirma a participação e o acesso ao histórico;
 4. o admin analisa se o formato dos sinais é compatível;
 5. o admin aprova o canal no painel;
-6. o cliente escolhe seguir todos os canais aprovados ou apenas canais
-   específicos.
+6. o cliente escolhe os canais que deseja seguir; o botão `Seguir todos`
+   seleciona somente os canais disponíveis naquele momento.
 
 Uma sugestão nunca faz a conta técnica entrar automaticamente em um canal e
 nunca começa a executar ordens antes da aprovação. Em canais privados, o link
@@ -135,9 +135,13 @@ fontes confiáveis ao iniciar o monitor, preservando a configuração existente;
 um canal desativado no painel não é reativado automaticamente após reinícios.
 
 Quando um sinal é aceito, a seleção do canal é aplicada individualmente antes
-da escolha das contas MT5. Clientes no modo personalizado não recebem execução
-de canais desmarcados. O painel administrativo mostra solicitações aguardando a
-entrada da conta principal, canais prontos para análise e canais ativos.
+da escolha das contas MT5. Toda execução exige uma assinatura explícita ativa.
+Um canal adicionado depois nunca é habilitado automaticamente para clientes já
+cadastrados, mesmo que eles tenham usado `Seguir todos` anteriormente. Ele
+aparece desmarcado até cada cliente escolhê-lo. Na atualização desta regra, uma
+migração preserva as salas que cada cliente já recebia. O painel administrativo
+mostra solicitações aguardando a entrada da conta principal, canais prontos para
+análise e canais ativos.
 
 O analisador também reconhece mensagens em português como `Moeda: XAU-USD`,
 `Análise: Venda (Sell)`, `Entrada`, `Stop Loss (SL)` e listas com vários
