@@ -261,7 +261,12 @@ class MT5OnboardingTests(unittest.TestCase):
 
         self.assertFalse((provisioned.account_dir / "config" / "accounts.dat").exists())
         self.assertFalse((provisioned.account_dir / "config" / "terminal.ini").exists())
-        self.assertFalse((provisioned.account_dir / "config" / "assistant.ini").exists())
+        assistant_config = (provisioned.account_dir / "config" / "assistant.ini").read_text(
+            encoding="utf-16"
+        )
+        self.assertIn("Enable=0", assistant_config)
+        self.assertNotIn("22346", assistant_config)
+        self.assertNotIn("ApiKey", assistant_config)
         safe_config = (provisioned.account_dir / "config" / "common.ini").read_text(
             encoding="utf-16"
         )
@@ -299,7 +304,11 @@ class MT5OnboardingTests(unittest.TestCase):
         self.terminal_manager.provision_account(78, sanitize_legacy=True)
 
         self.assertTrue((account_dir / "bases" / "new-account.dat").exists())
-        self.assertFalse((account_dir / "Config" / "assistant.ini").exists())
+        assistant_config = (account_dir / "Config" / "assistant.ini").read_text(
+            encoding="utf-16"
+        )
+        self.assertIn("Enable=0", assistant_config)
+        self.assertNotIn("22346", assistant_config)
 
     def test_seleciona_template_oficial_da_corretora(self) -> None:
         hfm = self.root / "template-hfm"
@@ -566,7 +575,9 @@ class MT5OnboardingTests(unittest.TestCase):
 
         recovered = self.accounts.get_account(user.id, account.id)
         self.assertEqual(recovered.connection_status, "connected")
-        self.assertFalse(assistant_path.exists())
+        safe_assistant_config = assistant_path.read_text(encoding="utf-16")
+        self.assertIn("Enable=0", safe_assistant_config)
+        self.assertNotIn("22346", safe_assistant_config)
 
     def test_worker_processa_apenas_comandos_da_propria_conta(self) -> None:
         user = self.create_user()

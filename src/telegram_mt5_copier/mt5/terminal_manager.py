@@ -17,6 +17,14 @@ AllowLiveTrading=1
 Account=0
 Profile=0
 """
+SAFE_ASSISTANT_CONFIGURATION = """[MCP.MetaEditor]
+Enable=0
+
+[MCP.MetaTrader]
+Enable=0
+
+[MCP.Custom]
+"""
 SANITIZATION_MARKER = ".telegram-mt5-sanitized"
 SENSITIVE_CONFIGURATION_KEYS = {
     "auth",
@@ -181,11 +189,11 @@ class TerminalManager:
         # assistant.ini contains the local HTTP ports used by MetaTrader's
         # optional MCP assistant. Copying it to every portable terminal makes
         # all instances compete for the same ports and the later terminal exits
-        # before the Python API can establish IPC. The copier does not depend on
-        # this assistant, so the per-template configuration must never be
-        # inherited by an account instance. Run this even for already-sanitized
-        # legacy accounts so failed terminals can recover on the next retry.
-        remove_copied_mcp_configuration(account_dir)
+        # before the Python API can establish IPC. Deleting the file is not
+        # sufficient because MetaTrader recreates it with MCP enabled. Persist
+        # an explicit disabled configuration instead, including on recovery of
+        # an already-sanitized legacy account.
+        disable_mcp_assistant(account_dir)
 
         data_dir = account_dir / "data"
         data_dir.mkdir(parents=True, exist_ok=True)
@@ -254,21 +262,25 @@ def sanitize_copied_terminal(account_dir: Path) -> None:
     )
 
 
-def remove_copied_mcp_configuration(account_dir: Path) -> None:
+def disable_mcp_assistant(account_dir: Path) -> None:
     # MetaTrader installations normally use ``Config`` while older templates
-    # and tests may use ``config``. On Windows both paths refer to the same
-    # directory; on case-sensitive systems checking both keeps provisioning
-    # deterministic.
-    for config_dir_name in ("config", "Config"):
-        assistant_path = account_dir / config_dir_name / "assistant.ini"
-        try:
-            assistant_path.unlink()
-        except FileNotFoundError:
-            pass
-        except PermissionError as exc:
-            raise ValueError(
-                "Feche o terminal MT5 desta conta antes de repetir a conexao."
-            ) from exc
+    # and tests may use ``config``. Windows resolves both names to the same
+    # directory; the explicit fallback also keeps tests deterministic on
+    # case-sensitive systems.
+    config_dir = account_dir / "config"
+    uppercase_config_dir = account_dir / "Config"
+    if not config_dir.is_dir() and uppercase_config_dir.is_dir():
+        config_dir = uppercase_config_dir
+    config_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        (config_dir / "assistant.ini").write_text(
+            SAFE_ASSISTANT_CONFIGURATION,
+            encoding="utf-16",
+        )
+    except PermissionError as exc:
+        raise ValueError(
+            "Feche o terminal MT5 desta conta antes de repetir a conexao."
+        ) from exc
 
 
 def sanitize_common_configuration(path: Path) -> None:
