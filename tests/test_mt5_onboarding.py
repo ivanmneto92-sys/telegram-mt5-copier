@@ -538,6 +538,36 @@ class MT5OnboardingTests(unittest.TestCase):
             worker.close()
             flaky_accounts.close()
 
+    def test_worker_recupera_conta_falha_com_configuracao_mcp_copiada(self) -> None:
+        user = self.create_user()
+        account = self.create_account(user.id)
+        assistant_path = account.terminal_path.parent / "Config" / "assistant.ini"
+        assistant_path.parent.mkdir(exist_ok=True)
+        assistant_path.write_text(
+            "[MCP.MetaTrader]\nEnabled=1\nEndpoint=http://127.0.0.1:22346/mcp\n",
+            encoding="utf-8",
+        )
+        self.accounts.update_connection_status(
+            user.id,
+            account.id,
+            status="failed",
+            account_type=account.account_type,
+            account_mode=account.account_mode,
+            last_error="IPC send failed",
+            connected=False,
+        )
+        failed_account = self.accounts.get_account(user.id, account.id)
+        worker = MT5AccountWorker(accounts=self.accounts, account=failed_account)
+
+        try:
+            self.assertTrue(worker.process_once())
+        finally:
+            worker.close()
+
+        recovered = self.accounts.get_account(user.id, account.id)
+        self.assertEqual(recovered.connection_status, "connected")
+        self.assertFalse(assistant_path.exists())
+
     def test_worker_processa_apenas_comandos_da_propria_conta(self) -> None:
         user = self.create_user()
         first = self.create_account(user.id, "111111")

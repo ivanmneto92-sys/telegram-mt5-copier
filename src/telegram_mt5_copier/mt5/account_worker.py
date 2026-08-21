@@ -124,7 +124,15 @@ class MT5AccountWorker:
         if not self._started:
             self.start()
         try:
-            self.accounts.test_connection(self.account.user_id, self.account.id)
+            # Retry through the startup recovery path. Besides retrying
+            # transient IPC failures, this lets the terminal manager remove
+            # instance-local files copied from a template (for example the MCP
+            # assistant ports) before reconnecting an account marked failed.
+            self.accounts.test_connection(
+                self.account.user_id,
+                self.account.id,
+                startup_retry=True,
+            )
             self.heartbeat()
             self._backoff_index = 0
             return True
