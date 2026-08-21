@@ -248,6 +248,10 @@ class MT5OnboardingTests(unittest.TestCase):
             encoding="utf-16",
         )
         (template / "config" / "terminal.ini").write_bytes(b"runtime")
+        (template / "config" / "assistant.ini").write_text(
+            "[MCP.MetaTrader]\nEnabled=1\nEndpoint=http://127.0.0.1:22346/mcp\n",
+            encoding="utf-8",
+        )
         (template / "bases" / "Broker" / "history.dat").write_bytes(b"history")
         (template / "logs" / "old.log").write_text("admin log", encoding="utf-8")
         (template / "MQL5" / "Logs" / "old.log").write_text("expert log", encoding="utf-8")
@@ -257,6 +261,7 @@ class MT5OnboardingTests(unittest.TestCase):
 
         self.assertFalse((provisioned.account_dir / "config" / "accounts.dat").exists())
         self.assertFalse((provisioned.account_dir / "config" / "terminal.ini").exists())
+        self.assertFalse((provisioned.account_dir / "config" / "assistant.ini").exists())
         safe_config = (provisioned.account_dir / "config" / "common.ini").read_text(
             encoding="utf-16"
         )
@@ -286,9 +291,15 @@ class MT5OnboardingTests(unittest.TestCase):
 
         (account_dir / "bases").mkdir()
         (account_dir / "bases" / "new-account.dat").write_bytes(b"current")
+        (account_dir / "Config").mkdir(exist_ok=True)
+        (account_dir / "Config" / "assistant.ini").write_text(
+            "[MCP.MetaTrader]\nEnabled=1\nEndpoint=http://127.0.0.1:22346/mcp\n",
+            encoding="utf-8",
+        )
         self.terminal_manager.provision_account(78, sanitize_legacy=True)
 
         self.assertTrue((account_dir / "bases" / "new-account.dat").exists())
+        self.assertFalse((account_dir / "Config" / "assistant.ini").exists())
 
     def test_seleciona_template_oficial_da_corretora(self) -> None:
         hfm = self.root / "template-hfm"

@@ -178,6 +178,15 @@ class TerminalManager:
             ):
                 sanitize_copied_terminal(account_dir)
 
+        # assistant.ini contains the local HTTP ports used by MetaTrader's
+        # optional MCP assistant. Copying it to every portable terminal makes
+        # all instances compete for the same ports and the later terminal exits
+        # before the Python API can establish IPC. The copier does not depend on
+        # this assistant, so the per-template configuration must never be
+        # inherited by an account instance. Run this even for already-sanitized
+        # legacy accounts so failed terminals can recover on the next retry.
+        remove_copied_mcp_configuration(account_dir)
+
         data_dir = account_dir / "data"
         data_dir.mkdir(parents=True, exist_ok=True)
         logs_dir = account_dir / "logs"
@@ -243,6 +252,23 @@ def sanitize_copied_terminal(account_dir: Path) -> None:
         "sanitized\n",
         encoding="ascii",
     )
+
+
+def remove_copied_mcp_configuration(account_dir: Path) -> None:
+    # MetaTrader installations normally use ``Config`` while older templates
+    # and tests may use ``config``. On Windows both paths refer to the same
+    # directory; on case-sensitive systems checking both keeps provisioning
+    # deterministic.
+    for config_dir_name in ("config", "Config"):
+        assistant_path = account_dir / config_dir_name / "assistant.ini"
+        try:
+            assistant_path.unlink()
+        except FileNotFoundError:
+            pass
+        except PermissionError as exc:
+            raise ValueError(
+                "Feche o terminal MT5 desta conta antes de repetir a conexao."
+            ) from exc
 
 
 def sanitize_common_configuration(path: Path) -> None:
