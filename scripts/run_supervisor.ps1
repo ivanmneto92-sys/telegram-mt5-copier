@@ -8,5 +8,13 @@ if (-not (Test-Path -LiteralPath $supervisor -PathType Leaf)) {
 }
 
 Set-Location -LiteralPath $projectRoot
+
+# Ver comentario equivalente em start_windows.ps1: o supervisor tambem loga
+# linhas INFO/WARNING no stderr em operacao normal, e isso nao pode ser
+# tratado como erro fatal do script.
+$PreviousErrorActionPreference = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 & $supervisor
-exit $LASTEXITCODE
+$ExitCode = $LASTEXITCODE
+$ErrorActionPreference = $PreviousErrorActionPreference
+exit $ExitCode

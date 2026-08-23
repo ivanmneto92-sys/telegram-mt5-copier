@@ -634,6 +634,16 @@ pois o monitor apenas chama `sendMessage`.
 O Caddy não é iniciado pelo supervisor: ele continua usando a configuração
 HTTPS já existente.
 
+A partir da versão `0.39.5`, `scripts\start_windows.ps1` e
+`scripts\run_supervisor.ps1` relaxam `$ErrorActionPreference` só ao redor da
+chamada do processo Python. Antes, com `$ErrorActionPreference = "Stop"`
+ativo durante toda a execução, o PowerShell tratava qualquer linha de log
+INFO/WARNING que a aplicação escreve em stderr (comportamento normal do
+módulo `logging` do Python) como um erro fatal do script, encerrando o
+serviço na primeira linha registrada — mesmo com o processo saudável. O
+código de saída do processo (`$LASTEXITCODE`), verificado logo em seguida,
+continua sendo a única fonte real de sucesso ou falha.
+
 Como o MetaTrader 5 precisa da sessão gráfica do Windows, a automação usa uma
 tarefa no login do usuário da VPS, e não a conta `SYSTEM` da sessão 0. Depois
 do login, a conexão RDP pode ser apenas desconectada; não use **Sair**, pois

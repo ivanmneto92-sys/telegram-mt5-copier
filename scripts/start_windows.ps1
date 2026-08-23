@@ -76,8 +76,18 @@ Write-Host "Iniciando aplicacao."
 Write-Host "stdout: $StdoutLog"
 Write-Host "stderr: $StderrLog"
 
+# O logger da aplicacao escreve linhas INFO/WARNING no stderr por padrao (uso
+# normal do modulo logging do Python) — nao sao falhas. Com
+# $ErrorActionPreference = "Stop", o PowerShell trata qualquer saida em
+# stderr de um processo externo como erro fatal do script, encerrando o
+# servico assim que a primeira linha de log aparece. Relaxamos a preferencia
+# só ao redor desta chamada; o exit code (checado logo abaixo) continua
+# sendo a fonte real de verdade sobre sucesso ou falha.
+$PreviousErrorActionPreference = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 & $VenvPython -m telegram_mt5_copier 1>> $StdoutLog 2>> $StderrLog
 $ExitCode = $LASTEXITCODE
+$ErrorActionPreference = $PreviousErrorActionPreference
 
 if ($ExitCode -ne 0) {
     Write-Host "Aplicacao falhou com codigo $ExitCode. Consulte os logs acima." -ForegroundColor Red
