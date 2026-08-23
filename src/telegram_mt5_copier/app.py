@@ -148,9 +148,12 @@ def run_mt5_provision(config: AppConfig, user_id: int, account_id: int) -> int:
             config.mt5_broker_template_paths,
             config.mt5_broker_servers,
         )
-        provisioned = terminal_manager.provision_account(account_id)
         accounts = MT5AccountService(config.database_path)
         try:
+            account = accounts.get_account(user_id, account_id)
+            provisioned = terminal_manager.provision_account(
+                account_id, broker_name=account.broker_name
+            )
             accounts.update_terminal_path(user_id, account_id, provisioned.terminal_path)
         finally:
             accounts.close()

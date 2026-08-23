@@ -644,6 +644,16 @@ serviço na primeira linha registrada — mesmo com o processo saudável. O
 código de saída do processo (`$LASTEXITCODE`), verificado logo em seguida,
 continua sendo a única fonte real de sucesso ou falha.
 
+A partir da versão `0.39.6`, `--provision-mt5-account <id> --user-id <id>`
+busca a corretora real da conta no banco antes de provisionar o terminal
+isolado. Antes, o comando sempre chamava o provisionamento sem informar a
+corretora, então qualquer conta falhava com "Corretora sem template MT5
+configurado", mesmo com `MT5_BROKER_TEMPLATES` configurado corretamente. Esse
+comando também nunca sobrescreve uma pasta de conta que já existe em
+`MT5_BASE_DIR`; se a pasta já existir (por exemplo, criada só com os arquivos
+de controle internos, sem o terminal de verdade), apague-a antes de rodar o
+comando para que o terminal seja copiado do template novamente.
+
 Como o MetaTrader 5 precisa da sessão gráfica do Windows, a automação usa uma
 tarefa no login do usuário da VPS, e não a conta `SYSTEM` da sessão 0. Depois
 do login, a conexão RDP pode ser apenas desconectada; não use **Sair**, pois
