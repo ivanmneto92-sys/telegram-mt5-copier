@@ -610,6 +610,14 @@ class MT5AccountService:
                 "DELETE FROM account_daily_performance WHERE mt5_account_id = ?",
                 (account_id,),
             )
+            connection.execute(
+                "DELETE FROM mt5_settlement_state WHERE mt5_account_id = ?",
+                (account_id,),
+            )
+            connection.execute(
+                "DELETE FROM signal_account_execution_claims WHERE mt5_account_id = ?",
+                (account_id,),
+            )
             for sql in (
                 """
                 DELETE FROM execution_close_events

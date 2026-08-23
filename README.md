@@ -134,6 +134,14 @@ financeiro) não é apagado; ele pode cadastrar uma conta MT5 nova depois se
 precisar. O painel pede confirmação antes de excluir, porque não tem como
 desfazer.
 
+A versão `0.40.0` tinha um bug nesse botão: contas com registro de liquidação
+(`mt5_settlement_state`) ou com algum sinal já reivindicado para execução
+(`signal_account_execution_claims`) falhavam com erro de integridade do banco
+e apareciam como "Falha ao processar solicitação" — a exclusão nunca chegava
+a acontecer (a transação inteira é revertida em caso de erro, então nada
+ficava pela metade). A partir da versão `0.40.1`, essas duas tabelas também
+são limpas ao excluir uma conta MT5, corrigindo o problema.
+
 ## Catálogo de canais sugeridos pelos clientes
 
 O monitoramento usa uma única conta técnica do Telegram. O cliente não conecta

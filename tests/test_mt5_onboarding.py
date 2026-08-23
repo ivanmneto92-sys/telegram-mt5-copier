@@ -191,6 +191,38 @@ class MT5OnboardingTests(unittest.TestCase):
 
         self.assertEqual(self.accounts.list_accounts(user.id), [])
 
+    def test_remocao_de_conta_com_liquidacao_e_claim_pendentes_nao_falha(self) -> None:
+        user = self.create_user()
+        account = self.create_account(user.id)
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                "INSERT INTO mt5_settlement_state (mt5_account_id, last_reconciled_at) VALUES (?, ?)",
+                (account.id, "2026-01-01T00:00:00+00:00"),
+            )
+            connection.execute(
+                """
+                INSERT INTO signal_account_execution_claims
+                    (mt5_account_id, content_signature, claimed_at)
+                VALUES (?, ?, ?)
+                """,
+                (account.id, "sig-1", "2026-01-01T00:00:00+00:00"),
+            )
+
+        self.accounts.remove_account(user.id, account.id)
+
+        self.assertEqual(self.accounts.list_accounts(user.id), [])
+        with connect_database(self.database_path) as connection:
+            remaining_settlement = connection.execute(
+                "SELECT COUNT(*) FROM mt5_settlement_state WHERE mt5_account_id = ?",
+                (account.id,),
+            ).fetchone()[0]
+            remaining_claims = connection.execute(
+                "SELECT COUNT(*) FROM signal_account_execution_claims WHERE mt5_account_id = ?",
+                (account.id,),
+            ).fetchone()[0]
+        self.assertEqual(remaining_settlement, 0)
+        self.assertEqual(remaining_claims, 0)
+
     def test_bloqueio_de_conta_real(self) -> None:
         real_accounts = MT5AccountService(
             self.database_path,
