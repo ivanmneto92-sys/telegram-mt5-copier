@@ -74,3 +74,72 @@ def process_is_running(pid: int) -> bool:
         return True
     except (OSError, ProcessLookupError):
         return False
+
+
+def terminate_process_by_path(exe_path: Path) -> bool:
+    """Force-closes any running process launched from exe_path.
+
+    MetaTrader5.shutdown() only closes the Python IPC connection; it never
+    terminates the terminal64.exe process itself. Deleting a client's MT5
+    account needs to actually close their terminal so the VPS frees the RAM,
+    so this walks the process list looking for a match on the full image
+    path (matching by name alone would hit terminal64.exe from other
+    accounts). Windows-only: every isolated terminal copy is launched
+    on Windows, so there is nothing to terminate elsewhere.
+    """
+    if sys.platform != "win32":
+        return False
+
+    import ctypes
+    from ctypes import wintypes
+
+    TH32CS_SNAPPROCESS = 0x00000002
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    PROCESS_TERMINATE = 0x0001
+
+    class PROCESSENTRY32(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.POINTER(wintypes.ULONG)),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", ctypes.c_char * 260),
+        ]
+
+    kernel32 = ctypes.windll.kernel32
+    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if snapshot == -1:
+        return False
+
+    target_name = exe_path.name.lower()
+    target_resolved = str(exe_path.resolve()).lower()
+    terminated = False
+    try:
+        entry = PROCESSENTRY32()
+        entry.dwSize = ctypes.sizeof(PROCESSENTRY32)
+        found = kernel32.Process32First(snapshot, ctypes.byref(entry))
+        while found:
+            if entry.szExeFile.decode("mbcs", errors="ignore").lower() == target_name:
+                pid = entry.th32ProcessID
+                handle = kernel32.OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE, False, pid
+                )
+                if handle:
+                    buffer_size = wintypes.DWORD(1024)
+                    buffer = ctypes.create_unicode_buffer(buffer_size.value)
+                    if kernel32.QueryFullProcessImageNameW(
+                        handle, 0, buffer, ctypes.byref(buffer_size)
+                    ) and buffer.value.lower() == target_resolved:
+                        kernel32.TerminateProcess(handle, 0)
+                        kernel32.WaitForSingleObject(handle, 5000)
+                        terminated = True
+                    kernel32.CloseHandle(handle)
+            found = kernel32.Process32Next(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+    return terminated

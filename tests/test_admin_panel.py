@@ -184,6 +184,55 @@ class AdminPanelTests(unittest.TestCase):
         )
         self.assertEqual(accounts.count_accounts(), 1)
 
+    def test_excluir_conta_mt5_apaga_banco_e_pasta_do_terminal(self) -> None:
+        from telegram_mt5_copier.mt5.terminal_manager import TerminalManager
+
+        account_id = self._insert_account_with_profile(self.bob.id, "778899")
+        base_dir = Path(self.temp_dir.name) / "mt5accounts"
+        terminal_manager = TerminalManager(base_dir)
+        account_dir = terminal_manager.account_dir(account_id)
+        account_dir.mkdir(parents=True, exist_ok=True)
+        (account_dir / "terminal64.exe").write_bytes(b"fake")
+
+        accounts = MT5AccountService(self.database_path)
+        service = AdminPanelService(
+            self.database_path,
+            bot_token=self.token,
+            admin_ids=(9001,),
+            mt5_accounts=accounts,
+            terminal_manager=terminal_manager,
+        )
+
+        result = service.delete_client_mt5_accounts(
+            admin_telegram_user_id=9001,
+            target_user_id=self.bob.id,
+        )
+
+        self.assertEqual(result["removed_account_ids"], [account_id])
+        self.assertFalse(account_dir.exists())
+        with connect_database(self.database_path) as connection:
+            remaining = connection.execute(
+                "SELECT COUNT(*) FROM mt5_accounts WHERE id = ?",
+                (account_id,),
+            ).fetchone()[0]
+            action = connection.execute(
+                """
+                SELECT action_type, target_user_id
+                FROM admin_actions
+                WHERE action_type = 'admin_panel_delete_mt5_accounts'
+                """
+            ).fetchone()
+        self.assertEqual(remaining, 0)
+        self.assertEqual(tuple(action), ("admin_panel_delete_mt5_accounts", self.bob.id))
+
+    def test_excluir_conta_mt5_sem_dependencias_configuradas_falha(self) -> None:
+        self._insert_account_with_profile(self.bob.id, "778899")
+        with self.assertRaises(ValueError):
+            self.service.delete_client_mt5_accounts(
+                admin_telegram_user_id=9001,
+                target_user_id=self.bob.id,
+            )
+
     def test_status_invalido_e_rejeitado(self) -> None:
         with self.assertRaises(ValueError):
             self.service.set_user_status(

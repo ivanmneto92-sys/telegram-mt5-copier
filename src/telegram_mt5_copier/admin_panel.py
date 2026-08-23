@@ -14,7 +14,9 @@ from .access_control import (
 )
 from .database import connect_database, initialize_database, utc_now
 from .channel_catalog import ChannelCatalogService
+from .mt5.account_service import MT5AccountService
 from .mt5.models import mask_login
+from .mt5.terminal_manager import TerminalManager
 from .users import USER_STATUS_ACTIVE, USER_STATUS_PAUSED, UserRepository
 from .web_app import TelegramWebAppInitData, WebAppValidationError, validate_telegram_web_app_init_data
 
@@ -35,10 +37,14 @@ class AdminPanelService:
         bot_token: str,
         admin_ids: tuple[int, ...],
         peer_channel_sync_database_paths: tuple[Path, ...] = (),
+        mt5_accounts: MT5AccountService | None = None,
+        terminal_manager: TerminalManager | None = None,
     ) -> None:
         self.database_path = database_path
         self.bot_token = bot_token
         self.admin_ids = frozenset(admin_ids)
+        self.mt5_accounts = mt5_accounts
+        self.terminal_manager = terminal_manager
         initialize_database(database_path)
         self.channels = ChannelCatalogService(
             database_path,
@@ -353,6 +359,48 @@ class AdminPanelService:
                 (int(enabled), utc_now(), user_id),
             )
             cursor.close()
+
+    def delete_client_mt5_accounts(
+        self,
+        *,
+        admin_telegram_user_id: int,
+        target_user_id: int,
+    ) -> dict[str, object]:
+        """Apaga as contas MT5 do cliente e fecha o terminal delas na VPS.
+
+        Diferente de pausar (que só libera a vaga e mantém tudo reversível),
+        isto é definitivo: apaga as contas do banco, encerra o processo do
+        terminal MT5 se estiver rodando e apaga a pasta isolada dele na VPS,
+        liberando RAM/CPU/disco de verdade. Não apaga o cadastro do cliente
+        (Telegram, financeiro) — só as contas MT5 dele, para que ele possa
+        cadastrar uma conta nova depois se precisar.
+        """
+        if self.mt5_accounts is None or self.terminal_manager is None:
+            raise ValueError("Exclusão de contas MT5 não está disponível nesta instância.")
+        self._require_user(target_user_id)
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                "SELECT id FROM mt5_accounts WHERE user_id = ?",
+                (target_user_id,),
+            )
+            try:
+                account_ids = [int(row[0]) for row in cursor.fetchall()]
+            finally:
+                cursor.close()
+        for account_id in account_ids:
+            self.terminal_manager.remove_account_terminal(account_id)
+            self.mt5_accounts.remove_account(target_user_id, account_id)
+        users = UserRepository(self.database_path)
+        try:
+            users.log_admin_action(
+                admin_telegram_user_id=admin_telegram_user_id,
+                target_user_id=target_user_id,
+                action_type="admin_panel_delete_mt5_accounts",
+                payload={"account_ids": account_ids, "source": "admin_panel"},
+            )
+        finally:
+            users.close()
+        return {"user_id": target_user_id, "removed_account_ids": account_ids}
 
     def approve_paid_access(
         self,
@@ -844,6 +892,7 @@ def render_admin_panel(
     .action.activate {{ color: #06170e; background: var(--green); }}
     .action.pause {{ color: #251a00; background: var(--yellow); }}
     .action.finance {{ color: var(--text); background: var(--blue); }}
+    .action.danger {{ color: #fff; background: var(--red); }}
     .action:disabled {{ opacity: .55; cursor: wait; }}
     .empty {{ padding: 35px; text-align: center; color: var(--muted); border: 1px dashed var(--line); border-radius: 16px; }}
     dialog {{ width: min(760px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow: auto; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 0; box-shadow: var(--shadow); }}
@@ -1265,6 +1314,9 @@ def render_admin_script() -> str:
       : '<button class="action ' + (nextStatus === "active" ? "activate" : "pause") +
         '" type="button" data-action-status="' + nextStatus + '" data-user-id="' + esc(user.id) + '">' +
         actionLabel + '</button>';
+    var deleteMt5Action = account
+      ? '<button class="action danger" type="button" data-delete-mt5-user="' + esc(user.id) + '">Excluir MT5</button>'
+      : '';
     return '<article class="user-card" data-user-id="' + esc(user.id) + '">' +
       '<div class="user-main">' +
         '<div class="identity"><h2>' + esc(user.username ? "@" + user.username : "Cliente #" + user.id) + '</h2>' +
@@ -1273,7 +1325,8 @@ def render_admin_script() -> str:
         '</div>' +
         accountHtml + profileHtml + billingHtml +
         '<div class="actions">' + primaryAction +
-          '<button class="action finance" type="button" data-finance-user="' + esc(user.id) + '">Financeiro</button></div>' +
+          '<button class="action finance" type="button" data-finance-user="' + esc(user.id) + '">Financeiro</button>' +
+          deleteMt5Action + '</div>' +
       '</div></article>';
   }
 
@@ -1417,6 +1470,27 @@ def render_admin_script() -> str:
       .finally(function () { state.busy = false; button.disabled = false; });
   }
 
+  function deleteMt5Account(userId, button) {
+    if (state.busy) { return; }
+    var user = userById(userId);
+    var name = user ? (user.username ? "@" + user.username : "Cliente #" + user.id) : "este cliente";
+    var confirmed = window.confirm(
+      "Excluir a conta MT5 de " + name + "?\n\n" +
+      "Isto apaga a conta do banco, encerra o terminal MT5 dele na VPS e libera " +
+      "a vaga para outro cliente. Não é possível desfazer — o cliente vai " +
+      "precisar cadastrar uma conta nova para voltar a operar."
+    );
+    if (!confirmed) { return; }
+    state.busy = true;
+    button.disabled = true;
+    post("/api/admin/user-mt5-delete", authFields({
+      csrf_token: state.csrf,
+      user_id: userId
+    })).then(reloadDashboard)
+      .catch(function (error) { showError(error.message || "Não foi possível excluir a conta MT5."); })
+      .finally(function () { state.busy = false; button.disabled = false; });
+  }
+
   function userById(userId) {
     return state.users.find(function (user) { return String(user.id) === String(userId); });
   }
@@ -1532,6 +1606,11 @@ def render_admin_script() -> str:
     var button = event.target.closest("[data-action-status]");
     if (button) {
       changeStatus(button.getAttribute("data-user-id"), button.getAttribute("data-action-status"), button);
+      return;
+    }
+    var deleteMt5 = event.target.closest("[data-delete-mt5-user]");
+    if (deleteMt5) {
+      deleteMt5Account(deleteMt5.getAttribute("data-delete-mt5-user"), deleteMt5);
       return;
     }
     var finance = event.target.closest("[data-finance-user]");

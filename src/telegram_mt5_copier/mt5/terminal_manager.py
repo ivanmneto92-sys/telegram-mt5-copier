@@ -8,6 +8,8 @@ import re
 import shutil
 from typing import Mapping
 
+from .ipc_lock import terminate_process_by_path
+
 SAFE_COMMON_CONFIGURATION = """[Common]
 KeepPrivate=0
 
@@ -211,6 +213,22 @@ class TerminalManager:
             data_dir=data_dir,
             logs_dir=logs_dir,
         )
+
+    def remove_account_terminal(self, account_id: int) -> bool:
+        """Force-closes the account's running terminal and deletes its folder.
+
+        Used when an admin deletes a client's MT5 account: besides removing
+        the database rows (MT5AccountService.remove_account), the isolated
+        terminal copy and any running terminal64.exe for it need to go too,
+        otherwise the VPS keeps holding the RAM/CPU and the disk copy
+        indefinitely. Returns True if there was anything to remove.
+        """
+        terminated = terminate_process_by_path(self.terminal_path(account_id))
+        account_dir = self.account_dir(account_id)
+        existed = account_dir.exists()
+        if existed:
+            shutil.rmtree(account_dir, ignore_errors=True)
+        return existed or terminated
 
 
 def natural_server_sort_key(value: str) -> tuple[object, ...]:

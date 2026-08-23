@@ -124,6 +124,16 @@ botão "Pausar"), nunca para a autopausa do cliente (`🛑 Parar sinais hoje`)
 nem para a pausa automática de meta/limite diário, que continuam bloqueando
 só sinais novos sem tocar na conta MT5.
 
+A partir da versão `0.40.0`, cada cliente com conta MT5 cadastrada tem um
+botão **"Excluir MT5"** no painel admin, ao lado de Pausar/Reativar. Diferente
+de pausar, isto é definitivo: apaga a(s) conta(s) MT5 do cliente no banco,
+encerra o processo do terminal MT5 dela na VPS (se estiver aberto) e apaga a
+pasta isolada do terminal, liberando RAM/CPU/disco de verdade — não só a vaga
+no limite `MT5_MAX_ACCOUNTS_PER_VPS`. O cadastro do cliente (Telegram,
+financeiro) não é apagado; ele pode cadastrar uma conta MT5 nova depois se
+precisar. O painel pede confirmação antes de excluir, porque não tem como
+desfazer.
+
 ## Catálogo de canais sugeridos pelos clientes
 
 O monitoramento usa uma única conta técnica do Telegram. O cliente não conecta

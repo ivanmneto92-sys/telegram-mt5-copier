@@ -170,6 +170,9 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             if path == "/api/admin/user-status":
                 self.handle_admin_user_status(fields)
                 return
+            if path == "/api/admin/user-mt5-delete":
+                self.handle_admin_user_mt5_delete(fields)
+                return
             if path == "/api/admin/billing-update":
                 self.handle_admin_billing_update(fields)
                 return
@@ -406,6 +409,24 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             status=str(result["status"]),
         )
         self.send_json({"ok": True, "user": result})
+
+    def handle_admin_user_mt5_delete(self, fields: dict[str, str]) -> None:
+        identity = self.authenticate_admin_mutation(fields)
+        try:
+            target_user_id = int(fields.get("user_id", ""))
+        except ValueError as exc:
+            raise ValueError("Cliente inválido.") from exc
+        result = self.admin_panel.delete_client_mt5_accounts(
+            admin_telegram_user_id=identity.telegram_user_id,
+            target_user_id=target_user_id,
+        )
+        safe_log(
+            "admin_user_mt5_deleted",
+            admin_id=str(identity.telegram_user_id),
+            target_id=str(target_user_id),
+            count=str(len(result["removed_account_ids"])),
+        )
+        self.send_json({"ok": True, "result": result})
 
     def handle_admin_billing_update(self, fields: dict[str, str]) -> None:
         identity = self.authenticate_admin_mutation(fields)
@@ -679,6 +700,8 @@ def main() -> int:
             bot_token=config.telegram_bot_token,
             admin_ids=config.bot_admin_ids,
             peer_channel_sync_database_paths=config.peer_channel_sync_database_paths,
+            mt5_accounts=accounts,
+            terminal_manager=terminal_manager,
         )
         admin_browser_auth = AdminBrowserAuthService(
             config.database_path,
@@ -794,6 +817,7 @@ def safe_endpoint(value: str) -> str:
         "/api/admin/browser-login",
         "/api/admin/logout",
         "/api/admin/user-status",
+        "/api/admin/user-mt5-delete",
         "/api/admin/billing-update",
         "/api/admin/payment",
         "/api/admin/approve",
