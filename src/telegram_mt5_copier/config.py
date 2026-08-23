@@ -17,7 +17,10 @@ def load_env_file(env_path: Path) -> dict[str, str]:
     if not env_path.exists():
         return values
 
-    with env_path.open("r", encoding="utf-8") as file:
+    # utf-8-sig tolerates a leading BOM: PowerShell's `Set-Content -Encoding
+    # UTF8` writes one, which would otherwise corrupt the first key parsed
+    # below (it would read as "﻿KEY" and never match anything).
+    with env_path.open("r", encoding="utf-8-sig") as file:
         for line_number, raw_line in enumerate(file, start=1):
             line = raw_line.strip()
             if not line or line.startswith("#"):

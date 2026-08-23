@@ -654,6 +654,13 @@ comando também nunca sobrescreve uma pasta de conta que já existe em
 de controle internos, sem o terminal de verdade), apague-a antes de rodar o
 comando para que o terminal seja copiado do template novamente.
 
+A partir da versão `0.39.7`, a leitura do `.env` tolera um BOM (marca de
+ordem de bytes) no início do arquivo. Editar o `.env` no PowerShell com
+`Set-Content -Encoding UTF8` grava esse BOM automaticamente; sem essa
+tolerância, a primeira variável do arquivo deixava de ser reconhecida (por
+exemplo, `TELEGRAM_API_ID` relatado como ausente mesmo estando presente e
+correto no arquivo).
+
 Como o MetaTrader 5 precisa da sessão gráfica do Windows, a automação usa uma
 tarefa no login do usuário da VPS, e não a conta `SYSTEM` da sessão 0. Depois
 do login, a conexão RDP pode ser apenas desconectada; não use **Sair**, pois
