@@ -679,6 +679,17 @@ tolerância, a primeira variável do arquivo deixava de ser reconhecida (por
 exemplo, `TELEGRAM_API_ID` relatado como ausente mesmo estando presente e
 correto no arquivo).
 
+A partir da versão `0.42.0`, uma falha em uma conta (terminal ausente,
+trava presa, erro de IPC com o broker, etc.) não derruba mais o processo
+`telegram-mt5-worker` inteiro. Antes, uma exceção não tratada ao processar
+qualquer conta escapava do laço principal e encerrava o processo — o
+supervisor reiniciava, mas **todas** as contas ficavam sem proteção (sem
+meta/limite diário, sem BE após TP1, sem gestão de ordens pendentes)
+durante todo o tempo que o processo ficasse em loop de reinício, não só a
+conta com problema. Agora cada conta é processada dentro do seu próprio
+bloco isolado: um erro numa conta é registrado no log e a próxima conta
+continua sendo processada normalmente no mesmo ciclo.
+
 Como o MetaTrader 5 precisa da sessão gráfica do Windows, a automação usa uma
 tarefa no login do usuário da VPS, e não a conta `SYSTEM` da sessão 0. Depois
 do login, a conexão RDP pode ser apenas desconectada; não use **Sair**, pois

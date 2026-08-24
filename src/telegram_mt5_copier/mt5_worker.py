@@ -13,10 +13,54 @@ from .mt5.client import MT5Client
 from .mt5.position_manager import PositionManager
 from .mt5.settlement_monitor import SettlementMonitor
 from .mt5.pending_order_monitor import PendingOrderMonitor
+from .mt5.models import ExecutionProfile, MT5Account
 from .telegram_notifier import TelegramUserNotifier
 
 POSITION_PROTECTION_POLL_SECONDS = 1
 ACCOUNT_HEARTBEAT_SECONDS = 15
+
+
+def process_account(
+    account: MT5Account,
+    profile: ExecutionProfile,
+    *,
+    workers: dict[int, MT5AccountWorker],
+    accounts: MT5AccountService,
+    command_queue: CommandQueue,
+    position_manager: PositionManager,
+    settlement_monitor: SettlementMonitor,
+    last_account_checks: dict[int, float],
+    account_connection_states: dict[int, bool],
+) -> None:
+    """Advance one account by one worker tick, in isolation.
+
+    One account's failure (missing terminal, stale lock, broker IPC error,
+    ...) must never take down every other account on this VPS. Before this
+    guard, an unhandled exception anywhere in here escaped the caller's
+    for-loop entirely, crashing the whole mt5_worker process; the supervisor
+    then restarted it, but every account went unprotected (no daily
+    target/loss kill switch, no BE after TP1, no pending-order management)
+    for the length of that crash loop, not just the one broken account.
+    """
+    try:
+        worker = workers.get(account.id)
+        if worker is None:
+            worker = MT5AccountWorker(
+                accounts=accounts,
+                account=account,
+                command_queue=command_queue,
+            )
+            workers[account.id] = worker
+        now = time.monotonic()
+        last_check = last_account_checks.get(account.id)
+        if last_check is None or now - last_check >= ACCOUNT_HEARTBEAT_SECONDS:
+            account_connection_states[account.id] = worker.process_once()
+            last_account_checks[account.id] = time.monotonic()
+        if account_connection_states.get(account.id, False):
+            position_manager.manage_account(account, profile)
+            settlement_monitor.deliver_pending(account)
+    except Exception as exc:
+        print(f"Falha ao processar conta {account.id}: {exc}", file=sys.stderr)
 
 
 def main() -> int:
@@ -70,26 +114,18 @@ def main() -> int:
                         last_account_checks.pop(account_id, None)
                         account_connection_states.pop(account_id, None)
 
-                for account_id, (account, profile) in active_accounts.items():
-                    worker = workers.get(account_id)
-                    if worker is None:
-                        worker = MT5AccountWorker(
-                            accounts=accounts,
-                            account=account,
-                            command_queue=command_queue,
-                        )
-                        workers[account_id] = worker
-                    now = time.monotonic()
-                    last_check = last_account_checks.get(account_id)
-                    if last_check is None or now - last_check >= ACCOUNT_HEARTBEAT_SECONDS:
-                        account_connection_states[account_id] = worker.process_once()
-                        last_account_checks[account_id] = time.monotonic()
-                    if account_connection_states.get(account_id, False):
-                        try:
-                            position_manager.manage_account(account, profile)
-                            settlement_monitor.deliver_pending(account)
-                        except Exception as exc:
-                            print(f"Falha ao gerenciar posicoes da conta {account.id}: {exc}", file=sys.stderr)
+                for account, profile in active_accounts.values():
+                    process_account(
+                        account,
+                        profile,
+                        workers=workers,
+                        accounts=accounts,
+                        command_queue=command_queue,
+                        position_manager=position_manager,
+                        settlement_monitor=settlement_monitor,
+                        last_account_checks=last_account_checks,
+                        account_connection_states=account_connection_states,
+                    )
 
                 pending_monitor.expire_orders()
 
