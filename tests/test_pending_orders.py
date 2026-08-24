@@ -517,6 +517,60 @@ class PendingOrderTests(unittest.TestCase):
         self.assertEqual(loss_result.group_result.rejected_reason, "daily_loss_limit_reached")
         self.assertFalse(loss_client.order_send_called)
 
+    def test_sinal_com_potencial_de_lucro_grande_e_bloqueado_antes_de_estourar_meta(self) -> None:
+        """One pending order can add most of its profit in a single fill (TP
+        hit) long after being accepted, jumping the realized result straight
+        past the daily target before the periodic kill switch even runs
+        again. Rejecting it up front - based on its own worst-case TP
+        outcome - closes that gap instead of only reacting after the fact.
+        """
+        target_profile = replace(self.profile(), daily_profit_target=Decimal("20"))
+        client = SimulatedMT5Client(
+            symbol_info=SymbolInfo(name="XAUUSD", trade_tick_value=Decimal("1")),
+        )
+
+        result = self.executor(
+            client=client,
+            execution_mode="demo_execution",
+            global_kill_switch=False,
+        ).execute_for_account(parse_signal_text(BUY_SIGNAL).signal, self.account, target_profile)
+
+        self.assertEqual(
+            result.group_result.rejected_reason, "daily_profit_target_would_be_exceeded"
+        )
+        self.assertFalse(client.order_send_called)
+
+    def test_sinal_com_potencial_de_perda_grande_e_bloqueado_antes_de_estourar_limite(self) -> None:
+        loss_profile = replace(self.profile(), daily_loss_limit=Decimal("20"))
+        client = SimulatedMT5Client(
+            symbol_info=SymbolInfo(name="XAUUSD", trade_tick_value=Decimal("1")),
+        )
+
+        result = self.executor(
+            client=client,
+            execution_mode="demo_execution",
+            global_kill_switch=False,
+        ).execute_for_account(parse_signal_text(BUY_SIGNAL).signal, self.account, loss_profile)
+
+        self.assertEqual(
+            result.group_result.rejected_reason, "daily_loss_limit_would_be_exceeded"
+        )
+        self.assertFalse(client.order_send_called)
+
+    def test_sinal_dentro_da_folga_da_meta_diaria_nao_e_bloqueado(self) -> None:
+        target_profile = replace(self.profile(), daily_profit_target=Decimal("1000"))
+        client = SimulatedMT5Client(
+            symbol_info=SymbolInfo(name="XAUUSD", trade_tick_value=Decimal("1")),
+        )
+
+        result = self.executor(
+            client=client,
+            execution_mode="demo_execution",
+            global_kill_switch=False,
+        ).execute_for_account(parse_signal_text(BUY_SIGNAL).signal, self.account, target_profile)
+
+        self.assertIsNone(result.group_result.rejected_reason)
+
     def test_meta_diaria_pausa_novos_sinais_ate_as_23h(self) -> None:
         target_profile = replace(self.profile(), daily_profit_target=Decimal("50"))
         target_client = SimulatedMT5Client(

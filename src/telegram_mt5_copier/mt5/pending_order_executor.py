@@ -36,7 +36,11 @@ from .models import (
     SymbolInfo,
     TickInfo,
 )
-from .order_validator import OrderValidationError, validate_pending_order_plan
+from .order_validator import (
+    OrderValidationError,
+    validate_daily_result_headroom,
+    validate_pending_order_plan,
+)
 from .pending_order_planner import PendingOrderPlanner, PendingOrderPlanningError
 from .symbol_resolver import SymbolResolver
 from .trade_comment import build_trade_comment, parse_trade_comment
@@ -109,6 +113,8 @@ class PendingOrderExecutor:
             if result.group_result.rejected_reason in {
                 "daily_profit_target_reached",
                 "daily_loss_limit_reached",
+                "daily_profit_target_would_be_exceeded",
+                "daily_loss_limit_would_be_exceeded",
             }:
                 paused_user_ids.add(account.user_id)
         return results
@@ -239,6 +245,12 @@ class PendingOrderExecutor:
                 execution_mode=self.execution_mode,
                 global_kill_switch=self.global_kill_switch,
                 allow_live_accounts=self.allow_live_accounts,
+            )
+            validate_daily_result_headroom(
+                plan=plan,
+                profile=profile,
+                symbol_info=symbol_info,
+                daily_realized_result=daily_realized_result(client),
             )
         except OrderValidationError as exc:
             shutdown_if_needed()
@@ -552,18 +564,23 @@ def validate_operational_limits(
 
     if profile.daily_profit_target <= 0 and profile.daily_loss_limit <= 0:
         return
-    now = datetime.now(tz=timezone.utc)
-    day_start = current_daily_signal_session_start_at(now)
-    daily_result = Decimal("0")
-    for deal in client.history_deals_get(day_start, now):
-        if int(result_value(deal, "magic", 0) or 0) != MT5_MAGIC_NUMBER:
-            continue
-        for field_name in ("profit", "commission", "swap", "fee"):
-            daily_result += Decimal(str(result_value(deal, field_name, 0) or 0))
+    daily_result = daily_realized_result(client)
     if profile.daily_profit_target > 0 and daily_result >= profile.daily_profit_target:
         raise OrderValidationError("daily_profit_target_reached")
     if profile.daily_loss_limit > 0 and daily_result <= -profile.daily_loss_limit:
         raise OrderValidationError("daily_loss_limit_reached")
+
+
+def daily_realized_result(client: object) -> Decimal:
+    now = datetime.now(tz=timezone.utc)
+    day_start = current_daily_signal_session_start_at(now)
+    result = Decimal("0")
+    for deal in client.history_deals_get(day_start, now):
+        if int(result_value(deal, "magic", 0) or 0) != MT5_MAGIC_NUMBER:
+            continue
+        for field_name in ("profit", "commission", "swap", "fee"):
+            result += Decimal(str(result_value(deal, field_name, 0) or 0))
+    return result
 
 
 def format_pending_simulation_message(plan: PendingOrderPlan, account: MT5Account) -> str:
@@ -1024,6 +1041,15 @@ def rejection_guidance(
         return "Aguarde uma operação ativa encerrar. O sistema continuará monitorando os próximos sinais."
     if reason in {"daily_profit_target_reached", "daily_loss_limit_reached"}:
         return "Nenhuma ação é necessária. Novos sinais permanecerão bloqueados até a próxima sessão configurada."
+    if reason in {
+        "daily_profit_target_would_be_exceeded",
+        "daily_loss_limit_would_be_exceeded",
+    }:
+        return (
+            "Este sinal sozinho já poderia ultrapassar a meta/limite diário se o take profit ou "
+            "o stop loss for atingido de uma vez. Nenhuma ação é necessária: o sistema seguirá "
+            "monitorando os próximos sinais normalmente."
+        )
     if reason == "price_hit_tp_before_entry":
         return "O preço já alcançou o objetivo antes da entrada. Aguarde o próximo sinal; não entre manualmente atrasado."
     _ = profile, plan
