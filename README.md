@@ -142,6 +142,14 @@ a acontecer (a transação inteira é revertida em caso de erro, então nada
 ficava pela metade). A partir da versão `0.40.1`, essas duas tabelas também
 são limpas ao excluir uma conta MT5, corrigindo o problema.
 
+A partir da versão `0.44.0`, o painel mostra **todas** as contas MT5 de
+cada cliente, não só a mais recente — um mesmo Telegram pode ter várias
+contas cadastradas (em corretoras diferentes ou na mesma), e um sinal
+copiado vale pra todas elas juntas, cada uma com sua própria gestão de
+risco. O botão "Excluir MT5" também passou a ser **por conta**: aparece
+dentro do bloco de cada conta e apaga só aquela, sem afetar as outras
+contas do mesmo cliente.
+
 ## Catálogo de canais sugeridos pelos clientes
 
 O monitoramento usa uma única conta técnica do Telegram. O cliente não conecta

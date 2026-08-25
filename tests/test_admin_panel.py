@@ -95,8 +95,21 @@ class AdminPanelTests(unittest.TestCase):
 
         self.assertEqual(payload["summary"]["users"], 2)
         self.assertEqual(alice["account"]["masked_login"], "••••5678")
+        self.assertEqual(len(alice["accounts"]), 1)
+        self.assertEqual(alice["accounts"][0]["masked_login"], "••••5678")
         self.assertNotIn("12345678", repr(payload))
         self.assertNotIn("encrypted", repr(payload))
+
+    def test_dashboard_lista_todas_as_contas_mt5_do_mesmo_cliente(self) -> None:
+        self._insert_account_with_profile(self.bob.id, "11112222")
+        self._insert_account_with_profile(self.bob.id, "33334444")
+
+        payload = self.service.dashboard()
+        bob = next(item for item in payload["users"] if item["id"] == self.bob.id)
+
+        self.assertEqual(len(bob["accounts"]), 2)
+        logins = sorted(account["masked_login"] for account in bob["accounts"])
+        self.assertEqual(logins, ["••••2222", "••••4444"])
 
     def test_alteracao_de_status_fica_auditada(self) -> None:
         grant_paid_access(self.database_path, self.bob.id)
@@ -203,12 +216,13 @@ class AdminPanelTests(unittest.TestCase):
             terminal_manager=terminal_manager,
         )
 
-        result = service.delete_client_mt5_accounts(
+        result = service.delete_single_mt5_account(
             admin_telegram_user_id=9001,
             target_user_id=self.bob.id,
+            account_id=account_id,
         )
 
-        self.assertEqual(result["removed_account_ids"], [account_id])
+        self.assertEqual(result["removed_account_id"], account_id)
         self.assertFalse(account_dir.exists())
         with connect_database(self.database_path) as connection:
             remaining = connection.execute(
@@ -219,18 +233,50 @@ class AdminPanelTests(unittest.TestCase):
                 """
                 SELECT action_type, target_user_id
                 FROM admin_actions
-                WHERE action_type = 'admin_panel_delete_mt5_accounts'
+                WHERE action_type = 'admin_panel_delete_mt5_account'
                 """
             ).fetchone()
         self.assertEqual(remaining, 0)
-        self.assertEqual(tuple(action), ("admin_panel_delete_mt5_accounts", self.bob.id))
+        self.assertEqual(tuple(action), ("admin_panel_delete_mt5_account", self.bob.id))
+
+    def test_excluir_uma_conta_nao_afeta_outra_conta_do_mesmo_cliente(self) -> None:
+        from telegram_mt5_copier.mt5.terminal_manager import TerminalManager
+
+        account_a = self._insert_account_with_profile(self.bob.id, "778899")
+        account_b = self._insert_account_with_profile(self.bob.id, "998877")
+        base_dir = Path(self.temp_dir.name) / "mt5accounts_multi"
+        terminal_manager = TerminalManager(base_dir)
+        accounts = MT5AccountService(self.database_path)
+        service = AdminPanelService(
+            self.database_path,
+            bot_token=self.token,
+            admin_ids=(9001,),
+            mt5_accounts=accounts,
+            terminal_manager=terminal_manager,
+        )
+
+        service.delete_single_mt5_account(
+            admin_telegram_user_id=9001,
+            target_user_id=self.bob.id,
+            account_id=account_a,
+        )
+
+        with connect_database(self.database_path) as connection:
+            remaining_ids = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT id FROM mt5_accounts WHERE user_id = ?", (self.bob.id,)
+                )
+            ]
+        self.assertEqual(remaining_ids, [account_b])
 
     def test_excluir_conta_mt5_sem_dependencias_configuradas_falha(self) -> None:
-        self._insert_account_with_profile(self.bob.id, "778899")
+        account_id = self._insert_account_with_profile(self.bob.id, "778899")
         with self.assertRaises(ValueError):
-            self.service.delete_client_mt5_accounts(
+            self.service.delete_single_mt5_account(
                 admin_telegram_user_id=9001,
                 target_user_id=self.bob.id,
+                account_id=account_id,
             )
 
     def test_status_invalido_e_rejeitado(self) -> None:

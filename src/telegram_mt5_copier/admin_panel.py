@@ -125,6 +125,26 @@ class AdminPanelService:
                 ORDER BY u.id DESC
                 """
             ).fetchall()
+            account_rows = connection.execute(
+                """
+                SELECT
+                    a.user_id, a.id, a.account_alias, a.login, a.server_name, a.account_type,
+                    a.connection_status, a.balance, a.equity, a.worker_heartbeat_at, a.last_error,
+                    p.risk_mode, p.fixed_lot, p.risk_percent,
+                    p.daily_profit_target, p.daily_loss_limit, p.max_open_signals,
+                    (SELECT COUNT(*) FROM execution_groups g WHERE g.mt5_account_id = a.id),
+                    (
+                        SELECT COUNT(*) FROM execution_groups g
+                        WHERE g.mt5_account_id = a.id
+                          AND g.status IN ('pending_submission', 'pending_active')
+                    ),
+                    (SELECT MAX(g.created_at) FROM execution_groups g WHERE g.mt5_account_id = a.id)
+                FROM mt5_accounts a
+                LEFT JOIN execution_profiles p
+                    ON p.user_id = a.user_id AND p.mt5_account_id = a.id
+                ORDER BY a.id ASC
+                """
+            ).fetchall()
             payment_rows = connection.execute(
                 """
                 SELECT id, user_id, amount, paid_at, method, reference, status
@@ -134,6 +154,12 @@ class AdminPanelService:
             ).fetchall()
 
         users = [admin_user_payload(row) for row in rows]
+        accounts_by_user: dict[int, list[dict[str, object]]] = {}
+        for account_row in account_rows:
+            bucket = accounts_by_user.setdefault(int(account_row[0]), [])
+            bucket.append(admin_account_payload(account_row))
+        for user in users:
+            user["accounts"] = accounts_by_user.get(int(user["id"]), [])
         payments_by_user: dict[int, list[dict[str, object]]] = {}
         for payment in payment_rows:
             bucket = payments_by_user.setdefault(int(payment[1]), [])
@@ -360,47 +386,46 @@ class AdminPanelService:
             )
             cursor.close()
 
-    def delete_client_mt5_accounts(
+    def delete_single_mt5_account(
         self,
         *,
         admin_telegram_user_id: int,
         target_user_id: int,
+        account_id: int,
     ) -> dict[str, object]:
-        """Apaga as contas MT5 do cliente e fecha o terminal delas na VPS.
+        """Apaga uma conta MT5 do cliente e fecha o terminal dela na VPS.
 
         Diferente de pausar (que só libera a vaga e mantém tudo reversível),
-        isto é definitivo: apaga as contas do banco, encerra o processo do
+        isto é definitivo: apaga a conta do banco, encerra o processo do
         terminal MT5 se estiver rodando e apaga a pasta isolada dele na VPS,
         liberando RAM/CPU/disco de verdade. Não apaga o cadastro do cliente
-        (Telegram, financeiro) — só as contas MT5 dele, para que ele possa
-        cadastrar uma conta nova depois se precisar.
+        (Telegram, financeiro) nem as outras contas MT5 dele — um cliente pode
+        ter mais de uma conta cadastrada no mesmo Telegram, e excluir uma não
+        deve afetar as demais.
         """
         if self.mt5_accounts is None or self.terminal_manager is None:
             raise ValueError("Exclusão de contas MT5 não está disponível nesta instância.")
         self._require_user(target_user_id)
         with connect_database(self.database_path) as connection:
-            cursor = connection.execute(
-                "SELECT id FROM mt5_accounts WHERE user_id = ?",
-                (target_user_id,),
-            )
-            try:
-                account_ids = [int(row[0]) for row in cursor.fetchall()]
-            finally:
-                cursor.close()
-        for account_id in account_ids:
-            self.terminal_manager.remove_account_terminal(account_id)
-            self.mt5_accounts.remove_account(target_user_id, account_id)
+            row = connection.execute(
+                "SELECT id FROM mt5_accounts WHERE id = ? AND user_id = ?",
+                (account_id, target_user_id),
+            ).fetchone()
+        if row is None:
+            raise ValueError("Conta MT5 não encontrada para este cliente.")
+        self.terminal_manager.remove_account_terminal(account_id)
+        self.mt5_accounts.remove_account(target_user_id, account_id)
         users = UserRepository(self.database_path)
         try:
             users.log_admin_action(
                 admin_telegram_user_id=admin_telegram_user_id,
                 target_user_id=target_user_id,
-                action_type="admin_panel_delete_mt5_accounts",
-                payload={"account_ids": account_ids, "source": "admin_panel"},
+                action_type="admin_panel_delete_mt5_account",
+                payload={"account_id": account_id, "source": "admin_panel"},
             )
         finally:
             users.close()
-        return {"user_id": target_user_id, "removed_account_ids": account_ids}
+        return {"user_id": target_user_id, "removed_account_id": account_id}
 
     def approve_paid_access(
         self,
@@ -645,6 +670,34 @@ class AdminPanelService:
             users.close()
 
 
+def admin_account_payload(row: tuple[object, ...]) -> dict[str, object]:
+    return {
+        "id": int(row[1]),
+        "alias": str(row[2]),
+        "masked_login": mask_login(str(row[3])),
+        "server": str(row[4]),
+        "type": str(row[5]),
+        "connection_status": str(row[6]),
+        "balance": decimal_text(row[7]),
+        "equity": decimal_text(row[8]),
+        "worker_heartbeat_at": str(row[9]) if row[9] else None,
+        "last_error": str(row[10]) if row[10] else None,
+        "profile": None
+        if row[11] is None
+        else {
+            "risk_mode": str(row[11]),
+            "fixed_lot": decimal_text(row[12]),
+            "risk_percent": decimal_text(row[13]),
+            "daily_profit_target": decimal_text(row[14]),
+            "daily_loss_limit": decimal_text(row[15]),
+            "max_open_signals": int(row[16]),
+        },
+        "execution_count": int(row[17] or 0),
+        "active_group_count": int(row[18] or 0),
+        "last_execution_at": str(row[19]) if row[19] else None,
+    }
+
+
 def admin_user_payload(row: tuple[object, ...]) -> dict[str, object]:
     account_id = int(row[6]) if row[6] is not None else None
     return {
@@ -886,6 +939,9 @@ def render_admin_panel(
     .status.pending {{ color: var(--yellow); background: rgba(242,189,79,.1); }}
     .status.exempt, .status.cancelled {{ color: var(--muted); background: rgba(143,168,194,.1); }}
     .account-name {{ color: var(--text); font-weight: 750; }}
+    .accounts-list {{ display: flex; flex-direction: column; gap: 10px; }}
+    .account-block {{ border-left: 2px solid var(--line); padding-left: 10px; display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }}
+    .account-block .action {{ align-self: flex-start; padding: 6px 10px; font-size: 13px; }}
     .money {{ color: var(--text); }}
     .actions {{ display: flex; flex-direction: column; gap: 8px; min-width: 112px; }}
     .action {{ border: 0; border-radius: 11px; padding: 10px 12px; cursor: pointer; font-weight: 800; }}
@@ -1258,10 +1314,21 @@ def render_admin_script() -> str:
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
+  function userAccounts(user) {
+    if (user.accounts && user.accounts.length) { return user.accounts; }
+    return user.account ? [user.account] : [];
+  }
+
   function matches(user) {
     if (state.filter === "active" && user.status !== "active") { return false; }
     if (state.filter === "paused" && user.status !== "paused") { return false; }
-    if (state.filter === "attention" && user.account && user.account.connection_status === "connected" && !user.account.last_error) { return false; }
+    var accounts = userAccounts(user);
+    if (state.filter === "attention") {
+      var needsAttention = accounts.some(function (account) {
+        return account.connection_status !== "connected" || account.last_error;
+      });
+      if (!needsAttention) { return false; }
+    }
     if (state.filter === "overdue" && user.billing.effective_status !== "overdue") { return false; }
     if (state.filter === "pending" && user.billing.effective_status !== "pending") { return false; }
     if (state.filter === "due_soon") {
@@ -1271,34 +1338,44 @@ def render_admin_script() -> str:
       var days = Math.round((due - today) / 86400000);
       if (days < 0 || days > 7) { return false; }
     }
-    var account = user.account || {};
     var billing = user.billing || {};
-    var haystack = [
-      user.username, user.telegram_user_id, account.alias, account.masked_login,
-      account.server, billing.customer_name, billing.email, billing.phone,
-      billing.plan_name
-    ].join(" ").toLowerCase();
+    var accountFields = accounts.reduce(function (acc, account) {
+      return acc.concat([account.alias, account.masked_login, account.server]);
+    }, []);
+    var haystack = [user.username, user.telegram_user_id]
+      .concat(accountFields)
+      .concat([billing.customer_name, billing.email, billing.phone, billing.plan_name])
+      .join(" ").toLowerCase();
     return !state.query || haystack.indexOf(state.query) !== -1;
   }
 
+  function accountBlock(user, account) {
+    var profile = account.profile;
+    var accountHtml =
+      '<div><div class="account-name">' + esc(account.alias) + ' · ' + esc(account.masked_login) + '</div>' +
+      '<div class="detail">' + esc(account.server) + '<br><span class="status ' + esc(account.connection_status) + '">' + esc(statusLabel(account.connection_status)) + '</span>' +
+      '<br>Saldo <span class="money">' + money(account.balance) + '</span> · Equity <span class="money">' + money(account.equity) + '</span>' +
+      (account.last_error ? '<br><span style="color:var(--red)">' + esc(account.last_error) + '</span>' : '') +
+      '</div></div>';
+    var profileHtml = profile
+      ? '<div class="detail">Gestão: ' + esc(profile.risk_mode) + '<br>Lote: ' + esc(profile.fixed_lot || "—") +
+        ' · Risco: ' + esc(profile.risk_percent || "—") + '%<br>Máx. sinais: ' + esc(profile.max_open_signals) +
+        ' · Ativos: ' + esc(account.active_group_count) + '<br>Última execução: ' + dateTime(account.last_execution_at) + '</div>'
+      : '<div class="detail">Perfil operacional ainda não criado.<br>Execuções registradas: ' + esc(account.execution_count) + '</div>';
+    return '<div class="account-block">' + accountHtml + profileHtml +
+      '<button class="action danger" type="button" data-delete-mt5-account="' + esc(account.id) + '" data-delete-mt5-user="' + esc(user.id) + '">Excluir</button>' +
+      '</div>';
+  }
+
   function userCard(user) {
-    var account = user.account;
-    var profile = user.profile;
+    var accounts = userAccounts(user);
     var billing = user.billing || {};
     var access = user.access || {};
     var nextStatus = user.status === "active" ? "paused" : "active";
     var actionLabel = nextStatus === "active" ? (access.entitlement_valid ? "Reativar" : "Aprovar") : "Pausar";
-    var accountHtml = account
-      ? '<div><div class="account-name">' + esc(account.alias) + ' · ' + esc(account.masked_login) + '</div>' +
-        '<div class="detail">' + esc(account.server) + '<br><span class="status ' + esc(account.connection_status) + '">' + esc(statusLabel(account.connection_status)) + '</span>' +
-        '<br>Saldo <span class="money">' + money(account.balance) + '</span> · Equity <span class="money">' + money(account.equity) + '</span></div></div>'
+    var accountsHtml = accounts.length
+      ? '<div class="accounts-list">' + accounts.map(function (account) { return accountBlock(user, account); }).join("") + '</div>'
       : '<div><div class="account-name">Sem conta MT5</div><div class="detail">Aguardando cadastro do cliente.</div></div>';
-    var profileHtml = profile
-      ? '<div class="detail">Gestão: ' + esc(profile.risk_mode) + '<br>Lote: ' + esc(profile.fixed_lot || "—") +
-        ' · Risco: ' + esc(profile.risk_percent || "—") + '%<br>Máx. sinais: ' + esc(profile.max_open_signals) +
-        ' · Ativos: ' + esc(user.active_group_count) + '<br>Última execução: ' + dateTime(user.last_execution_at) + '</div>'
-      : '<div class="detail">Perfil operacional ainda não criado.<br>Execuções registradas: ' + esc(user.execution_count) + '</div>';
-    var errorHtml = account && account.last_error ? '<br><span style="color:var(--red)">' + esc(account.last_error) + '</span>' : "";
     var billingHtml =
       '<div class="detail"><span class="status ' + esc(billing.effective_status) + '">' +
       esc(statusLabel(billing.effective_status)) + '</span><br>' +
@@ -1314,19 +1391,16 @@ def render_admin_script() -> str:
       : '<button class="action ' + (nextStatus === "active" ? "activate" : "pause") +
         '" type="button" data-action-status="' + nextStatus + '" data-user-id="' + esc(user.id) + '">' +
         actionLabel + '</button>';
-    var deleteMt5Action = account
-      ? '<button class="action danger" type="button" data-delete-mt5-user="' + esc(user.id) + '">Excluir MT5</button>'
-      : '';
     return '<article class="user-card" data-user-id="' + esc(user.id) + '">' +
       '<div class="user-main">' +
         '<div class="identity"><h2>' + esc(user.username ? "@" + user.username : "Cliente #" + user.id) + '</h2>' +
           '<div class="meta">Telegram ' + esc(user.telegram_user_id) + ' · Cadastro ' + dateTime(user.created_at) + '</div>' +
-          '<span class="status ' + esc(user.status) + '">' + esc(statusLabel(user.status)) + '</span>' + errorHtml +
+          '<span class="status ' + esc(user.status) + '">' + esc(statusLabel(user.status)) + '</span>' +
         '</div>' +
-        accountHtml + profileHtml + billingHtml +
+        accountsHtml + billingHtml +
         '<div class="actions">' + primaryAction +
           '<button class="action finance" type="button" data-finance-user="' + esc(user.id) + '">Financeiro</button>' +
-          deleteMt5Action + '</div>' +
+        '</div>' +
       '</div></article>';
   }
 
@@ -1470,22 +1544,25 @@ def render_admin_script() -> str:
       .finally(function () { state.busy = false; button.disabled = false; });
   }
 
-  function deleteMt5Account(userId, button) {
+  function deleteMt5Account(userId, accountId, button) {
     if (state.busy) { return; }
     var user = userById(userId);
+    var account = user ? userAccounts(user).find(function (item) { return String(item.id) === String(accountId); }) : null;
+    var accountLabel = account ? account.alias + " · " + account.masked_login : "esta conta MT5";
     var name = user ? (user.username ? "@" + user.username : "Cliente #" + user.id) : "este cliente";
     var confirmed = window.confirm(
-      "Excluir a conta MT5 de " + name + "?\n\n" +
-      "Isto apaga a conta do banco, encerra o terminal MT5 dele na VPS e libera " +
+      "Excluir a conta " + accountLabel + " de " + name + "?\n\n" +
+      "Isto apaga a conta do banco, encerra o terminal MT5 dela na VPS e libera " +
       "a vaga para outro cliente. Não é possível desfazer — o cliente vai " +
-      "precisar cadastrar uma conta nova para voltar a operar."
+      "precisar cadastrar essa conta de novo para voltar a operar nela."
     );
     if (!confirmed) { return; }
     state.busy = true;
     button.disabled = true;
-    post("/api/admin/user-mt5-delete", authFields({
+    post("/api/admin/mt5-account-delete", authFields({
       csrf_token: state.csrf,
-      user_id: userId
+      user_id: userId,
+      account_id: accountId
     })).then(reloadDashboard)
       .catch(function (error) { showError(error.message || "Não foi possível excluir a conta MT5."); })
       .finally(function () { state.busy = false; button.disabled = false; });
@@ -1608,9 +1685,13 @@ def render_admin_script() -> str:
       changeStatus(button.getAttribute("data-user-id"), button.getAttribute("data-action-status"), button);
       return;
     }
-    var deleteMt5 = event.target.closest("[data-delete-mt5-user]");
+    var deleteMt5 = event.target.closest("[data-delete-mt5-account]");
     if (deleteMt5) {
-      deleteMt5Account(deleteMt5.getAttribute("data-delete-mt5-user"), deleteMt5);
+      deleteMt5Account(
+        deleteMt5.getAttribute("data-delete-mt5-user"),
+        deleteMt5.getAttribute("data-delete-mt5-account"),
+        deleteMt5
+      );
       return;
     }
     var finance = event.target.closest("[data-finance-user]");
