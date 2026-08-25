@@ -116,6 +116,11 @@ class SymbolResolverTests(unittest.TestCase):
 
         self.assertEqual(resolver.resolve("XAUUSD"), "GOLD")
 
+    def test_aceita_gold_spot_como_nome_do_ativo_na_fxglobe(self) -> None:
+        resolver = SymbolResolver(StrictSymbolClient(("Gold_Spot",)))
+
+        self.assertEqual(resolver.resolve("XAUUSD"), "Gold_Spot")
+
     def test_descobre_sufixo_da_corretora_em_par_forex(self) -> None:
         resolver = SymbolResolver(StrictSymbolClient(("CADCHFb",)))
 

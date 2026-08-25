@@ -8,7 +8,18 @@ class SymbolResolver:
         self.client = client or SimulatedMT5Client()
 
     def resolve(self, base_symbol: str = "XAUUSD") -> str:
-        aliases = (base_symbol, "GOLD") if base_symbol.upper() == "XAUUSD" else (base_symbol,)
+        # "GOLD" catches most brokers whose gold symbol has no "XAUUSD" in it
+        # at all, via the discovery fallback below matching anything that
+        # starts with it. FXGlobe's exact symbol name, "Gold_Spot", is
+        # listed directly instead of relying only on that fallback, since
+        # a symbol lookup for a specific real broker is worth guaranteeing
+        # rather than leaving to a wildcard search over the terminal's
+        # current symbol list.
+        aliases = (
+            (base_symbol, "GOLD", "Gold_Spot")
+            if base_symbol.upper() == "XAUUSD"
+            else (base_symbol,)
+        )
         suffixes = ("", ".", "m", "b", ".r", "_i")
         candidates = tuple(
             f"{alias}{suffix}"
