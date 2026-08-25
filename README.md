@@ -690,6 +690,29 @@ conta com problema. Agora cada conta é processada dentro do seu próprio
 bloco isolado: um erro numa conta é registrado no log e a próxima conta
 continua sendo processada normalmente no mesmo ciclo.
 
+Esse isolamento por exceção não cobre travamento: se a chamada ao MT5 de
+uma conta ficar presa esperando resposta (terminal lento, corretora
+instável), o processo fica bloqueado ali dentro sem nunca lançar uma
+exceção — nada é registrado no log, e nenhuma outra conta é processada
+enquanto isso, porque continuam todas no mesmo processo, em sequência. A
+partir da versão `0.43.0`, o `telegram-mt5-worker` deixou de gerenciar
+todas as contas dentro de um único processo. Em vez disso, o serviço
+"Worker MT5" do supervisor agora é o `telegram-mt5-worker-pool`, que
+sobe **um processo `telegram-mt5-worker --account-id <id>` por conta
+ativa** e monitora cada um: se o processo cair, reinicia com a mesma
+espera progressiva do supervisor; se o heartbeat da conta (`worker_heartbeat_at`
+no banco) ficar parado por mais de 90 segundos com o processo ainda de pé
+— sinal de que travou numa chamada ao MT5 e nunca mais vai sozinho — o pool
+mata e reinicia o processo à força. Como o pacote `MetaTrader5` só suporta
+uma conexão de terminal por processo, essa é a única forma de isolar de
+verdade: mesmo travado, um processo por conta nunca consegue bloquear o
+processo de nenhuma outra conta.
+
+Cada conta grava seu próprio log em `LOG_DIR/mt5-worker-account-<id>.log`;
+o coordenador do pool grava o dele em `LOG_DIR/mt5-worker-pool.log`, além
+de aparecer também em `supervisor-mt5-worker.log` (capturado pelo
+supervisor como qualquer outro serviço).
+
 Como o MetaTrader 5 precisa da sessão gráfica do Windows, a automação usa uma
 tarefa no login do usuário da VPS, e não a conta `SYSTEM` da sessão 0. Depois
 do login, a conexão RDP pode ser apenas desconectada; não use **Sair**, pois

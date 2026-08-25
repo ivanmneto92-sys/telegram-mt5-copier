@@ -260,7 +260,7 @@ def default_service_specs(
         ("mini-app", "telegram-mt5-onboarding"),
         ("management-bot", "telegram-management-bot"),
         ("signal-monitor", "telegram-copier"),
-        ("mt5-worker", "telegram-mt5-worker"),
+        ("mt5-worker", "telegram-mt5-worker-pool"),
     )
     if include_health_monitor:
         executable_names += (("health-monitor", "telegram-mt5-health-monitor"),)

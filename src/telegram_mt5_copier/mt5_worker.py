@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import logging
 import sys
 import time
@@ -63,7 +64,21 @@ def process_account(
         print(f"Falha ao processar conta {account.id}: {exc}", file=sys.stderr)
 
 
-def main() -> int:
+def run(only_account_id: int | None = None) -> int:
+    """Run the position-management loop.
+
+    With only_account_id=None, manages every active account of this
+    instance in one process (legacy, single-process mode). With an account
+    id, manages exactly that one account and exits as soon as it stops
+    being active -- this is the mode telegram-mt5-worker-pool spawns one
+    subprocess per account with, since the MetaTrader5 package only
+    supports a single live terminal connection per process: two accounts
+    can never truly run in parallel inside one process, only take turns.
+    Running them as separate processes is what makes a hang on one
+    account's terminal (which no exception handler can interrupt, since the
+    process is blocked inside a native IPC call) unable to freeze every
+    other account too.
+    """
     try:
         logging.basicConfig(
             level=logging.INFO,
@@ -108,6 +123,11 @@ def main() -> int:
                     account.id: (account, profile)
                     for account, profile in accounts.accounts_for_active_users()
                 }
+                if only_account_id is not None:
+                    if only_account_id not in active_accounts:
+                        return 0
+                    active_accounts = {only_account_id: active_accounts[only_account_id]}
+
                 for account_id in tuple(workers):
                     if account_id not in active_accounts:
                         workers.pop(account_id).close()
@@ -141,6 +161,18 @@ def main() -> int:
     except Exception as exc:
         print(f"Falha no worker MT5: {exc}", file=sys.stderr)
         return 2
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="telegram-mt5-worker")
+    parser.add_argument(
+        "--account-id",
+        type=int,
+        default=None,
+        help="Gerencia apenas esta conta e sai quando ela deixar de estar ativa.",
+    )
+    args = parser.parse_args()
+    return run(args.account_id)
 
 
 if __name__ == "__main__":
