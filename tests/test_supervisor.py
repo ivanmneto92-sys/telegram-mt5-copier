@@ -122,6 +122,22 @@ class SupervisorTests(unittest.TestCase):
         finally:
             first.close()
 
+    def test_lock_com_pid_morto_nao_bloqueia_nova_instancia(self) -> None:
+        # A leftover lock file naming a PID that isn't running anymore (the
+        # previous owner crashed, or the whole machine rebooted) must not
+        # block a fresh acquire -- that produced exactly this on a real VPS
+        # after a reboot: SupervisorAlreadyRunningError forever, because the
+        # stale PID from before the reboot happened to already be reused by
+        # an unrelated process by the time the service came back up.
+        lock_path = self.root / "supervisor.lock"
+        lock_path.write_text("999999999", encoding="ascii")
+
+        lock = SupervisorLock(lock_path)
+        try:
+            lock.acquire()
+        finally:
+            lock.close()
+
     def test_alerta_falha_uma_vez_e_recuperacao_apos_estabilidade(self) -> None:
         alerts: list[str] = []
         self.supervisor.alert_callback = lambda message: not alerts.append(message)

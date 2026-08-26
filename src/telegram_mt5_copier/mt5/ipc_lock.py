@@ -28,17 +28,7 @@ class MT5OperationLock:
                 time.sleep(0.2)
 
     def _remove_if_stale(self) -> bool:
-        try:
-            pid = int(self.path.read_text(encoding="utf-8").strip())
-        except (OSError, ValueError):
-            pid = 0
-        if pid and process_is_running(pid):
-            return False
-        try:
-            self.path.unlink()
-        except FileNotFoundError:
-            pass
-        return True
+        return clear_stale_lock(self.path)
 
     def close(self) -> None:
         if self._fd is not None:
@@ -74,6 +64,52 @@ def process_is_running(pid: int) -> bool:
         return True
     except (OSError, ProcessLookupError):
         return False
+
+
+def clear_stale_lock(lock_path: Path) -> bool:
+    """Removes lock_path if its owning process is no longer really alive.
+
+    Returns True once the path is free to (re)acquire -- it never existed,
+    or was removed because its owner is gone. Returns False if a live
+    process still holds it.
+
+    A numeric PID comparison alone is not reliable on Windows: PIDs get
+    reused quickly, especially right after a reboot when many system
+    processes spin up with low numbers in a burst. A lock file left over
+    from before that reboot, still holding a PID like 7812, can end up
+    matching some unrelated process that happens to get that same number
+    reassigned to it minutes later -- "resurrecting" a lock that is
+    actually stale and blocking the real owner from ever starting again
+    until someone notices and deletes the file by hand. On Windows, a
+    live owner keeps its own lock file open without FILE_SHARE_DELETE, so
+    trying to unlink it and checking whether that succeeds distinguishes
+    real ownership from a stale PID far more reliably than comparing
+    numbers -- it asks the OS "is anyone holding this file open right
+    now", not "does a process with this old number exist right now". On
+    POSIX, os.kill(pid, 0) doesn't share that reuse-after-reboot failure
+    mode the same way, so the numeric PID check is kept there.
+    """
+    if not lock_path.exists():
+        return True
+    if sys.platform == "win32":
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        return True
+    try:
+        pid = int(lock_path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        pid = 0
+    if pid and process_is_running(pid):
+        return False
+    try:
+        lock_path.unlink()
+    except FileNotFoundError:
+        pass
+    return True
 
 
 def terminate_process_by_path(exe_path: Path) -> bool:

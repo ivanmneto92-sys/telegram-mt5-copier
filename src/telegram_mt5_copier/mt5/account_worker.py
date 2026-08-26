@@ -3,13 +3,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import os
 from pathlib import Path
-import sys
 from typing import Callable
 
 from ..command_queue import Command, CommandQueue
 from .account_service import MT5AccountService
 from .models import MT5Account
-from .ipc_lock import process_is_running
+from .ipc_lock import clear_stale_lock
 
 
 class WorkerAlreadyRunningError(RuntimeError):
@@ -25,40 +24,14 @@ class AccountWorkerLock:
 
     def acquire(self) -> None:
         self.account_dir.mkdir(parents=True, exist_ok=True)
-        if self.lock_path.exists():
-            if sys.platform == "win32":
-                # A live worker keeps this file open on Windows. Trying to remove
-                # it distinguishes real ownership from a stale PID that Windows
-                # has already reused for an unrelated process.
-                try:
-                    self.lock_path.unlink()
-                except FileNotFoundError:
-                    pass
-                except OSError as exc:
-                    raise WorkerAlreadyRunningError(
-                        "Worker MT5 ja esta ativo para esta conta."
-                    ) from exc
-            else:
-                self._remove_stale_posix_lock()
+        if not clear_stale_lock(self.lock_path):
+            raise WorkerAlreadyRunningError("Worker MT5 ja esta ativo para esta conta.")
         try:
             self._fd = os.open(str(self.lock_path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
         except FileExistsError as exc:
             raise WorkerAlreadyRunningError("Worker MT5 ja esta ativo para esta conta.") from exc
         os.write(self._fd, str(os.getpid()).encode("ascii"))
         self.heartbeat()
-
-    def _remove_stale_posix_lock(self) -> None:
-        if self.lock_path.exists():
-            try:
-                existing_pid = int(self.lock_path.read_text(encoding="utf-8").strip())
-            except (OSError, ValueError):
-                existing_pid = 0
-            if existing_pid and process_is_running(existing_pid):
-                raise WorkerAlreadyRunningError("Worker MT5 ja esta ativo para esta conta.")
-            try:
-                self.lock_path.unlink()
-            except FileNotFoundError:
-                pass
 
     def heartbeat(self) -> None:
         self.heartbeat_path.write_text(datetime.now(tz=timezone.utc).isoformat(), encoding="utf-8")

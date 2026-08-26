@@ -749,6 +749,27 @@ encerra também o `terminal64.exe` daquela conta (pela mesma rotina que já
 fecha o terminal ao excluir uma conta MT5 pelo painel admin) sempre que mata
 ou detecta a saída de um worker, então o próximo já sobe limpo.
 
+`SupervisorLock` (a trava que impede duas instâncias do supervisor ou do
+monitor de sinais rodando ao mesmo tempo) e `MT5OperationLock` (a trava por
+conta usada durante cada chamada ao MT5) tinham a mesma limitação que o
+`worker.lock` das contas tinha antes da `0.44.3`: no Windows, elas só
+comparavam o PID gravado no arquivo contra os processos vivos no momento,
+sem checar se aquele PID realmente ainda era o dono original. Depois de um
+reboot da VPS, isso conseguia travar o monitor de sinais inteiro sozinho: o
+Windows reaproveita PIDs baixos rapidamente logo na inicialização, então um
+arquivo de trava deixado de antes do reboot, com um PID de um processo que
+já não existe mais, podia coincidir com um processo qualquer e não
+relacionado que recebeu aquele mesmo número minutos depois — o serviço
+achava que ainda havia um dono legítimo e ficava recusando iniciar,
+reiniciando sem parar (`Supervisor ja esta ativo no processo <pid>`), sem
+nunca sinalizar sinais novos do Telegram até alguém notar e apagar o
+arquivo à mão. A partir da versão `0.44.4`, as três travas de arquivo do
+sistema (contas, supervisor e chamadas ao MT5) usam a mesma checagem
+robusta: no Windows, tentam apagar o arquivo antes de assumir que ele está
+livre — se um dono de verdade ainda o mantém aberto, apagar falha (sem
+`FILE_SHARE_DELETE`), o que distingue posse real de um PID reciclado sem
+depender do número em si.
+
 Cada conta grava seu próprio log em `LOG_DIR/mt5-worker-account-<id>.log`;
 o coordenador do pool grava o dele em `LOG_DIR/mt5-worker-pool.log`, além
 de aparecer também em `supervisor-mt5-worker.log` (capturado pelo

@@ -12,7 +12,7 @@ import time
 from typing import BinaryIO, Callable
 
 from .config import AppConfig
-from .mt5.ipc_lock import process_is_running
+from .mt5.ipc_lock import clear_stale_lock
 from .telegram_notifier import TelegramAdminNotifier
 
 
@@ -49,16 +49,10 @@ class SupervisorLock:
 
     def acquire(self) -> None:
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
-        if self.lock_path.exists():
-            try:
-                existing_pid = int(self.lock_path.read_text(encoding="ascii").strip())
-            except (OSError, ValueError):
-                existing_pid = 0
-            if existing_pid and process_is_running(existing_pid):
-                raise SupervisorAlreadyRunningError(
-                    f"Supervisor ja esta ativo no processo {existing_pid}."
-                )
-            self.lock_path.unlink(missing_ok=True)
+        if not clear_stale_lock(self.lock_path):
+            raise SupervisorAlreadyRunningError(
+                f"Supervisor ja esta ativo (trava presa em {self.lock_path})."
+            )
         self._fd = os.open(
             str(self.lock_path),
             os.O_CREAT | os.O_EXCL | os.O_RDWR,
