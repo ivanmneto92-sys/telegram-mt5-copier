@@ -415,6 +415,23 @@ aberta e com a pausa diária já em vigor, o Worker para de reconsultar o
 histórico do MT5 e de reescrever a mesma pausa — só volta a checar de verdade
 quando aparecer posição ou ordem pendente nova para aquela conta.
 
+A partir da versão `0.44.2`, a validação que bloqueia um novo sinal por meta
+ou limite diário passa a somar também o resultado flutuante das posições do
+copiador já abertas, não só os negócios já fechados no dia. Antes, essa
+checagem de entrada olhava apenas o histórico de negócios fechados: uma conta
+com, por exemplo, -$20 já realizados e -$15 flutuando numa posição do
+copiador ainda aberta já estava, na prática, além de um limite de -$30, mas
+um novo sinal ainda podia ser aceito, porque a soma que decide a entrada
+não enxergava aquela posição aberta — só a trava reativa do Worker (que roda
+a cada varredura, cerca de uma vez por segundo) fecharia tudo depois. Entre
+o sinal ser aceito e essa próxima varredura rodar, dava para acumular mais
+prejuízo além do limite configurado. Agora a mesma soma (realizado + posições
+do copiador em aberto) que a trava reativa usa para fechar tudo também é
+usada para decidir se um novo sinal entra, então a entrada já é bloqueada no
+mesmo instante em que a trava reativa fecharia a exposição — sem depender da
+próxima varredura. Posições sem o `magic` do copiador (operações manuais do
+cliente) continuam de fora dessa soma nos dois casos, como já era.
+
 Em `⚙️ Configurações > 🎯 Execução do sinal > Quantidade de TPs`, o usuário escolhe os primeiros 1, 2, 3 ou 4 alvos do sinal, ou todos os alvos disponíveis. O lote total configurado é dividido somente entre os TPs selecionados. A seleção não inventa alvos quando o sinal possui menos TPs.
 
 O `telegram-mt5-worker` detecta quando o TP1 é atingido usando o preço atual e o histórico do MT5, inclusive após uma breve reconexão. Em `🛡️ Proteções > 🎯 BE após TP1`, cada cliente escolhe se o Stop Loss das posições restantes deve ser movido para o preço real de entrada. A preferência começa ativada para preservar o comportamento existente. Ordens daquele grupo que ainda não foram ativadas são canceladas após o TP1 para evitar entradas tardias em um sinal já desenvolvido. A proteção é aplicada apenas a posições do copiador, identificadas por `magic` e comentário; operações manuais não são alteradas. O BE antecipado em 1R e o trailing são preferências separadas e complementares.

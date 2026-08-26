@@ -560,6 +560,19 @@ def validate_operational_limits(
             continue
         for field_name in ("profit", "commission", "swap", "fee"):
             daily_result += Decimal(str(result_value(deal, field_name, 0) or 0))
+    # Realized-only accounting lets a new signal in while the account already
+    # carries an open copier position whose floating loss, added to what's
+    # already realized today, has crossed the limit: the reactive kill switch
+    # (position_manager._enforce_daily_result_limits) would close it on its
+    # next tick anyway, but that tick can lag a burst of incoming signals by
+    # enough for one more entry to land first. Counting floating P/L here too
+    # keeps this entry guard's view of "today's result" consistent with the
+    # kill switch's, instead of only catching up a tick later.
+    for position in client.positions_get():
+        if int(result_value(position, "magic", 0) or 0) != MT5_MAGIC_NUMBER:
+            continue
+        daily_result += Decimal(str(result_value(position, "profit", 0) or 0))
+        daily_result += Decimal(str(result_value(position, "swap", 0) or 0))
     if profile.daily_profit_target > 0 and daily_result >= profile.daily_profit_target:
         raise OrderValidationError("daily_profit_target_reached")
     if profile.daily_loss_limit > 0 and daily_result <= -profile.daily_loss_limit:

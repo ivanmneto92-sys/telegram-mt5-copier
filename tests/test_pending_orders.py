@@ -522,6 +522,57 @@ class PendingOrderTests(unittest.TestCase):
         self.assertEqual(loss_result.group_result.rejected_reason, "daily_loss_limit_reached")
         self.assertFalse(loss_client.order_send_called)
 
+    def test_perda_flutuante_de_posicao_aberta_conta_para_o_limite_diario(self) -> None:
+        loss_profile = replace(
+            self.profile(), daily_loss_limit=Decimal("30"), max_open_signals=Decimal("0")
+        )
+        client = SimulatedMT5Client(
+            history_deals=({"magic": MT5_MAGIC_NUMBER, "profit": -20},),
+            positions=(
+                {
+                    "magic": MT5_MAGIC_NUMBER,
+                    "ticket": 9702,
+                    "symbol": "XAUUSD",
+                    "type": 0,
+                    "volume": 0.01,
+                    "profit": -15,
+                },
+            ),
+        )
+
+        result = self.executor(
+            client=client,
+            execution_mode="demo_execution",
+            global_kill_switch=False,
+        ).execute_for_account(parse_signal_text(BUY_SIGNAL).signal, self.account, loss_profile)
+
+        self.assertEqual(result.group_result.rejected_reason, "daily_loss_limit_reached")
+        self.assertFalse(client.order_send_called)
+
+    def test_perda_flutuante_de_posicao_manual_nao_conta_para_o_limite_diario(self) -> None:
+        loss_profile = replace(self.profile(), daily_loss_limit=Decimal("30"))
+        client = SimulatedMT5Client(
+            history_deals=({"magic": MT5_MAGIC_NUMBER, "profit": -20},),
+            positions=(
+                {
+                    "magic": 0,
+                    "ticket": 9703,
+                    "symbol": "XAUUSD",
+                    "type": 0,
+                    "volume": 0.01,
+                    "profit": -15,
+                },
+            ),
+        )
+
+        result = self.executor(
+            client=client,
+            execution_mode="demo_execution",
+            global_kill_switch=False,
+        ).execute_for_account(parse_signal_text(BUY_SIGNAL).signal, self.account, loss_profile)
+
+        self.assertNotEqual(result.group_result.rejected_reason, "daily_loss_limit_reached")
+
     def test_meta_diaria_pausa_novos_sinais_ate_as_23h(self) -> None:
         target_profile = replace(self.profile(), daily_profit_target=Decimal("50"))
         target_client = SimulatedMT5Client(
