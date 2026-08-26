@@ -12,6 +12,7 @@ from typing import BinaryIO, Callable
 
 from .config import AppConfig
 from .mt5.account_service import MT5AccountService
+from .mt5.ipc_lock import terminate_process_by_path
 from .supervisor import restart_delay, rotate_subprocess_log
 
 POOL_POLL_SECONDS = 5
@@ -34,6 +35,7 @@ class ChildState:
     next_start_at: float = 0.0
     last_heartbeat_seen: str | None = None
     last_progress_at: float = 0.0
+    terminal_path: Path | None = None
 
 
 class MT5WorkerPool:
@@ -82,8 +84,8 @@ class MT5WorkerPool:
         self.stop_all()
 
     def tick(self) -> None:
-        accounts_and_heartbeats = self._active_accounts()
-        active_ids = set(accounts_and_heartbeats)
+        accounts_info = self._active_accounts()
+        active_ids = set(accounts_info)
         now = self.clock()
 
         for account_id in tuple(self.children):
@@ -96,21 +98,23 @@ class MT5WorkerPool:
                 del self.children[account_id]
 
         for account_id in active_ids:
+            heartbeat, terminal_path = accounts_info[account_id]
             state = self.children.get(account_id)
             if state is None:
                 state = ChildState()
                 self.children[account_id] = state
+            state.terminal_path = terminal_path
             if state.process is None:
                 if now >= state.next_start_at:
                     self._start(account_id, state, now)
                 continue
-            self._check_health(account_id, state, accounts_and_heartbeats[account_id], now)
+            self._check_health(account_id, state, heartbeat, now)
 
-    def _active_accounts(self) -> dict[int, str | None]:
+    def _active_accounts(self) -> dict[int, tuple[str | None, Path | None]]:
         accounts = MT5AccountService(self.database_path)
         try:
             return {
-                account.id: account.worker_heartbeat_at
+                account.id: (account.worker_heartbeat_at, account.terminal_path)
                 for account, _ in accounts.accounts_for_active_users()
             }
         finally:
@@ -188,6 +192,13 @@ class MT5WorkerPool:
         state.next_start_at = now + delay
         self._close_log(state)
         state.process = None
+        if state.terminal_path is not None:
+            try:
+                terminate_process_by_path(state.terminal_path)
+            except Exception as exc:
+                self.logger.error(
+                    "Falha ao encerrar terminal orfao. conta=%s erro=%s", account_id, exc
+                )
         self.logger.warning(
             "Worker encerrado. conta=%s codigo=%s duracao=%.1fs reinicio=%ss",
             account_id,
@@ -200,23 +211,37 @@ class MT5WorkerPool:
         state = self.children.get(account_id)
         if state is None or state.process is None:
             return
-        if state.process.poll() is not None:
-            self._close_log(state)
-            state.process = None
-            return
-        try:
-            state.process.terminate()
-            state.process.wait(timeout=10)
-        except Exception:
+        already_exited = state.process.poll() is not None
+        if not already_exited:
             try:
-                state.process.kill()
-                state.process.wait(timeout=5)
-            except Exception as exc:
-                self.logger.error(
-                    "Falha ao encerrar worker. conta=%s erro=%s", account_id, exc
-                )
+                state.process.terminate()
+                state.process.wait(timeout=10)
+            except Exception:
+                try:
+                    state.process.kill()
+                    state.process.wait(timeout=5)
+                except Exception as exc:
+                    self.logger.error(
+                        "Falha ao encerrar worker. conta=%s erro=%s", account_id, exc
+                    )
         self._close_log(state)
         state.process = None
+        # subprocess.terminate()/kill() only reaches the worker's own PID.
+        # The MetaTrader5 package launches terminal64.exe as its own separate
+        # process, outside our process tree, so killing the worker never
+        # closes it. Left running, that orphaned terminal keeps holding its
+        # account folder's single-instance lock, so the next worker we spawn
+        # for this same account can never open its own terminal64.exe there
+        # -- MT5.initialize() fails with "Process create failed" and the
+        # account is stuck erroring forever, restart after restart, until
+        # someone notices and kills the leftover terminal by hand.
+        if state.terminal_path is not None:
+            try:
+                terminate_process_by_path(state.terminal_path)
+            except Exception as exc:
+                self.logger.error(
+                    "Falha ao encerrar terminal orfao. conta=%s erro=%s", account_id, exc
+                )
 
     def _close_log(self, state: ChildState) -> None:
         if state.log_handle is not None:

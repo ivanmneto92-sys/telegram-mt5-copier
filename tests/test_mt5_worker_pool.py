@@ -9,6 +9,7 @@ from telegram_mt5_copier.credential_service import CredentialService
 from telegram_mt5_copier.mt5.account_service import MT5AccountForm, MT5AccountService
 from telegram_mt5_copier.mt5.client import SimulatedMT5Client
 from telegram_mt5_copier.mt5.terminal_manager import TerminalManager
+import telegram_mt5_copier.mt5_worker_pool as mt5_worker_pool_module
 from telegram_mt5_copier.mt5_worker_pool import HANG_TIMEOUT_SECONDS, MT5WorkerPool
 from telegram_mt5_copier.users import UserRepository
 
@@ -141,6 +142,35 @@ class MT5WorkerPoolTests(unittest.TestCase):
 
         self.assertFalse(process.terminated)
         self.assertEqual(len(self.created), 1)
+
+    def test_reinicio_por_travamento_encerra_o_terminal_orfao(self) -> None:
+        from tests.access_helpers import grant_paid_access
+
+        user = self.users.get_or_create_user(606, "fabio")
+        grant_paid_access(self.database_path, user.id)
+        account = self.accounts.register_account(
+            user.id, MT5AccountForm("Broker", "Broker-Demo", "66666666", "secret", "F")
+        )
+        terminal_path = self.root / "mt5" / "6" / "terminal64.exe"
+        self.accounts.update_terminal_path(user.id, account.id, terminal_path)
+
+        terminated_paths: list[Path] = []
+        original = mt5_worker_pool_module.terminate_process_by_path
+        mt5_worker_pool_module.terminate_process_by_path = terminated_paths.append
+        try:
+            self.pool.tick()
+            self.now += HANG_TIMEOUT_SECONDS + 1
+            self.pool.tick()
+        finally:
+            mt5_worker_pool_module.terminate_process_by_path = original
+
+        # subprocess.terminate()/kill() only reaches the worker's own PID;
+        # MetaTrader5 launches terminal64.exe as a separate process outside
+        # our tree, so it is left running unless the pool kills it too. A
+        # leftover terminal keeps this account's folder locked, so the next
+        # worker can never open its own terminal64.exe there and the account
+        # is stuck erroring forever -- restart after restart.
+        self.assertEqual(terminated_paths, [terminal_path])
 
     def test_conta_pausada_encerra_o_worker(self) -> None:
         from tests.access_helpers import grant_paid_access

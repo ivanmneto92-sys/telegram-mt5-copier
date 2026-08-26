@@ -733,6 +733,22 @@ uma conexão de terminal por processo, essa é a única forma de isolar de
 verdade: mesmo travado, um processo por conta nunca consegue bloquear o
 processo de nenhuma outra conta.
 
+Matar o processo travado (à força ou por saída natural) só encerra o
+`telegram-mt5-worker --account-id <id>` em si; o pacote `MetaTrader5` sobe o
+`terminal64.exe` daquela conta como um processo próprio, fora da nossa
+árvore de processos, então ele ficava órfão e continuava rodando. A pasta do
+terminal só aceita uma instância por vez, então o próximo `telegram-mt5-worker`
+reiniciado para essa mesma conta não conseguia abrir o seu próprio
+`terminal64.exe` — a inicialização falhava com algo como `IPC initialize
+failed, Process create failed '...\terminal64.exe'`, a conta ficava sem
+proteção nenhuma (nem trava diária, nem BE, nem nada) e, sem heartbeat
+nunca avançando, o pool matava e reiniciava de novo a cada ~90s, para sempre,
+sem nunca conseguir abrir o terminal de novo — só um encerramento manual do
+`terminal64.exe` órfão resolvia. A partir da versão `0.44.3`, o pool
+encerra também o `terminal64.exe` daquela conta (pela mesma rotina que já
+fecha o terminal ao excluir uma conta MT5 pelo painel admin) sempre que mata
+ou detecta a saída de um worker, então o próximo já sobe limpo.
+
 Cada conta grava seu próprio log em `LOG_DIR/mt5-worker-account-<id>.log`;
 o coordenador do pool grava o dele em `LOG_DIR/mt5-worker-pool.log`, além
 de aparecer também em `supervisor-mt5-worker.log` (capturado pelo
