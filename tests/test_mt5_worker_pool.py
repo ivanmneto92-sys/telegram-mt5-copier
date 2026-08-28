@@ -96,6 +96,44 @@ class MT5WorkerPoolTests(unittest.TestCase):
         self.assertEqual(started_ids, {account_a.id, account_b.id})
         self.assertEqual(set(self.pool.children), {account_a.id, account_b.id})
 
+    def test_falha_ao_rotacionar_log_de_uma_conta_nao_impede_as_outras(self) -> None:
+        # A log file still held open by a leftover process from an earlier,
+        # already-dead pool run makes rotate_subprocess_log raise
+        # PermissionError on Windows (WinError 32). That used to escape
+        # _start() uncaught, crash the whole tick(), and take the entire
+        # pool down over one account -- no worker started for anyone, not
+        # just the one whose log wouldn't rotate.
+        from tests.access_helpers import grant_paid_access
+
+        user_a = self.users.get_or_create_user(707, "gilda")
+        grant_paid_access(self.database_path, user_a.id)
+        account_a = self.accounts.register_account(
+            user_a.id, MT5AccountForm("Broker", "Broker-Demo", "77777777", "secret", "G")
+        )
+        user_b = self.users.get_or_create_user(808, "hugo")
+        grant_paid_access(self.database_path, user_b.id)
+        account_b = self.accounts.register_account(
+            user_b.id, MT5AccountForm("Broker", "Broker-Demo", "88888888", "secret", "H")
+        )
+
+        original = mt5_worker_pool_module.rotate_subprocess_log
+
+        def exploding_rotate(log_path: Path) -> None:
+            if str(account_a.id) in log_path.name:
+                raise PermissionError("[WinError 32] arquivo em uso por outro processo")
+            original(log_path)
+
+        mt5_worker_pool_module.rotate_subprocess_log = exploding_rotate
+        try:
+            self.pool.tick()
+        finally:
+            mt5_worker_pool_module.rotate_subprocess_log = original
+
+        self.assertIsNone(self.pool.children[account_a.id].process)
+        self.assertGreater(self.pool.children[account_a.id].consecutive_failures, 0)
+        started_ids = {int(args[-1]) for _process, args in self.created}
+        self.assertEqual(started_ids, {account_b.id})
+
     def test_worker_travado_sem_heartbeat_e_reiniciado(self) -> None:
         from tests.access_helpers import grant_paid_access
 

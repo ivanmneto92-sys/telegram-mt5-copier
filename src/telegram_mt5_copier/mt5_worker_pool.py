@@ -121,11 +121,24 @@ class MT5WorkerPool:
             accounts.close()
 
     def _start(self, account_id: int, state: ChildState, now: float) -> None:
-        log_path = self.log_dir / f"mt5-worker-account-{account_id}.log"
-        rotate_subprocess_log(log_path)
-        state.log_handle = log_path.open("ab", buffering=0)
-        creation_flags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        # Everything here -- not just the Popen call -- has to stay inside
+        # this account's own try/except. Log rotation renaming a file that
+        # a leftover process from an earlier, already-dead pool run still
+        # has open (WinError 32 on Windows) used to escape uncaught all the
+        # way out of tick(), crashing the *entire* pool over one account's
+        # log file. Each crash-restart cycle then re-ran this same failing
+        # rotation on its very first tick for every active account, before
+        # ever spawning a single worker, in a tight loop -- and because a
+        # freshly started pool process has no memory of subprocesses an
+        # earlier, now-dead pool instance spawned, nothing ever went back
+        # to kill those from the previous round either: each cycle piled a
+        # fresh generation of workers for every account on top of the last,
+        # accumulating true zombies for as long as the crash loop ran.
         try:
+            log_path = self.log_dir / f"mt5-worker-account-{account_id}.log"
+            rotate_subprocess_log(log_path)
+            state.log_handle = log_path.open("ab", buffering=0)
+            creation_flags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
             state.process = self.popen_factory(
                 [str(self.python_executable), "-m", "telegram_mt5_copier.mt5_worker", "--account-id", str(account_id)],
                 cwd=str(self.project_root),
@@ -135,6 +148,7 @@ class MT5WorkerPool:
                 creationflags=creation_flags,
             )
         except Exception as exc:
+            self._close_log(state)
             state.consecutive_failures += 1
             delay = restart_delay(state.consecutive_failures)
             state.next_start_at = now + delay

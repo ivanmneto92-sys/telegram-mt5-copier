@@ -784,6 +784,24 @@ encerra também o `terminal64.exe` daquela conta (pela mesma rotina que já
 fecha o terminal ao excluir uma conta MT5 pelo painel admin) sempre que mata
 ou detecta a saída de um worker, então o próximo já sobe limpo.
 
+A partir da versão `0.45.1`, uma falha ao rotacionar o log de uma conta (o
+arquivo `mt5-worker-account-<id>.log` ainda aberto por um processo órfão de
+uma rodada anterior do pool já morta, `WinError 32` no Windows) não derruba
+mais o pool inteiro. Antes, essa falha escapava sem tratamento de dentro de
+`_start()`, e o pool inteiro caía com ela — nenhum worker subia para
+**nenhuma** conta, não só a que teve o log preso. Pior: como cada
+reinício do pool começa com memória zerada (não sabe quais processos ele
+mesmo criou na tentativa anterior), esse ciclo de queda e reinício repetia
+a mesma tentativa de rotação, na mesma conta, falhando de novo — e nunca
+chegava a matar os workers que a rodada anterior já tinha subido antes de
+cair. Cada nova rodada empilhava mais um worker por conta em cima da
+anterior, sem nunca limpar nada, acumulando dezenas de processos Python
+órfãos presos tentando (e falhando) pegar a trava de arquivo da própria
+conta, consumindo CPU e RAM à toa. Agora essa falha fica isolada só na
+conta que teve o log preso — ela entra no ciclo normal de nova tentativa
+com espera progressiva, e as demais contas sobem normalmente no mesmo
+ciclo, sem esperar por ela.
+
 `SupervisorLock` (a trava que impede duas instâncias do supervisor ou do
 monitor de sinais rodando ao mesmo tempo) e `MT5OperationLock` (a trava por
 conta usada durante cada chamada ao MT5) tinham a mesma limitação que o
