@@ -598,6 +598,36 @@ Use Proper Money & Risk Management."""
         )
         self.assertEqual(validate_signal(decision.signal).status, DecisionStatus.ACCEPTED)
 
+    def test_gold_buy_now_colado_no_preco_sem_espaco(self) -> None:
+        # Forex Bull Trader glues NOW directly onto the price with no
+        # separator at all ("NOW4574_4570"). \bNOW\b does not mark a
+        # boundary between the trailing "W" and a following digit -- both
+        # are word characters -- so every one of this channel's signals was
+        # silently rejected as missing_entry despite the entry being right
+        # there in the text.
+        decision = parse_signal_text(
+            """XAUUSD BUY NOW4574_4570
+
+TP1 4580
+TP2 4585
+TP3 4590
+TP4 4600
+
+SL 4560"""
+        )
+
+        self.assertEqual(decision.status, DecisionStatus.ACCEPTED)
+        self.assertEqual(decision.signal.symbol, "XAUUSD")
+        self.assertEqual(decision.signal.direction, Direction.BUY)
+        self.assertEqual(decision.signal.entry_low, Decimal("4570"))
+        self.assertEqual(decision.signal.entry_high, Decimal("4574"))
+        self.assertEqual(decision.signal.stop_loss, Decimal("4560"))
+        self.assertEqual(
+            decision.signal.take_profits,
+            (Decimal("4580"), Decimal("4585"), Decimal("4590"), Decimal("4600")),
+        )
+        self.assertEqual(validate_signal(decision.signal).status, DecisionStatus.ACCEPTED)
+
     def test_gold_buy_now_in_zone_com_tp_open(self) -> None:
         decision = parse_signal_text(
             """GOLD BUY NOW IN ZONE 4027.00-4020.00

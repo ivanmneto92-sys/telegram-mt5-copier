@@ -464,6 +464,17 @@ O parser também reconhece entradas escritas no cabeçalho como
 `GOLD BUY NOW IN ZONE 4027-4020`. Alvos sem preço, como `TP 3: OPEN`, são
 ignorados; os demais TPs numéricos continuam sendo executados normalmente.
 
+A partir da versão `0.44.5`, o parser reconhece `NOW` colado direto no
+preço, sem nenhum espaço ou pontuação entre os dois — `XAUUSD BUY
+NOW4574_4570`, por exemplo. Antes, o reconhecimento de entrada "a mercado"
+exigia `NOW` como palavra isolada (delimitada por um limite de palavra dos
+dois lados); como letra e dígito contam como o mesmo tipo de caractere pra
+essa checagem, não existe fronteira nenhuma entre o `W` de `NOW` e o `4`
+que vem colado em seguida, então esse formato nunca era reconhecido — o
+sinal inteiro era rejeitado como `missing_entry`, mesmo com o preço de
+entrada ali, colado no texto. Sinais desse canal (e de qualquer outro que
+escreva `NOW` colado no preço) agora são aceitos normalmente.
+
 ## Proteção contra sinais duplicados no canal limpo
 
 A partir da versão `0.28.2`, a deduplicação da publicação considera todas as

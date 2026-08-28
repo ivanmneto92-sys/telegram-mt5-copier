@@ -17,7 +17,7 @@ DIRECTION_PATTERN = r"(?:BUY|SELL|COMPRA|VENDA)"
 HEADER_RE = re.compile(
     r"(?:"
     rf"\b(?P<asset_first_asset>{SUPPORTED_ASSET_PATTERN})\b[^\w]{{1,12}}\b(?P<asset_first_direction>{DIRECTION_PATTERN})\b"
-    r"(?:[ \t]+NOW\b)?"
+    r"(?:[ \t]+NOW(?![A-Za-z]))?"
     r"|"
     rf"\b(?P<direction_first_direction>{DIRECTION_PATTERN})\b[^\w]{{1,8}}"
     rf"\b(?P<direction_first_asset>{SUPPORTED_ASSET_PATTERN})\b"
@@ -36,7 +36,13 @@ HEADER_TAIL_ENTRY_RE = re.compile(
 ENTRY_LINE_RE = re.compile(r"\b(?:ENTRY|ENTRADA)\b\s*[:\-]?\s*@?\s*(?P<value>\d+(?:[\.,]\d+)?(?:\s*[-–—]\s*\d+(?:[\.,]\d+)?)?)", re.IGNORECASE)
 NOW_ENTRY_RE = re.compile(
     rf"\b{SUPPORTED_ASSET_PATTERN}\b[^\w]{{1,12}}\b{DIRECTION_PATTERN}\b"
-    rf"[ \t]+NOW\b[^\d\r\n]{{0,12}}(?P<value>{PRICE_VALUE_PATTERN})",
+    # NOW(?![A-Za-z]), not \bNOW\b: some channels glue the price straight
+    # onto NOW with no separator at all ("NOW4574_4570"). \b does not mark
+    # a boundary between NOW's trailing "W" and a following digit -- both
+    # are word characters -- so a plain \bNOW\b silently fails to match
+    # that layout and the entry is never recognized, rejecting the whole
+    # signal as missing_entry even though the entry price is right there.
+    rf"[ \t]+NOW(?![A-Za-z])[^\d\r\n]{{0,12}}(?P<value>{PRICE_VALUE_PATTERN})",
     re.IGNORECASE,
 )
 SL_LINE_RE = re.compile(
