@@ -14,6 +14,16 @@ FOREX_CURRENCY_PATTERN = r"(?:AUD|CAD|CHF|EUR|GBP|JPY|NZD|USD)"
 FOREX_ASSET_PATTERN = rf"(?:{FOREX_CURRENCY_PATTERN}\s*[-/]?\s*{FOREX_CURRENCY_PATTERN})"
 SUPPORTED_ASSET_PATTERN = rf"(?:{GOLD_ASSET_PATTERN}|{FOREX_ASSET_PATTERN})"
 DIRECTION_PATTERN = r"(?:BUY|SELL|COMPRA|VENDA)"
+# Some channels send direction as a custom emoji with no literal BUY/SELL
+# text anywhere in the message at all (both directions render as the same
+# "input latin letters" emoji, distinguished only by a Telegram-side color
+# that never reaches the plain-text fallback) -- the direction has to come
+# from something else, and the arrow next to NOW ("NOW\U0001F53C4574" for
+# buy, "NOW\U0001F53D4594" for sell) is the only part of that layout that
+# actually differs between the two directions.
+NOW_ARROW_UP = "\U0001F53C"
+NOW_ARROW_DOWN = "\U0001F53D"
+NOW_ARROW_PATTERN = rf"[{NOW_ARROW_UP}{NOW_ARROW_DOWN}]"
 HEADER_RE = re.compile(
     r"(?:"
     rf"\b(?P<asset_first_asset>{SUPPORTED_ASSET_PATTERN})\b[^\w]{{1,12}}\b(?P<asset_first_direction>{DIRECTION_PATTERN})\b"
@@ -25,6 +35,9 @@ HEADER_RE = re.compile(
     rf"\b(?P<localized_asset>{SUPPORTED_ASSET_PATTERN})\b[^\r\n]*\r?\n"
     rf"[^\r\n]*\b(?:AN[ÁA]LISE)\b\s*:\s*"
     rf"(?P<localized_direction>{DIRECTION_PATTERN})\b"
+    r"|"
+    rf"\b(?P<arrow_now_asset>{SUPPORTED_ASSET_PATTERN})\b[^\r\n]{{0,24}}?"
+    rf"\bNOW(?![A-Za-z])[ \t]{{0,3}}(?P<arrow_now_direction>{NOW_ARROW_PATTERN})"
     r")",
     re.IGNORECASE,
 )
@@ -46,7 +59,14 @@ NOW_ENTRY_RE = re.compile(
     re.IGNORECASE,
 )
 SL_LINE_RE = re.compile(
-    r"\b(?:SL|STOP[ \t]+LOSS)\b(?:\s*\(\s*SL\s*\))?\s*[:\-]?\s*"
+    # (?![A-Za-z]), not \b, after the label: strip_noise (further below)
+    # drops non-ASCII separators like a non-breaking space, which can leave
+    # the label glued straight onto the price with nothing ASCII left in
+    # between ("SL\xa0\xa04606" -> "SL4606"). \b does not mark a boundary
+    # between the label's trailing letter and a following digit -- both are
+    # word characters -- so a plain \b there silently fails to match once
+    # the separator is gone, and the stop loss is never recognized.
+    r"\b(?:SL|STOP[ \t]+LOSS)(?![A-Za-z])(?:\s*\(\s*SL\s*\))?\s*[:\-]?\s*"
     r"(?P<value>\d+(?:[\.,]\d+)?)",
     re.IGNORECASE,
 )
@@ -61,22 +81,48 @@ TP_LINE_RE = re.compile(
 )
 
 
+def direction_and_symbol_from_header(header_match: re.Match[str]) -> tuple[str, str] | None:
+    direction_text = (
+        header_match.group("asset_first_direction")
+        or header_match.group("direction_first_direction")
+        or header_match.group("localized_direction")
+    )
+    if direction_text is not None:
+        direction = direction_text.upper()
+        direction = {"COMPRA": "BUY", "VENDA": "SELL"}.get(direction, direction)
+    else:
+        arrow = header_match.group("arrow_now_direction")
+        direction = {NOW_ARROW_UP: "BUY", NOW_ARROW_DOWN: "SELL"}.get(arrow)
+        if direction is None:
+            return None
+    symbol_text = (
+        header_match.group("asset_first_asset")
+        or header_match.group("direction_first_asset")
+        or header_match.group("localized_asset")
+        or header_match.group("arrow_now_asset")
+    )
+    if symbol_text is None:
+        return None
+    return direction, normalize_symbol(symbol_text)
+
+
+def extract_signal_direction(text: str) -> str | None:
+    header_match = HEADER_RE.search(text)
+    if not header_match:
+        return None
+    result = direction_and_symbol_from_header(header_match)
+    return result[0] if result else None
+
+
 def clean_signal_text(text: str) -> str | None:
     header_match = HEADER_RE.search(text)
     if not header_match:
         return None
 
-    direction = (
-        header_match.group("asset_first_direction")
-        or header_match.group("direction_first_direction")
-        or header_match.group("localized_direction")
-    ).upper()
-    direction = {"COMPRA": "BUY", "VENDA": "SELL"}.get(direction, direction)
-    symbol = normalize_symbol(
-        header_match.group("asset_first_asset")
-        or header_match.group("direction_first_asset")
-        or header_match.group("localized_asset")
-    )
+    header_info = direction_and_symbol_from_header(header_match)
+    if header_info is None:
+        return None
+    direction, symbol = header_info
     body = text[header_match.end() :]
     lines = [strip_noise(line) for line in body.splitlines()]
 
@@ -159,7 +205,10 @@ def extract_signal_symbol(text: str) -> str | None:
         match.group("asset_first_asset")
         or match.group("direction_first_asset")
         or match.group("localized_asset")
+        or match.group("arrow_now_asset")
     )
+    if asset is None:
+        return None
     symbol = normalize_symbol(asset)
     if symbol == "XAUUSD":
         return symbol

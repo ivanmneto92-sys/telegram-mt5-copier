@@ -4,7 +4,12 @@ from decimal import Decimal, InvalidOperation
 import re
 
 from .models import DecisionStatus, Direction, ProcessingDecision, TradeSignal
-from .signal_formatter import HEADER_RE, clean_signal_text, extract_signal_symbol
+from .signal_formatter import (
+    HEADER_RE,
+    clean_signal_text,
+    extract_signal_direction,
+    extract_signal_symbol,
+)
 
 NUMBER_TEXT = r"\d+(?:[\.,]\d+)?"
 NUMBER_RE = re.compile(NUMBER_TEXT)
@@ -55,11 +60,20 @@ def parse_signal_text(
         return ProcessingDecision(DecisionStatus.REJECTED, "missing_symbol_direction")
 
     direction_match = DIRECTION_RE.search(clean_text)
-    if not direction_match:
-        return ProcessingDecision(DecisionStatus.REJECTED, "missing_direction")
+    if direction_match:
+        direction = direction_from_text(direction_match.group(1))
+    else:
+        # Some channels never spell BUY/SELL as text at all -- direction is
+        # a custom emoji instead, with no literal word for DIRECTION_RE to
+        # find anywhere in the message. HEADER_RE already knows how to pull
+        # a direction out of those (e.g. the arrow next to NOW), so fall
+        # back to that before giving up.
+        header_direction = extract_signal_direction(clean_text)
+        if header_direction is None:
+            return ProcessingDecision(DecisionStatus.REJECTED, "missing_direction")
+        direction = direction_from_text(header_direction)
 
     cleaned_signal = clean_signal_text(clean_text)
-    direction = direction_from_text(direction_match.group(1))
     lines = [line.strip() for line in (cleaned_signal or clean_text).splitlines() if line.strip()]
 
     try:

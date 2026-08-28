@@ -475,6 +475,30 @@ sinal inteiro era rejeitado como `missing_entry`, mesmo com o preço de
 entrada ali, colado no texto. Sinais desse canal (e de qualquer outro que
 escreva `NOW` colado no preço) agora são aceitos normalmente.
 
+A partir da versão `0.45.0`, o parser também reconhece sinais em que a
+direção nunca é escrita como texto — só como emoji. O canal Forex Bull
+Trader, por exemplo, manda `🔤🔤` (o mesmo emoji, idêntico nos dois
+sentidos) no lugar da palavra `BUY`/`SELL`; o badge colorido "BUY"/"SELL"
+que aparece no aplicativo do Telegram é renderizado a partir desse emoji
+pelo próprio cliente, não é texto de verdade. Sem nenhuma palavra de
+direção na mensagem, o sinal inteiro era ignorado como mensagem comum,
+sem nem chegar a ser rejeitado formalmente. O que de fato muda entre compra
+e venda nesse canal é a seta grudada no `NOW` — `NOW🔼preço` pra compra,
+`NOW🔽preço` pra venda — e é isso que o parser passa a usar como direção
+quando não encontra `BUY`/`SELL`/`COMPRA`/`VENDA` escrito em lugar nenhum
+do texto.
+
+Esse mesmo canal também numera os alvos com dígitos sobrescritos em vez de
+números normais (`TP¹`, `TP²`...) e separa o rótulo do preço com espaço
+duro (`\xa0`, invisível) e um emoji de seta. A limpeza de texto já
+descartava caracteres não-ASCII nas linhas do corpo da mensagem antes de
+tentar casar `SL`/`TP`, o que por si só já reduzia esse ruído a espaços
+normais na maioria dos casos — mas quando o único separador entre o rótulo
+e o preço era esse espaço duro, descartá-lo colava o rótulo direto no
+número (`SL\xa0\xa04606` virava `SL4606`), e o mesmo problema de fronteira
+de palavra do `NOW` acontecia com `SL` colado num dígito. Esse caso
+específico também foi corrigido.
+
 ## Proteção contra sinais duplicados no canal limpo
 
 A partir da versão `0.28.2`, a deduplicação da publicação considera todas as

@@ -628,6 +628,68 @@ SL 4560"""
         )
         self.assertEqual(validate_signal(decision.signal).status, DecisionStatus.ACCEPTED)
 
+    def test_gold_buy_com_direcao_apenas_em_emoji_seta_junto_do_now(self) -> None:
+        # Real raw text pulled straight from signal_events for this channel
+        # (Forex Bull Trader): the direction is never spelled as text at
+        # all -- "BUY" is only a custom emoji badge (\U0001F524\U0001F524,
+        # identical for both directions) rendered client-side by Telegram.
+        # The only thing in the plain text that actually differs between a
+        # buy and a sell is the arrow glued onto NOW (\U0001F53C up /
+        # \U0001F53D down). TP indexes are Unicode superscript digits
+        # (\xb9\xb2\xb3⁴, not "1234") separated from the price by a
+        # non-breaking space and the same arrow emoji.
+        decision = parse_signal_text(
+            "XAUUSD \U0001F524\U0001F524 NOW\U0001F53C4574_4570\n\n"
+            "TP\xb9\xa0 \U0001F53C\xa0 4580\n"
+            "TP\xb2\xa0 \U0001F53C\xa0 4585\n"
+            "TP\xb3\xa0 \U0001F53C\xa0 4590\n"
+            "TP⁴\xa0 \U0001F53C\xa0 4600\n\n\n\n"
+            "\xa0\xa0\xa0 ❌SL\xa0 4560\n\n"
+            "Use Proper Money✔️✔️\n"
+            "&Risk Management. Consistency is"
+        )
+
+        self.assertEqual(decision.status, DecisionStatus.ACCEPTED)
+        self.assertEqual(decision.signal.symbol, "XAUUSD")
+        self.assertEqual(decision.signal.direction, Direction.BUY)
+        self.assertEqual(decision.signal.entry_low, Decimal("4570"))
+        self.assertEqual(decision.signal.entry_high, Decimal("4574"))
+        self.assertEqual(decision.signal.stop_loss, Decimal("4560"))
+        self.assertEqual(
+            decision.signal.take_profits,
+            (Decimal("4580"), Decimal("4585"), Decimal("4590"), Decimal("4600")),
+        )
+        self.assertEqual(validate_signal(decision.signal).status, DecisionStatus.ACCEPTED)
+
+    def test_gold_sell_com_direcao_apenas_em_emoji_seta_junto_do_now(self) -> None:
+        # Same channel, sell side: the SL label ends up glued straight onto
+        # the price with zero separator at all once the non-ASCII gap
+        # ("SL\xa0\xa04606") is stripped -- unlike the buy sample above,
+        # which still had one literal ASCII space left over.
+        decision = parse_signal_text(
+            "XAUUSD \U0001F524\U0001F524 NOW\U0001F53D4594_4598\n\n"
+            "TP\xb9\xa0 \U0001F53D\xa0 4590\n"
+            "TP\xb2\xa0 \U0001F53D\xa0 4585\n"
+            "TP\xb3\xa0 \U0001F53D\xa0 4580\n"
+            "TP⁴\xa0 \U0001F53D\xa0 4575\n"
+            "TP⁵\xa0 \U0001F53D\xa0 4550\n\n"
+            "\xa0\xa0\xa0 ❌SL\xa0\xa04606\n\n"
+            "Use Proper Money✔️✔️\n"
+            "&Risk Management. Consistency is"
+        )
+
+        self.assertEqual(decision.status, DecisionStatus.ACCEPTED)
+        self.assertEqual(decision.signal.symbol, "XAUUSD")
+        self.assertEqual(decision.signal.direction, Direction.SELL)
+        self.assertEqual(decision.signal.entry_low, Decimal("4594"))
+        self.assertEqual(decision.signal.entry_high, Decimal("4598"))
+        self.assertEqual(decision.signal.stop_loss, Decimal("4606"))
+        self.assertEqual(
+            decision.signal.take_profits,
+            (Decimal("4590"), Decimal("4585"), Decimal("4580"), Decimal("4575"), Decimal("4550")),
+        )
+        self.assertEqual(validate_signal(decision.signal).status, DecisionStatus.ACCEPTED)
+
     def test_gold_buy_now_in_zone_com_tp_open(self) -> None:
         decision = parse_signal_text(
             """GOLD BUY NOW IN ZONE 4027.00-4020.00
