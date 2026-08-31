@@ -284,6 +284,21 @@ class PositionManager:
         repeat every worker tick (about once a second) for the rest of the
         day. Any open exposure still routes through the full check below, so
         it is still closed immediately if it appears after the pause.
+
+        Once paused, any open exposure gets closed unconditionally, without
+        re-checking whether the sum is still over threshold on this exact
+        tick. A pause commonly can't close everything in one pass to begin
+        with -- multiple signals can each be sitting in their own execution
+        group with their own position, and a single tick only sees whatever
+        is open at that instant. Closing part of that exposure banks its
+        realized result, and whatever is left keeps floating with the
+        market on every following tick; the sum drifts below the threshold
+        again the moment the market ticks the other way, even though the
+        account is still supposed to be paused with zero copier exposure.
+        Re-requiring the sum to still read over threshold before closing
+        the rest is what let a position ride the market for hours after
+        the pause, closing only later at its own SL/TP, well past the
+        point the account was already meant to be flat for the day.
         """
         if profile.daily_profit_target <= 0 and profile.daily_loss_limit <= 0:
             return None
@@ -321,8 +336,31 @@ class PositionManager:
         ):
             trigger_kind = "loss_limit"
             configured_limit = profile.daily_loss_limit
-        if trigger_kind is None:
+        already_paused = trigger_kind is None and self._daily_pause_already_active(
+            account.user_id, now
+        )
+        if trigger_kind is None and not already_paused:
             return None
+        if already_paused:
+            # The pause already fired earlier today -- this pass is sweeping
+            # up exposure the earlier trigger didn't see. Requiring the sum
+            # to still be over threshold *right now* to close it is why a
+            # position could survive the pause for hours: closing part of
+            # the exposure banks realized profit/loss, and the rest keeps
+            # floating with the market on every following tick, so the sum
+            # drifts back under the threshold the very next second even
+            # though nothing about the pause changed -- the account is
+            # still paused, still supposed to have zero copier exposure.
+            # Once paused, everything still open gets closed regardless of
+            # what the sum happens to read on this particular tick.
+            trigger_kind = (
+                "profit_target" if profile.daily_profit_target > 0 else "loss_limit"
+            )
+            configured_limit = (
+                profile.daily_profit_target
+                if trigger_kind == "profit_target"
+                else profile.daily_loss_limit
+            )
 
         pause_until = next_daily_signal_resume_at(now)
         with connect_database(self.database_path) as connection:

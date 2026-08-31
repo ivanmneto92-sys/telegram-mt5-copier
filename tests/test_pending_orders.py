@@ -2052,6 +2052,90 @@ class PendingOrderTests(unittest.TestCase):
         self.assertEqual(changed, 0)
         self.assertEqual(client.order_send_requests, [])
 
+    def test_posicao_restante_e_fechada_mesmo_com_soma_abaixo_do_limite_apos_pausa(
+        self,
+    ) -> None:
+        # Reproduces a real incident: a client had two positions open when
+        # the profit target was crossed. The first tick only managed to
+        # close one of them (the other failed that attempt -- in the real
+        # case, a different group's position simply wasn't part of that
+        # tick's snapshot yet). The pause was already set, but the second
+        # position kept floating with the market; by the very next tick the
+        # sum (now: the first position's realized profit + the second
+        # position's own floating result) had drifted back under the
+        # target, and the old code required the sum to still read over
+        # threshold *on that tick* to keep closing -- so the second position
+        # was left completely alone, riding the market for hours until it
+        # happened to hit its own stop loss, well after the client was
+        # already supposed to be paused for the day with zero exposure.
+        profile = self.accounts.update_execution_profile_field(
+            self.user.id,
+            self.account.id,
+            "daily_profit_target",
+            "25",
+        )
+        first_tick_client = SimulatedMT5Client(
+            positions=(
+                {
+                    "magic": MT5_MAGIC_NUMBER,
+                    "ticket": 501,
+                    "symbol": "XAUUSD",
+                    "type": 0,
+                    "volume": 0.01,
+                    "profit": 20,
+                },
+                {
+                    "magic": MT5_MAGIC_NUMBER,
+                    "ticket": 502,
+                    "symbol": "XAUUSD",
+                    "type": 0,
+                    "volume": 0.01,
+                    "profit": 6,
+                },
+            ),
+            order_send_results=[
+                {"retcode": 10009, "order": 900001},  # 501 closes fine
+                {"retcode": 10004, "order": 0},  # 502's close attempt fails
+            ],
+        )
+        second_tick_client = SimulatedMT5Client(
+            # 501 already closed and banked; 502's floating result dropped
+            # from +6 to +3 on this tick, same as any ordinary price move --
+            # realized (20) + floating (3) = 23, under the 25 target.
+            positions=(
+                {
+                    "magic": MT5_MAGIC_NUMBER,
+                    "ticket": 502,
+                    "symbol": "XAUUSD",
+                    "type": 0,
+                    "volume": 0.01,
+                    "profit": 3,
+                },
+            ),
+            history_deals=({"magic": MT5_MAGIC_NUMBER, "profit": 20},),
+        )
+        clients = iter((first_tick_client, second_tick_client))
+        manager = PositionManager(self.database_path, self.accounts, lambda: next(clients))
+
+        first_changed = manager.manage_account(self.account, profile)
+        self.assertEqual(first_changed, 1)
+        with connect_database(self.database_path) as connection:
+            pause_until = connection.execute(
+                "SELECT daily_signal_pause_until FROM users WHERE id = ?",
+                (self.user.id,),
+            ).fetchone()[0]
+        self.assertIsNotNone(pause_until)
+
+        second_changed = manager.manage_account(self.account, profile)
+
+        self.assertEqual(second_changed, 1)
+        close_requests = [
+            request
+            for request in second_tick_client.order_send_requests
+            if request.get("position") == 502
+        ]
+        self.assertEqual(len(close_requests), 1)
+
     def test_limite_diario_nao_fecha_operacao_manual(self) -> None:
         profile = self.accounts.update_execution_profile_field(
             self.user.id,

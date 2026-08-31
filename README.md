@@ -432,6 +432,27 @@ mesmo instante em que a trava reativa fecharia a exposição — sem depender da
 próxima varredura. Posições sem o `magic` do copiador (operações manuais do
 cliente) continuam de fora dessa soma nos dois casos, como já era.
 
+A partir da versão `0.45.2`, uma vez que a pausa diária já está em vigor, a
+trava reativa fecha **toda** a exposição do copiador que ainda estiver
+aberta, sem checar de novo se a soma continua além do limite naquele tick
+específico. Um caso real mostrou a falha: um cliente tinha duas posições
+abertas quando a meta foi cruzada; nessa mesma varredura o Worker só
+conseguiu fechar uma delas (a outra simplesmente não fez parte do que foi
+visto naquele instante — o mesmo pode acontecer com posições de grupos de
+sinais diferentes). A pausa já tinha sido registrada, mas a posição restante
+seguiu flutuando com o mercado normalmente. Na varredura seguinte, a soma
+(agora: o resultado já realizado da posição fechada + o resultado flutuante
+da que restou) tinha caído de novo para abaixo da meta — só porque o preço
+oscilou, não porque a pausa deixou de valer — e a checagem antiga exigia que
+a soma ainda estivesse além do limite **naquele tick** para continuar
+fechando. Sem isso, a trava simplesmente parava de tentar, e a posição
+restante ficava largada no mercado até bater o próprio TP ou SL sozinha,
+horas depois — em alguns casos gerando lucro ou prejuízo adicional bem
+depois do cliente já estar, supostamente, pausado com zero exposição do
+copiador. Agora, uma vez pausado, tudo que ainda estiver aberto é fechado
+incondicionalmente a cada varredura, até não sobrar nada — sem depender da
+soma cruzar o limite de novo.
+
 Em `⚙️ Configurações > 🎯 Execução do sinal > Quantidade de TPs`, o usuário escolhe os primeiros 1, 2, 3 ou 4 alvos do sinal, ou todos os alvos disponíveis. O lote total configurado é dividido somente entre os TPs selecionados. A seleção não inventa alvos quando o sinal possui menos TPs.
 
 O `telegram-mt5-worker` detecta quando o TP1 é atingido usando o preço atual e o histórico do MT5, inclusive após uma breve reconexão. Em `🛡️ Proteções > 🎯 BE após TP1`, cada cliente escolhe se o Stop Loss das posições restantes deve ser movido para o preço real de entrada. A preferência começa ativada para preservar o comportamento existente. Ordens daquele grupo que ainda não foram ativadas são canceladas após o TP1 para evitar entradas tardias em um sinal já desenvolvido. A proteção é aplicada apenas a posições do copiador, identificadas por `magic` e comentário; operações manuais não são alteradas. O BE antecipado em 1R e o trailing são preferências separadas e complementares.
