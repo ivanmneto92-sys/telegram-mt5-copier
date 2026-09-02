@@ -121,6 +121,11 @@ class SymbolResolverTests(unittest.TestCase):
 
         self.assertEqual(resolver.resolve("XAUUSD"), "Gold_Spot")
 
+    def test_aceita_sufixo_stdc_da_vt_markets(self) -> None:
+        resolver = SymbolResolver(StrictSymbolClient(("XAUUSD-STDc",)))
+
+        self.assertEqual(resolver.resolve("XAUUSD"), "XAUUSD-STDc")
+
     def test_descobre_sufixo_da_corretora_em_par_forex(self) -> None:
         resolver = SymbolResolver(StrictSymbolClient(("CADCHFb",)))
 

@@ -384,6 +384,27 @@ basta configurar `MT5_BROKER_TEMPLATES` apontando para a instalação-modelo
 já feita na VPS e, se quiser a lista de servidores pronta no dropdown em vez
 de exigir digitação manual, `MT5_BROKER_SERVERS`.
 
+A partir da versão `0.45.4`, o resolvedor de símbolos também reconhece
+`-STDc` diretamente — o sufixo que a VT Markets usa no grupo de contas
+padrão (`XAUUSD-STDc`, e o mesmo vale pra qualquer outro ativo dessa
+corretora). Pela mesma razão do `Gold_Spot` da FXGlobe: listar o sufixo
+direto em vez de depender só da descoberta automática por wildcard evita
+depender do momento exato em que o terminal recém-provisionado termina de
+sincronizar a lista completa de símbolos com o servidor.
+
+Ao instalar uma corretora nova pela primeira vez (como foi o caso da VT
+Markets), vale abrir o terminal-modelo uma vez, ir em **Ferramentas >
+Opções > aba Experts** e marcar "Allow algorithmic trading" (e "Allow DLL
+imports"/"Allow WebRequest" se precisar) antes de provisionar a primeira
+conta de verdade. Builds mais novos do MT5 vêm com essa opção desligada por
+padrão nessa tela, separada do `[Experts] AllowLiveTrading=1` que a
+sanitização de `common.ini` já grava automaticamente em toda conta
+provisionada — sem marcar isso uma vez no terminal-modelo, a API do Python
+usada pelo copiador recebe `IPC send failed` (-10001) mesmo com o terminal
+abrindo e a conta existindo de verdade (login funcionando normalmente pelo
+celular, por exemplo). Corrigir no terminal-modelo evita repetir esse passo
+manual pra cada conta nova dessa corretora.
+
 A partir da versão `0.29.0`, depois de escolher a corretora o cliente seleciona
 um servidor da lista ou usa `Meu servidor não está na lista — digitar`. O
 catálogo combina servidores oficiais conhecidos, todos os arquivos `*.srv`

@@ -20,7 +20,13 @@ class SymbolResolver:
             if base_symbol.upper() == "XAUUSD"
             else (base_symbol,)
         )
-        suffixes = ("", ".", "m", "b", ".r", "_i")
+        # "-STDc" is VT Markets' suffix for its standard account group
+        # (XAUUSD-STDc, EURUSD-STDc, ...) -- listed directly rather than
+        # relying only on the wildcard discovery fallback below, for the
+        # same reason as Gold_Spot: a fresh terminal's symbol list isn't
+        # guaranteed to be fully synced with the server yet right after
+        # provisioning.
+        suffixes = ("", ".", "m", "b", ".r", "_i", "-STDc")
         candidates = tuple(
             f"{alias}{suffix}"
             for alias in aliases
