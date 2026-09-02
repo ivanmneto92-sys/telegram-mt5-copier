@@ -45,6 +45,7 @@ BROKER_DISPLAY_NAMES = {
     "FXGLOBE": "FXGlobe",
     "EXNESS": "Exness",
     "INFINOX": "INFINOX",
+    "VTMARKETS": "VT Markets",
 }
 BROKER_ALIASES = {
     "HF": "HFM",

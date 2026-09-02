@@ -374,6 +374,16 @@ Cada conta cadastrada recebe uma pasta isolada em `MT5_BASE_DIR\<mt5_account_id>
 
 Para operar com mais de uma corretora, mantenha uma instalação-modelo oficial e separada para cada uma e configure `MT5_BROKER_TEMPLATES`. A Mini App passa a exibir somente as corretoras configuradas e o provisionamento copia o modelo correspondente. `MT5_TEMPLATE_PATH` continua aceito como modelo HFM por compatibilidade com instalações anteriores. FTMO, FXGlobe, Exness e INFINOX podem usar servidores e símbolos diferentes; o resolvedor de símbolos detecta automaticamente sufixos disponíveis no terminal (por exemplo `XAUUSDb`, `XAUUSD.pro`) e também aceita `GOLD` puro. A partir da versão `0.44.1`, também reconhece `Gold_Spot` diretamente — o nome que a FXGlobe usa para o ouro. Ele fica listado ao lado de `XAUUSD`/`GOLD` em vez de depender só da descoberta automática, para não depender do momento exato em que o terminal recém-provisionado termina de sincronizar a lista completa de símbolos com o servidor após o login.
 
+A partir da versão `0.45.3`, a VT Markets tem nome de exibição próprio
+(`VT Markets`) na lista de corretoras — sem essa entrada em
+`BROKER_DISPLAY_NAMES`, ela ainda funcionaria normalmente (a chave
+normalizada `VTMARKETS` aparece do jeito que está, em maiúsculas), só não
+ficaria com o nome bonito na Mini App. Fora esse detalhe cosmético, não
+precisou de nenhuma outra mudança de código: como qualquer corretora nova,
+basta configurar `MT5_BROKER_TEMPLATES` apontando para a instalação-modelo
+já feita na VPS e, se quiser a lista de servidores pronta no dropdown em vez
+de exigir digitação manual, `MT5_BROKER_SERVERS`.
+
 A partir da versão `0.29.0`, depois de escolher a corretora o cliente seleciona
 um servidor da lista ou usa `Meu servidor não está na lista — digitar`. O
 catálogo combina servidores oficiais conhecidos, todos os arquivos `*.srv`

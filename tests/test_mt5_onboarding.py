@@ -359,6 +359,20 @@ class MT5OnboardingTests(unittest.TestCase):
         self.assertEqual(provisioned.terminal_path.read_bytes(), b"ftmo")
         self.assertEqual(manager.available_brokers(), ("FTMO", "HFM"))
 
+    def test_vt_markets_aparece_com_nome_de_exibicao_correto(self) -> None:
+        vtmarkets = self.root / "template-vtmarkets"
+        vtmarkets.mkdir()
+        (vtmarkets / "terminal64.exe").write_bytes(b"vtmarkets")
+        manager = TerminalManager(
+            self.root / "vtmarkets-broker",
+            broker_template_paths={"VTMarkets": vtmarkets},
+        )
+
+        provisioned = manager.provision_account(91, broker_name="VT Markets")
+
+        self.assertEqual(provisioned.terminal_path.read_bytes(), b"vtmarkets")
+        self.assertEqual(manager.available_brokers(), ("VT Markets",))
+
     def test_rejeita_corretora_sem_template_configurado(self) -> None:
         hfm = self.root / "only-hfm"
         hfm.mkdir()
