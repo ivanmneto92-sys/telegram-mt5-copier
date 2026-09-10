@@ -373,6 +373,24 @@ class MT5OnboardingTests(unittest.TestCase):
         self.assertEqual(provisioned.terminal_path.read_bytes(), b"vtmarkets")
         self.assertEqual(manager.available_brokers(), ("VT Markets",))
 
+    def test_doo_prime_aparece_com_servidores_demo_e_live(self) -> None:
+        doo_prime = self.root / "template-doo-prime"
+        doo_prime.mkdir()
+        (doo_prime / "terminal64.exe").write_bytes(b"doo-prime")
+        manager = TerminalManager(
+            self.root / "doo-prime-broker",
+            broker_template_paths={"Doo Prime": doo_prime},
+        )
+
+        provisioned = manager.provision_account(92, broker_name="DooTechnology")
+
+        self.assertEqual(provisioned.terminal_path.read_bytes(), b"doo-prime")
+        self.assertEqual(manager.available_brokers(), ("Doo Prime",))
+        self.assertEqual(
+            manager.available_servers("Doo Prime"),
+            ("DooTechnology-Demo", "DooTechnology-Live"),
+        )
+
     def test_rejeita_corretora_sem_template_configurado(self) -> None:
         hfm = self.root / "only-hfm"
         hfm.mkdir()

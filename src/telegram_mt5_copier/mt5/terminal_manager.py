@@ -46,6 +46,7 @@ BROKER_DISPLAY_NAMES = {
     "EXNESS": "Exness",
     "INFINOX": "INFINOX",
     "VTMARKETS": "VT Markets",
+    "DOOPRIME": "Doo Prime",
 }
 BROKER_ALIASES = {
     "HF": "HFM",
@@ -56,6 +57,9 @@ BROKER_ALIASES = {
     "FXGLOBE": "FXGLOBE",
     "EXNESS": "EXNESS",
     "INFINOX": "INFINOX",
+    "DOO": "DOOPRIME",
+    "DOOPRIME": "DOOPRIME",
+    "DOOTECHNOLOGY": "DOOPRIME",
 }
 DEFAULT_BROKER_SERVERS: dict[str, tuple[str, ...]] = {
     "HFM": (
@@ -85,6 +89,10 @@ DEFAULT_BROKER_SERVERS: dict[str, tuple[str, ...]] = {
         "FTMO-Demo",
         "FTMO-Demo2",
         "FTMO-Server",
+    ),
+    "DOOPRIME": (
+        "DooTechnology-Demo",
+        "DooTechnology-Live",
     ),
 }
 

@@ -359,8 +359,8 @@ Configure no `.env` da VPS:
 
 ```env
 MT5_TEMPLATE_PATH=C:\Caminho\Para\MT5Modelo
-MT5_BROKER_TEMPLATES=HFM=C:\MT5TemplateHFM;FTMO=C:\MT5TemplateFTMO;FXGLOBE=C:\MT5TemplateFXGlobe;EXNESS=C:\MT5TemplateExness;INFINOX=C:\MT5TemplateINFINOX
-MT5_BROKER_SERVERS=HFM=HFMarketsGlobal-Live1|HFMarketsGlobal-Live2|HFMarketsGlobal-Live3;FTMO=FTMO-Demo
+MT5_BROKER_TEMPLATES=HFM=C:\MT5TemplateHFM;FTMO=C:\MT5TemplateFTMO;FXGLOBE=C:\MT5TemplateFXGlobe;EXNESS=C:\MT5TemplateExness;INFINOX=C:\MT5TemplateINFINOX;DOOPRIME=C:\MT5TemplateDooPrime
+MT5_BROKER_SERVERS=HFM=HFMarketsGlobal-Live1|HFMarketsGlobal-Live2|HFMarketsGlobal-Live3;FTMO=FTMO-Demo;DOOPRIME=DooTechnology-Demo|DooTechnology-Live
 MT5_BASE_DIR=C:\MT5Accounts
 MT5_EXECUTION_MODE=simulation
 ALLOW_LIVE_ACCOUNTS=false
@@ -372,7 +372,7 @@ O script `scripts/setup_windows.ps1` instala o pacote `MetaTrader5` somente no W
 
 Cada conta cadastrada recebe uma pasta isolada em `MT5_BASE_DIR\<mt5_account_id>\`, com `terminal64.exe`, `data\`, `logs\`, `worker.lock` e `heartbeat.txt`. A chamada ao MetaTrader usa modo portable, mantendo os dados junto da cópia isolada do terminal e evitando alternar contas dentro de um mesmo terminal.
 
-Para operar com mais de uma corretora, mantenha uma instalação-modelo oficial e separada para cada uma e configure `MT5_BROKER_TEMPLATES`. A Mini App passa a exibir somente as corretoras configuradas e o provisionamento copia o modelo correspondente. `MT5_TEMPLATE_PATH` continua aceito como modelo HFM por compatibilidade com instalações anteriores. FTMO, FXGlobe, Exness e INFINOX podem usar servidores e símbolos diferentes; o resolvedor de símbolos detecta automaticamente sufixos disponíveis no terminal (por exemplo `XAUUSDb`, `XAUUSD.pro`) e também aceita `GOLD` puro. A partir da versão `0.44.1`, também reconhece `Gold_Spot` diretamente — o nome que a FXGlobe usa para o ouro. Ele fica listado ao lado de `XAUUSD`/`GOLD` em vez de depender só da descoberta automática, para não depender do momento exato em que o terminal recém-provisionado termina de sincronizar a lista completa de símbolos com o servidor após o login.
+Para operar com mais de uma corretora, mantenha uma instalação-modelo oficial e separada para cada uma e configure `MT5_BROKER_TEMPLATES`. A Mini App passa a exibir somente as corretoras configuradas e o provisionamento copia o modelo correspondente. `MT5_TEMPLATE_PATH` continua aceito como modelo HFM por compatibilidade com instalações anteriores. FTMO, FXGlobe, Exness, INFINOX e Doo Prime podem usar servidores e símbolos diferentes; o resolvedor de símbolos detecta automaticamente sufixos disponíveis no terminal (por exemplo `XAUUSDb`, `XAUUSD.pro`) e também aceita `GOLD` puro. A Doo Prime usa os servidores `DooTechnology-Demo` e `DooTechnology-Live`. A partir da versão `0.44.1`, também reconhece `Gold_Spot` diretamente — o nome que a FXGlobe usa para o ouro. Ele fica listado ao lado de `XAUUSD`/`GOLD` em vez de depender só da descoberta automática, para não depender do momento exato em que o terminal recém-provisionado termina de sincronizar a lista completa de símbolos com o servidor após o login.
 
 A partir da versão `0.45.3`, a VT Markets tem nome de exibição próprio
 (`VT Markets`) na lista de corretoras — sem essa entrada em
@@ -391,6 +391,11 @@ corretora). Pela mesma razão do `Gold_Spot` da FXGlobe: listar o sufixo
 direto em vez de depender só da descoberta automática por wildcard evita
 depender do momento exato em que o terminal recém-provisionado termina de
 sincronizar a lista completa de símbolos com o servidor.
+
+A partir da versão `0.45.5`, a Doo Prime aparece com nome próprio na Mini App
+e oferece por padrão os servidores `DooTechnology-Demo` e
+`DooTechnology-Live`. O template oficial instalado na VPS deve ser associado
+à chave `DOOPRIME` em `MT5_BROKER_TEMPLATES`.
 
 Ao instalar uma corretora nova pela primeira vez (como foi o caso da VT
 Markets), vale abrir o terminal-modelo uma vez, ir em **Ferramentas >
