@@ -26,7 +26,10 @@ ENTRY_LABEL_RE = re.compile(
     re.IGNORECASE,
 )
 CLOSED_TRADES_REPORT_RE = re.compile(r"\bCLOSED\s+TRADES?\b", re.IGNORECASE)
-RESULT_REPORT_RE = re.compile(r"\b(?:RESULTS?|PIPS?)\b", re.IGNORECASE)
+RESULT_REPORT_RE = re.compile(
+    r"\b(?:RESULTS?|PIPS?)\b|\bTP\s*\d*\s*HIT\b|\d+\s*PIPS?\b",
+    re.IGNORECASE,
+)
 SL_LABEL_RE = re.compile(r"\b(?:SL|STOP(?:\s+LOSS)?)\b", re.IGNORECASE)
 TP_LABEL_RE = re.compile(r"\b(?:TP\d*|TARGET\d*|TAKE\s+PROFIT\d*)\b", re.IGNORECASE)
 INDEXED_TP_LABEL_RE = re.compile(

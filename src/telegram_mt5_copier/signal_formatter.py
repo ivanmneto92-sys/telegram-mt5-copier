@@ -58,6 +58,15 @@ NOW_ENTRY_RE = re.compile(
     rf"[ \t]+NOW(?![A-Za-z])[^\d\r\n]{{0,12}}(?P<value>{PRICE_VALUE_PATTERN})",
     re.IGNORECASE,
 )
+DIRECT_HEADER_ENTRY_RE = re.compile(
+    rf"(?:"
+    rf"\b{SUPPORTED_ASSET_PATTERN}\b[^\w]{{1,12}}\b{DIRECTION_PATTERN}\b"
+    rf"|\b{DIRECTION_PATTERN}\b[^\w]{{1,8}}\b{SUPPORTED_ASSET_PATTERN}\b"
+    rf")"
+    rf"(?:[ \t]+NOW(?![A-Za-z]))?[^\d\r\n]{{0,12}}"
+    rf"(?P<value>{PRICE_VALUE_PATTERN})",
+    re.IGNORECASE,
+)
 SL_LINE_RE = re.compile(
     # (?![A-Za-z]), not \b, after the label: strip_noise (further below)
     # drops non-ASCII separators like a non-breaking space, which can leave
@@ -66,16 +75,16 @@ SL_LINE_RE = re.compile(
     # between the label's trailing letter and a following digit -- both are
     # word characters -- so a plain \b there silently fails to match once
     # the separator is gone, and the stop loss is never recognized.
-    r"\b(?:SL|STOP[ \t]+LOSS)(?![A-Za-z])(?:\s*\(\s*SL\s*\))?\s*[:\-]?\s*"
+    r"\b(?:SL|STOP[ \t]+LOSS)(?![A-Za-z])(?:\s*\(\s*SL\s*\))?\s*\)?\s*[:\-]?\s*"
     r"(?P<value>\d+(?:[\.,]\d+)?)",
     re.IGNORECASE,
 )
 TP_LINE_RE = re.compile(
     r"\b(?:"
-    r"TP[ \t]+\d+[ \t]*:|TP\d*+(?![ \t]+\d+[ \t]*:)[ \t]*:?"
-    r"|TAKE[ \t]+PROFIT[ \t]+\d+[ \t]*:"
-    r"|TAKE[ \t]+PROFIT\d*+(?![ \t]+\d+[ \t]*:)[ \t]*:?"
-    r"|TARGET[ \t]+\d+[ \t]*:|TARGET\d*+(?![ \t]+\d+[ \t]*:)[ \t]*:?"
+    r"TP[ \t]+\d+[ \t]*[\):\-]|TP\d*+(?![ \t]+\d+[ \t]*[\):\-])[ \t]*[\):\-]?"
+    r"|TAKE[ \t]+PROFIT[ \t]+\d+[ \t]*[\):\-]"
+    r"|TAKE[ \t]+PROFIT\d*+(?![ \t]+\d+[ \t]*[\):\-])[ \t]*[\):\-]?"
+    r"|TARGET[ \t]+\d+[ \t]*[\):\-]|TARGET\d*+(?![ \t]+\d+[ \t]*[\):\-])[ \t]*[\):\-]?"
     r")[ \t]*(?P<value>\d+(?:[\.,]\d+)?)",
     re.IGNORECASE,
 )
@@ -115,6 +124,7 @@ def extract_signal_direction(text: str) -> str | None:
 
 
 def clean_signal_text(text: str) -> str | None:
+    text = normalize_signal_characters(text)
     header_match = HEADER_RE.search(text)
     if not header_match:
         return None
@@ -137,6 +147,10 @@ def clean_signal_text(text: str) -> str | None:
         now_entry_match = NOW_ENTRY_RE.search(text)
         if now_entry_match:
             entry_value = normalize_range_spacing(now_entry_match.group("value"))
+    if entry_value is None:
+        direct_entry_match = DIRECT_HEADER_ENTRY_RE.search(text)
+        if direct_entry_match:
+            entry_value = normalize_range_spacing(direct_entry_match.group("value"))
     stop_loss_value: str | None = None
     take_profit_values: list[str] = []
 
@@ -191,6 +205,13 @@ def format_signal(signal: TradeSignal) -> str:
 
 def strip_noise(value: str) -> str:
     return "".join(character for character in value.strip() if character.isascii())
+
+
+SUPERSCRIPT_DIGITS = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789")
+
+
+def normalize_signal_characters(value: str) -> str:
+    return value.translate(SUPERSCRIPT_DIGITS).replace("\xa0", " ")
 
 
 def normalize_range_spacing(value: str) -> str:

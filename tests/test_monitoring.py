@@ -628,6 +628,80 @@ SL 4560"""
         )
         self.assertEqual(validate_signal(decision.signal).status, DecisionStatus.ACCEPTED)
 
+    def test_royal_pips_com_targets_sobrescritos_e_parenteses(self) -> None:
+        decision = parse_signal_text(
+            "Xauusd Sell Now\xa04420\n\n"
+            "😡Target¹)\xa0\xa0\xa04416\n"
+            "😡Target²)\xa0\xa0 4415\n"
+            "😡Target³)\xa0\xa0\xa04400\n\n"
+            "❌SL)\xa0\xa0\xa04432\n\n"
+            "Disclaimer: Only For Educational purposes"
+        )
+
+        self.assertEqual(decision.status, DecisionStatus.ACCEPTED)
+        self.assertEqual(decision.signal.symbol, "XAUUSD")
+        self.assertEqual(decision.signal.direction, Direction.SELL)
+        self.assertEqual(decision.signal.entry_low, Decimal("4420"))
+        self.assertEqual(decision.signal.entry_high, Decimal("4420"))
+        self.assertEqual(decision.signal.stop_loss, Decimal("4432"))
+        self.assertEqual(
+            decision.signal.take_profits,
+            (Decimal("4416"), Decimal("4415"), Decimal("4400")),
+        )
+        self.assertEqual(validate_signal(decision.signal).status, DecisionStatus.ACCEPTED)
+
+    def test_royal_pips_segundo_sinal_real_com_mesmo_layout(self) -> None:
+        decision = parse_signal_text(
+            "Xauusd Sell Now\xa04396\n\n"
+            "😡Target¹)\xa0\xa0\xa04392\n"
+            "😡Target²)\xa0\xa0 4388\n"
+            "😡Target³)\xa0\xa0\xa04370\n\n"
+            "❌SL)\xa0\xa0\xa04408"
+        )
+
+        self.assertEqual(decision.status, DecisionStatus.ACCEPTED)
+        self.assertEqual(decision.signal.entry_low, Decimal("4396"))
+        self.assertEqual(decision.signal.stop_loss, Decimal("4408"))
+        self.assertEqual(
+            decision.signal.take_profits,
+            (Decimal("4392"), Decimal("4388"), Decimal("4370")),
+        )
+        self.assertEqual(validate_signal(decision.signal).status, DecisionStatus.ACCEPTED)
+
+    def test_forex_gold_com_preco_direto_apos_direcao_e_ativo(self) -> None:
+        decision = parse_signal_text(
+            "SIGNAL ALERT 💥💥\n\n"
+            "GOLD SELL ⏬⏬\n\n"
+            "SELL XAUUSD 4405 📊📊\n\n"
+            "🪙TP1: 4400\n"
+            "🪙TP2: 4395\n"
+            "🪙TP3: 4390\n"
+            "🪙TP4: 4385\n\n"
+            "🔴 SL: 4415❌"
+        )
+
+        self.assertEqual(decision.status, DecisionStatus.ACCEPTED)
+        self.assertEqual(decision.signal.symbol, "XAUUSD")
+        self.assertEqual(decision.signal.direction, Direction.SELL)
+        self.assertEqual(decision.signal.entry_low, Decimal("4405"))
+        self.assertEqual(decision.signal.entry_high, Decimal("4405"))
+        self.assertEqual(decision.signal.stop_loss, Decimal("4415"))
+        self.assertEqual(
+            decision.signal.take_profits,
+            (Decimal("4400"), Decimal("4395"), Decimal("4390"), Decimal("4385")),
+        )
+        self.assertEqual(validate_signal(decision.signal).status, DecisionStatus.ACCEPTED)
+
+    def test_tp_hit_colado_e_relatorio_de_pips_nao_abrem_ordem(self) -> None:
+        decision = parse_signal_text(
+            "BOOM BOOM 🆘🆘🆘\n\n"
+            "GOLD BUY 🔝🔝🔝\n\n"
+            "TP2HIT🎯 ✅ 100PIPS DONE ✅ 📊"
+        )
+
+        self.assertEqual(decision.status, DecisionStatus.IGNORED)
+        self.assertEqual(decision.reason, "performance_report")
+
     def test_gold_buy_com_direcao_apenas_em_emoji_seta_junto_do_now(self) -> None:
         # Real raw text pulled straight from signal_events for this channel
         # (Forex Bull Trader): the direction is never spelled as text at
