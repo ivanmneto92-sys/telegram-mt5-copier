@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-from .database import connect_database, initialize_database
+from .client_auth import normalize_email, validate_customer_name, validate_phone
+from .database import connect_database, initialize_database, utc_now
 
 
 class ClientPortalService:
-    """Consultas somente-leitura do portal, sempre limitadas ao user_id autenticado."""
+    """Dados e alterações do portal, sempre limitados ao user_id autenticado."""
 
     def __init__(self, database_path: Path, *, brand_name: str) -> None:
         self.database_path = database_path
@@ -117,6 +119,226 @@ class ClientPortalService:
                 }
                 for r in rows
             ]
+        }
+
+    def profile(self, user_id: int) -> dict[str, object]:
+        with connect_database(self.database_path) as db:
+            row = db.execute(
+                """
+                SELECT u.telegram_username, u.status, b.customer_name, b.email, b.phone
+                FROM users u
+                LEFT JOIN customer_billing b ON b.user_id = u.id
+                WHERE u.id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError("Cliente nao encontrado.")
+        return {
+            "profile": {
+                "username": row[0],
+                "status": row[1],
+                "customer_name": row[2],
+                "email": row[3],
+                "phone": row[4],
+            }
+        }
+
+    def update_profile(
+        self,
+        user_id: int,
+        *,
+        customer_name: str,
+        email: str,
+        phone: str,
+    ) -> dict[str, object]:
+        clean_name = validate_customer_name(customer_name)
+        clean_email = normalize_email(email)
+        clean_phone = validate_phone(phone)
+        now = utc_now()
+        with connect_database(self.database_path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT 1 FROM users WHERE id = ?", (user_id,)).fetchone() is None:
+                raise ValueError("Cliente nao encontrado.")
+            owner = db.execute(
+                """
+                SELECT user_id FROM client_credentials WHERE email = ? COLLATE NOCASE
+                UNION ALL
+                SELECT user_id FROM customer_billing WHERE email = ? COLLATE NOCASE
+                LIMIT 1
+                """,
+                (clean_email, clean_email),
+            ).fetchone()
+            if owner is not None and int(owner[0]) != user_id:
+                raise ValueError("Este e-mail já está em uso.")
+            db.execute(
+                """
+                INSERT INTO customer_billing (
+                    user_id, customer_name, email, phone, plan_name, monthly_amount,
+                    due_date, billing_status, last_paid_at, notes, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'Mensal', '0', NULL, 'pending', NULL, NULL, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    customer_name = excluded.customer_name,
+                    email = excluded.email,
+                    phone = excluded.phone,
+                    updated_at = excluded.updated_at
+                """,
+                (user_id, clean_name, clean_email, clean_phone, now, now),
+            )
+            db.execute(
+                "UPDATE client_credentials SET email = ?, updated_at = ? WHERE user_id = ?",
+                (clean_email, now, user_id),
+            )
+        return self.profile(user_id)
+
+    def financial(self, user_id: int) -> dict[str, object]:
+        with connect_database(self.database_path) as db:
+            billing = db.execute(
+                """
+                SELECT plan_name, monthly_amount, due_date, billing_status, last_paid_at
+                FROM customer_billing WHERE user_id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+            if db.execute("SELECT 1 FROM users WHERE id = ?", (user_id,)).fetchone() is None:
+                raise ValueError("Cliente nao encontrado.")
+            payments = db.execute(
+                """
+                SELECT id, amount, paid_at, period_start, period_end, method, status
+                FROM customer_payments WHERE user_id = ?
+                ORDER BY paid_at DESC, id DESC LIMIT 20
+                """,
+                (user_id,),
+            ).fetchall()
+        return {
+            "billing": None if billing is None else {
+                "plan_name": billing[0],
+                "monthly_amount": billing[1],
+                "due_date": billing[2],
+                "status": billing[3],
+                "last_paid_at": billing[4],
+            },
+            "payments": [
+                {
+                    "id": int(row[0]),
+                    "amount": row[1],
+                    "paid_at": row[2],
+                    "period_start": row[3],
+                    "period_end": row[4],
+                    "method": row[5],
+                    "status": row[6],
+                }
+                for row in payments
+            ],
+        }
+
+    def risk(self, user_id: int) -> dict[str, object]:
+        with connect_database(self.database_path) as db:
+            account = db.execute(
+                """
+                SELECT id, account_alias, login FROM mt5_accounts
+                WHERE user_id = ?
+                ORDER BY CASE connection_status WHEN 'connected' THEN 0 ELSE 1 END, id DESC LIMIT 1
+                """,
+                (user_id,),
+            ).fetchone()
+            if account is None:
+                return {"account": None, "risk": None}
+            row = db.execute(
+                """
+                SELECT enabled, risk_mode, fixed_lot, risk_percent, daily_profit_target,
+                       daily_loss_limit, max_open_signals, split_tps, breakeven_enabled,
+                       trailing_enabled, take_profit_limit, tp1_breakeven_enabled, updated_at
+                FROM execution_profiles WHERE user_id = ? AND mt5_account_id = ?
+                """,
+                (user_id, int(account[0])),
+            ).fetchone()
+        return {
+            "account": {
+                "id": int(account[0]),
+                "alias": account[1],
+                "masked_login": f"••••{str(account[2])[-4:]}",
+            },
+            "risk": self._risk(row),
+        }
+
+    def update_risk(self, user_id: int, fields: dict[str, str]) -> dict[str, object]:
+        current = self.risk(user_id)
+        account = current["account"]
+        if not isinstance(account, dict):
+            raise ValueError("Cadastre uma conta MT5 antes de configurar o risco.")
+        account_id = int(account["id"])
+        allowed = {
+            "risk_mode", "fixed_lot", "risk_percent", "daily_profit_target",
+            "daily_loss_limit", "max_open_signals", "split_tps", "breakeven_enabled",
+            "trailing_enabled", "take_profit_limit", "tp1_breakeven_enabled",
+        }
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError("Campo de risco invalido.")
+        if not fields:
+            raise ValueError("Informe ao menos uma configuracao de risco.")
+        values = {key: self._validate_risk_value(key, value) for key, value in fields.items()}
+        assignments = ", ".join(f"{key} = ?" for key in values)
+        with connect_database(self.database_path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            exists = db.execute(
+                "SELECT 1 FROM execution_profiles WHERE user_id = ? AND mt5_account_id = ?",
+                (user_id, account_id),
+            ).fetchone()
+            if exists is None:
+                raise ValueError("Perfil de execucao nao encontrado.")
+            db.execute(
+                f"UPDATE execution_profiles SET {assignments}, updated_at = ? WHERE user_id = ? AND mt5_account_id = ?",
+                (*values.values(), utc_now(), user_id, account_id),
+            )
+        return self.risk(user_id)
+
+    @staticmethod
+    def _validate_risk_value(field: str, raw: str) -> str | int:
+        if field == "risk_mode":
+            if raw not in {"fixed_lot", "risk_percent"}:
+                raise ValueError("Modo de risco invalido.")
+            return raw
+        if field in {"split_tps", "breakeven_enabled", "trailing_enabled", "tp1_breakeven_enabled"}:
+            if raw not in {"0", "1", "false", "true"}:
+                raise ValueError("Valor booleano invalido.")
+            return int(raw in {"1", "true"})
+        if field in {"max_open_signals", "take_profit_limit"}:
+            try:
+                value = int(raw)
+            except ValueError as exc:
+                raise ValueError("Valor inteiro invalido.") from exc
+            if field == "max_open_signals" and not 1 <= value <= 100:
+                raise ValueError("Maximo de sinais deve ficar entre 1 e 100.")
+            if field == "take_profit_limit" and not 0 <= value <= 10:
+                raise ValueError("Quantidade de Take Profits deve ficar entre 0 e 10.")
+            return value
+        try:
+            value = Decimal(raw.replace(",", "."))
+        except (InvalidOperation, AttributeError) as exc:
+            raise ValueError("Valor decimal invalido.") from exc
+        if not value.is_finite():
+            raise ValueError("Valor decimal invalido.")
+        if field == "fixed_lot" and not Decimal("0") < value <= Decimal("100"):
+            raise ValueError("Lote fixo deve ficar entre 0 e 100.")
+        if field == "risk_percent" and not Decimal("0") < value <= Decimal("100"):
+            raise ValueError("Risco percentual deve ficar entre 0 e 100.")
+        if field in {"daily_profit_target", "daily_loss_limit"} and value < 0:
+            raise ValueError("Limite financeiro nao pode ser negativo.")
+        return format(value, "f")
+
+    @staticmethod
+    def _risk(row: object) -> dict[str, object] | None:
+        if row is None:
+            return None
+        return {
+            "enabled": bool(row[0]), "risk_mode": row[1], "fixed_lot": row[2],
+            "risk_percent": row[3], "daily_profit_target": row[4],
+            "daily_loss_limit": row[5], "max_open_signals": int(row[6]),
+            "split_tps": bool(row[7]), "breakeven_enabled": bool(row[8]),
+            "trailing_enabled": bool(row[9]), "take_profit_limit": int(row[10]),
+            "tp1_breakeven_enabled": bool(row[11]), "updated_at": row[12],
         }
 
     @staticmethod

@@ -212,6 +212,12 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             if path == "/api/v1/auth/logout":
                 self.handle_client_logout()
                 return
+            if path == "/api/v1/profile":
+                self.handle_client_profile_update(fields)
+                return
+            if path == "/api/v1/risk":
+                self.handle_client_risk_update(fields)
+                return
             self.send_error(404)
         except WebAppValidationError as exc:
             safe_log("validation_rejected", reason=safe_reason(str(exc)))
@@ -282,6 +288,12 @@ class OnboardingHandler(BaseHTTPRequestHandler):
                 payload = self.client_portal.channels(user_id)
             elif path == "/api/v1/operations":
                 payload = self.client_portal.operations(user_id)
+            elif path == "/api/v1/profile":
+                payload = self.client_portal.profile(user_id)
+            elif path == "/api/v1/financial":
+                payload = self.client_portal.financial(user_id)
+            elif path == "/api/v1/risk":
+                payload = self.client_portal.risk(user_id)
             else:
                 self.send_error(404)
                 return
@@ -347,6 +359,23 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             {"ok": True},
             extra_headers=(("Set-Cookie", clear_client_session_cookie()),),
         )
+
+    def handle_client_profile_update(self, fields: dict[str, str]) -> None:
+        user_id = self.authenticate_client()
+        payload = self.client_portal.update_profile(
+            user_id,
+            customer_name=fields.get("customer_name", ""),
+            email=fields.get("email", ""),
+            phone=fields.get("phone", ""),
+        )
+        safe_log("client_profile_updated", user_id=str(user_id))
+        self.send_json({"ok": True, **payload})
+
+    def handle_client_risk_update(self, fields: dict[str, str]) -> None:
+        user_id = self.authenticate_client()
+        payload = self.client_portal.update_risk(user_id, fields)
+        safe_log("client_risk_updated", user_id=str(user_id))
+        self.send_json({"ok": True, **payload})
 
     def handle_admin_browser_login(self, fields: dict[str, str]) -> None:
         try:

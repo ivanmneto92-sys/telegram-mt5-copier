@@ -452,6 +452,64 @@ class MiniAppFrontendTests(unittest.TestCase):
         self.assertIn("Secure", set_cookie)
         self.assertIn("SameSite=Strict", set_cookie)
 
+    def test_portal_profile_financial_and_risk_endpoints_require_client_session(self) -> None:
+        with mini_app_server() as base_url:
+            registration = Request(
+                f"{base_url}/api/v1/auth/register",
+                data=urlencode(
+                    {
+                        "customer_name": "Cliente Portal",
+                        "email": "portal@example.com",
+                        "phone": "11999990000",
+                        "password": "SenhaPortal123",
+                        "accepted_terms": "true",
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                method="POST",
+            )
+            with urlopen(registration, timeout=5) as response:
+                cookie = response.headers.get("Set-Cookie", "").split(";", 1)[0]
+
+            profile_update = Request(
+                f"{base_url}/api/v1/profile",
+                data=urlencode(
+                    {
+                        "customer_name": "Cliente Atualizado",
+                        "email": "atualizado@example.com",
+                        "phone": "11988887777",
+                    }
+                ).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Cookie": cookie,
+                },
+                method="POST",
+            )
+            with urlopen(profile_update, timeout=5) as response:
+                updated = json.loads(response.read().decode("utf-8"))
+
+            financial_request = Request(
+                f"{base_url}/api/v1/financial", headers={"Cookie": cookie}
+            )
+            with urlopen(financial_request, timeout=5) as response:
+                financial = json.loads(response.read().decode("utf-8"))
+
+            risk_request = Request(f"{base_url}/api/v1/risk", headers={"Cookie": cookie})
+            with urlopen(risk_request, timeout=5) as response:
+                risk = json.loads(response.read().decode("utf-8"))
+
+            unauthenticated = Request(f"{base_url}/api/v1/profile")
+            with self.assertRaises(HTTPError) as rejected:
+                urlopen(unauthenticated, timeout=5)
+
+        self.assertEqual("Cliente Atualizado", updated["profile"]["customer_name"])
+        self.assertEqual("atualizado@example.com", updated["profile"]["email"])
+        self.assertEqual("pending", financial["billing"]["status"])
+        self.assertEqual([], financial["payments"])
+        self.assertIsNone(risk["account"])
+        self.assertEqual(401, rejected.exception.code)
+
     def test_navegador_comum_mostra_mensagem_clara(self) -> None:
         html = render_onboarding_form("test-nonce")
 
