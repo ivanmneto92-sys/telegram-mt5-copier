@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date, timedelta
 from http.server import ThreadingHTTPServer
 import json
 from pathlib import Path
@@ -380,10 +381,10 @@ class MiniAppFrontendTests(unittest.TestCase):
                         "csrf_token": session_payload["csrf_token"],
                         "user_id": str(customer.id),
                         "amount": "149.90",
-                        "paid_at": "2026-07-27",
+                        "paid_at": date.today().isoformat(),
                         "method": "PIX",
                         "reference": "PAG-1",
-                        "expires_on": "2026-08-27",
+                        "expires_on": (date.today() + timedelta(days=30)).isoformat(),
                     }
                 ).encode("utf-8"),
                 headers={

@@ -39,13 +39,14 @@ class ConfigTests(unittest.TestCase):
     def test_peer_channel_sync_databases_sao_resolvidos_a_partir_da_raiz(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project_root = Path(tmp)
+            absolute_peer = (project_root / "abs" / "peer.sqlite3").resolve()
 
             config = AppConfig.load(
                 project_root=project_root,
                 env={
                     "PEER_CHANNEL_SYNC_DATABASES": (
                         "../robo_braba/data/telegram_mt5_copier.sqlite3,"
-                        "/abs/peer.sqlite3"
+                        f"{absolute_peer}"
                     )
                 },
                 create_dirs=True,
@@ -55,7 +56,7 @@ class ConfigTests(unittest.TestCase):
                 config.peer_channel_sync_database_paths,
                 (
                     project_root / "../robo_braba/data/telegram_mt5_copier.sqlite3",
-                    Path("/abs/peer.sqlite3"),
+                    absolute_peer,
                 ),
             )
 
