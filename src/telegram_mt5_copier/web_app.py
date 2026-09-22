@@ -204,11 +204,15 @@ class MT5OnboardingService:
         if not self.rate_limiter.allow(init.user.id):
             raise WebAppValidationError("Muitas tentativas em pouco tempo.")
 
-        broker_name = self._validated_broker_name(broker_name)
-        server_name = self._validated_server_name(
+        broker_name = validate_broker_name(
+            broker_name, self.broker_names, enforce=self.enforce_broker_servers
+        )
+        server_name = validate_server_name(
             broker_name,
             server_name,
             custom_server_name,
+            self.broker_servers,
+            enforce=self.enforce_broker_servers,
         )
 
         user = self.users.get_or_create_user(init.user.id, init.user.username)
@@ -233,24 +237,18 @@ class MT5OnboardingService:
         server_name: str,
         custom_server_name: str = "",
     ) -> str:
-        if not self.enforce_broker_servers:
-            return validate_custom_server_name(server_name)
-        allowed = self.broker_servers.get(broker_name.strip().casefold(), ())
-        if server_name == CUSTOM_SERVER_VALUE:
-            return validate_custom_server_name(custom_server_name)
-        submitted = server_name.strip().casefold()
-        for canonical_name in allowed:
-            if canonical_name.casefold() == submitted:
-                return canonical_name
-        raise WebAppValidationError("Servidor invalido para a corretora selecionada.")
+        # Mantido para compatibilidade com quem ja chama este metodo (ex.: testes);
+        # a logica em si vive em validate_server_name, compartilhada com o portal web.
+        return validate_server_name(
+            broker_name,
+            server_name,
+            custom_server_name,
+            self.broker_servers,
+            enforce=self.enforce_broker_servers,
+        )
 
     def _validated_broker_name(self, broker_name: str) -> str:
-        if not self.enforce_broker_servers:
-            return broker_name
-        canonical = self.broker_names.get(broker_name.strip().casefold())
-        if canonical is None:
-            raise WebAppValidationError("Corretora invalida.")
-        return canonical
+        return validate_broker_name(broker_name, self.broker_names, enforce=self.enforce_broker_servers)
 
 
 def validate_custom_server_name(server_name: str) -> str:
@@ -260,6 +258,49 @@ def validate_custom_server_name(server_name: str) -> str:
             "Servidor invalido. Copie exatamente o nome exibido nos dados da conta MT5."
         )
     return cleaned
+
+
+def validate_broker_name(
+    broker_name: str,
+    broker_names: Mapping[str, str],
+    *,
+    enforce: bool,
+) -> str:
+    """Resolve um nome de corretora digitado/selecionado para o nome canonico.
+
+    `broker_names` mapeia chave em minusculas -> nome canonico (ex.: "hfm" -> "HFM").
+    Sem catalogo (`enforce=False`), qualquer nome e aceito como veio.
+    """
+    if not enforce:
+        return broker_name
+    canonical = broker_names.get(broker_name.strip().casefold())
+    if canonical is None:
+        raise WebAppValidationError("Corretora invalida.")
+    return canonical
+
+
+def validate_server_name(
+    broker_name: str,
+    server_name: str,
+    custom_server_name: str,
+    broker_servers: Mapping[str, tuple[str, ...]],
+    *,
+    enforce: bool,
+) -> str:
+    """Resolve o servidor escolhido, ou valida um servidor digitado manualmente.
+
+    `broker_servers` mapeia chave em minusculas da corretora -> servidores conhecidos.
+    """
+    if not enforce:
+        return validate_custom_server_name(server_name)
+    allowed = broker_servers.get(broker_name.strip().casefold(), ())
+    if server_name == CUSTOM_SERVER_VALUE:
+        return validate_custom_server_name(custom_server_name)
+    submitted = server_name.strip().casefold()
+    for canonical_name in allowed:
+        if canonical_name.casefold() == submitted:
+            return canonical_name
+    raise WebAppValidationError("Servidor invalido para a corretora selecionada.")
 
 
 OUTSIDE_TELEGRAM_MESSAGE = "Abra esta página pelo botão Conectar conta MT5 dentro do bot."

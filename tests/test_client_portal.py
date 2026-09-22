@@ -4,7 +4,11 @@ import unittest
 
 from telegram_mt5_copier.client_auth import ClientBrowserAuthService
 from telegram_mt5_copier.client_portal import AccountNotFoundError, ClientPortalService
+from telegram_mt5_copier.credential_service import CredentialService
 from telegram_mt5_copier.database import connect_database, initialize_database, utc_now
+from telegram_mt5_copier.mt5.account_service import MT5AccountService
+from telegram_mt5_copier.mt5.client import SimulatedMT5Client
+from telegram_mt5_copier.mt5.terminal_manager import TerminalManager
 
 
 class ClientPortalTests(unittest.TestCase):
@@ -361,6 +365,166 @@ class ClientPortalTests(unittest.TestCase):
         portal = ClientPortalService(self.database_path, brand_name="Marca")
         with self.assertRaisesRegex(ValueError, "Cadastre uma conta"):
             portal.update_risk(self.user_id, {"risk_percent": "0.5"})
+
+
+class ClientPortalAccountRegistrationTests(unittest.TestCase):
+    """Cadastro/remoção de conta MT5 pelo site, com o mesmo motor do bot."""
+
+    def setUp(self) -> None:
+        self.temp = TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.database_path = self.root / "portal.sqlite3"
+        initialize_database(self.database_path)
+        now = utc_now()
+        with connect_database(self.database_path) as db:
+            self.user_id = int(db.execute(
+                "INSERT INTO users (telegram_user_id, telegram_username, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (321, "cliente", "active", now, now),
+            ).lastrowid)
+        self.credential_service = CredentialService(CredentialService.generate_key())
+        self.terminal_manager = TerminalManager(self.root / "mt5_accounts")
+        self.accounts = MT5AccountService(
+            self.database_path,
+            credential_service=self.credential_service,
+            terminal_manager=self.terminal_manager,
+            client_factory=SimulatedMT5Client,
+        )
+
+    def tearDown(self) -> None:
+        self.accounts.close()
+        self.temp.cleanup()
+
+    def portal(self, *, broker_servers: dict[str, tuple[str, ...]] | None = None) -> ClientPortalService:
+        return ClientPortalService(
+            self.database_path,
+            brand_name="Marca",
+            mt5_accounts=self.accounts,
+            broker_servers=broker_servers,
+        )
+
+    def test_broker_catalog_reflects_configured_brokers(self) -> None:
+        portal = self.portal(broker_servers={"HFM": ("HFM-Demo", "HFM-Live1")})
+
+        self.assertEqual(
+            {"brokers": [{"name": "HFM", "servers": ["HFM-Demo", "HFM-Live1"]}]},
+            portal.broker_catalog(),
+        )
+
+    def test_add_account_sem_catalogo_aceita_qualquer_corretora(self) -> None:
+        portal = self.portal(broker_servers=None)
+
+        payload = portal.add_account(
+            self.user_id,
+            broker_name="Corretora Livre",
+            server_name="Servidor-Demo",
+            login="12345678",
+            password="mt5-secret-password",
+            account_alias="Minha conta",
+        )
+
+        account = payload["account"]
+        self.assertEqual("Minha conta", account["alias"])
+        self.assertEqual("Corretora Livre", account["broker"])
+        self.assertEqual("••••5678", account["masked_login"])
+        self.assertEqual("connected", account["connection_status"])
+        # A senha nunca aparece na resposta.
+        self.assertNotIn("mt5-secret-password", str(payload))
+
+    def test_add_account_com_catalogo_rejeita_corretora_desconhecida(self) -> None:
+        portal = self.portal(broker_servers={"HFM": ("HFM-Demo",)})
+
+        with self.assertRaisesRegex(ValueError, "Corretora invalida"):
+            portal.add_account(
+                self.user_id,
+                broker_name="Corretora Inventada",
+                server_name="HFM-Demo",
+                login="12345678",
+                password="senha",
+                account_alias="Conta",
+            )
+
+    def test_add_account_com_catalogo_rejeita_servidor_fora_da_lista(self) -> None:
+        portal = self.portal(broker_servers={"HFM": ("HFM-Demo",)})
+
+        with self.assertRaisesRegex(ValueError, "Servidor invalido"):
+            portal.add_account(
+                self.user_id,
+                broker_name="HFM",
+                server_name="Servidor-Inventado",
+                login="12345678",
+                password="senha",
+                account_alias="Conta",
+            )
+
+    def test_add_account_com_catalogo_aceita_servidor_da_lista_ignorando_maiusculas(self) -> None:
+        portal = self.portal(broker_servers={"HFM": ("HFM-Demo",)})
+
+        payload = portal.add_account(
+            self.user_id,
+            broker_name="hfm",
+            server_name="hfm-demo",
+            login="12345678",
+            password="senha",
+            account_alias="Conta",
+        )
+
+        self.assertEqual("HFM", payload["account"]["broker"])
+        self.assertEqual("HFM-Demo", payload["account"]["server"])
+
+    def test_add_account_sem_mt5_accounts_configurado_falha_com_clareza(self) -> None:
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+
+        with self.assertRaisesRegex(ValueError, "indisponivel"):
+            portal.add_account(
+                self.user_id,
+                broker_name="HFM",
+                server_name="HFM-Demo",
+                login="12345678",
+                password="senha",
+                account_alias="Conta",
+            )
+
+    def test_remove_account_apaga_a_propria_conta(self) -> None:
+        portal = self.portal()
+        created = portal.add_account(
+            self.user_id,
+            broker_name="Broker",
+            server_name="Broker-Demo",
+            login="12345678",
+            password="senha",
+            account_alias="Conta",
+        )
+        account_id = created["account"]["id"]
+
+        portal.remove_account(self.user_id, account_id)
+
+        self.assertEqual([], portal.accounts(self.user_id)["accounts"])
+
+    def test_remove_account_de_outro_cliente_nao_encontrada_e_nao_apaga(self) -> None:
+        portal = self.portal()
+        other_user = self._add_other_user()
+        created = portal.add_account(
+            other_user,
+            broker_name="Broker",
+            server_name="Broker-Demo",
+            login="12345678",
+            password="senha",
+            account_alias="Conta alheia",
+        )
+        account_id = created["account"]["id"]
+
+        with self.assertRaises(AccountNotFoundError):
+            portal.remove_account(self.user_id, account_id)
+
+        self.assertEqual(1, len(portal.accounts(other_user)["accounts"]))
+
+    def _add_other_user(self) -> int:
+        now = utc_now()
+        with connect_database(self.database_path) as db:
+            return int(db.execute(
+                "INSERT INTO users (telegram_user_id, telegram_username, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (654, "outro", "active", now, now),
+            ).lastrowid)
 
 
 if __name__ == "__main__":

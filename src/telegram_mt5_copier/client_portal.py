@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import Mapping
 
 from .client_auth import normalize_email, validate_customer_name, validate_phone
 from .database import connect_database, initialize_database, utc_now
+from .mt5.account_service import MT5AccountForm, MT5AccountService
+from .web_app import WebAppValidationError, validate_broker_name, validate_server_name
 
 
 class AccountNotFoundError(ValueError):
@@ -20,10 +23,89 @@ _ACCOUNT_COLUMNS = """
 class ClientPortalService:
     """Dados e alterações do portal, sempre limitados ao user_id autenticado."""
 
-    def __init__(self, database_path: Path, *, brand_name: str) -> None:
+    def __init__(
+        self,
+        database_path: Path,
+        *,
+        brand_name: str,
+        mt5_accounts: MT5AccountService | None = None,
+        broker_servers: Mapping[str, tuple[str, ...]] | None = None,
+    ) -> None:
         self.database_path = database_path
         self.brand_name = brand_name
+        self.mt5_accounts = mt5_accounts
+        # Cadastro de conta pelo site reaproveita a mesma validacao de corretora/
+        # servidor do fluxo do bot no Telegram (web_app.py), incluindo o mesmo
+        # catalogo: sem ele (broker_servers=None), qualquer corretora/servidor
+        # digitado e aceito, exatamente como no onboarding do bot.
+        self._broker_catalog = dict(broker_servers or {})
+        self._enforce_broker_catalog = broker_servers is not None
+        self._broker_names_by_key = {
+            name.strip().casefold(): name for name in self._broker_catalog
+        }
+        self._broker_servers_by_key = {
+            name.strip().casefold(): tuple(servers)
+            for name, servers in self._broker_catalog.items()
+        }
         initialize_database(database_path)
+
+    def broker_catalog(self) -> dict[str, object]:
+        return {
+            "brokers": [
+                {"name": name, "servers": list(servers)}
+                for name, servers in self._broker_catalog.items()
+            ]
+        }
+
+    def add_account(
+        self,
+        user_id: int,
+        *,
+        broker_name: str,
+        server_name: str,
+        custom_server_name: str = "",
+        login: str,
+        password: str,
+        account_alias: str,
+    ) -> dict[str, object]:
+        if self.mt5_accounts is None:
+            raise ValueError("Cadastro de conta MT5 indisponivel nesta instancia.")
+        try:
+            broker_name = validate_broker_name(
+                broker_name, self._broker_names_by_key, enforce=self._enforce_broker_catalog
+            )
+            server_name = validate_server_name(
+                broker_name,
+                server_name,
+                custom_server_name,
+                self._broker_servers_by_key,
+                enforce=self._enforce_broker_catalog,
+            )
+        except WebAppValidationError as exc:
+            # Vira ValueError comum para cair no tratamento generico de erro de
+            # validacao do portal (HTTP 400 com esta mensagem), em vez do
+            # tratamento especifico de sessao do Telegram.
+            raise ValueError(str(exc)) from exc
+        form = MT5AccountForm(
+            broker_name=broker_name,
+            server_name=server_name,
+            login=login,
+            password=password,
+            account_alias=account_alias,
+        )
+        account = self.mt5_accounts.register_account(
+            user_id, form, keep_on_connection_failure=True
+        )
+        with connect_database(self.database_path) as db:
+            row = self._select_account(db, user_id, account.id)
+        return {"account": self._account(row)}
+
+    def remove_account(self, user_id: int, account_id: int) -> None:
+        if self.mt5_accounts is None:
+            raise ValueError("Remocao de conta MT5 indisponivel nesta instancia.")
+        with connect_database(self.database_path) as db:
+            self._select_account(db, user_id, account_id)  # levanta AccountNotFoundError
+        self.mt5_accounts.remove_account(user_id, account_id)
 
     @staticmethod
     def _select_account(db: object, user_id: int, account_id: int | None) -> object | None:

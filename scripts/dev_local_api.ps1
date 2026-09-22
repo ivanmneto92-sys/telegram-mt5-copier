@@ -38,6 +38,17 @@ if (-not (Test-Path -LiteralPath $envPath)) {
         throw 'Nao foi possivel gerar a chave local. Verifique se o pacote cryptography esta instalado.'
     }
     $brand = if ($Instance -eq 'main') { 'Instituto Trader (DEV)' } else { 'Robo Braba (DEV)' }
+
+    # Template MT5 falso (so o arquivo precisa existir; nunca e executado de
+    # verdade aqui). Sem isso, nenhuma corretora apareceria no catalogo e o
+    # cadastro de conta pelo site rejeitaria qualquer corretora digitada.
+    $templateDir = Join-Path $devRoot 'mt5_templates\HFM'
+    New-Item -ItemType Directory -Force -Path $templateDir | Out-Null
+    $terminalPath = Join-Path $templateDir 'terminal64.exe'
+    if (-not (Test-Path -LiteralPath $terminalPath)) {
+        Set-Content -LiteralPath $terminalPath -Value 'placeholder' -Encoding ascii
+    }
+
     $lines = @(
         "INSTANCE_ID=$Instance",
         "BRAND_NAME=$brand",
@@ -48,6 +59,8 @@ if (-not (Test-Path -LiteralPath $envPath)) {
         'GLOBAL_EXECUTION_KILL_SWITCH=true',
         'MT5_EXECUTION_MODE=simulation',
         'ALLOW_LIVE_ACCOUNTS=false',
+        "MT5_BROKER_TEMPLATES=HFM=$templateDir",
+        'MT5_BROKER_SERVERS=HFM=HFM-Demo|HFM-Live1',
         'MARKET_NEWS_ENABLED=false',
         'OPERATIONAL_ALERTS_ENABLED=false',
         'ONBOARDING_HOST=127.0.0.1',

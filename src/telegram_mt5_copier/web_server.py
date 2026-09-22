@@ -230,6 +230,12 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             if path == "/api/v1/risk":
                 self.handle_client_risk_update(fields)
                 return
+            if path == "/api/v1/accounts":
+                self.handle_client_account_create(fields)
+                return
+            if path == "/api/v1/accounts/remove":
+                self.handle_client_account_remove(fields)
+                return
             self.send_error(404)
         except WebAppValidationError as exc:
             safe_log("validation_rejected", reason=safe_reason(str(exc)))
@@ -301,6 +307,8 @@ class OnboardingHandler(BaseHTTPRequestHandler):
                 payload = self.client_portal.dashboard(user_id, account_id)
             elif path == "/api/v1/accounts":
                 payload = self.client_portal.accounts(user_id)
+            elif path == "/api/v1/brokers":
+                payload = self.client_portal.broker_catalog()
             elif path == "/api/v1/channels":
                 payload = self.client_portal.channels(user_id)
             elif path == "/api/v1/operations":
@@ -403,6 +411,33 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             return
         safe_log("client_risk_updated", user_id=str(user_id))
         self.send_json({"ok": True, **payload})
+
+    def handle_client_account_create(self, fields: dict[str, str]) -> None:
+        user_id = self.authenticate_client()
+        payload = self.client_portal.add_account(
+            user_id,
+            broker_name=fields.get("broker_name", ""),
+            server_name=fields.get("server_name", ""),
+            custom_server_name=fields.get("custom_server_name", ""),
+            login=fields.get("login", ""),
+            password=fields.get("password", ""),
+            account_alias=fields.get("account_alias", ""),
+        )
+        safe_log("client_account_created", user_id=str(user_id))
+        self.send_json({"ok": True, **payload})
+
+    def handle_client_account_remove(self, fields: dict[str, str]) -> None:
+        user_id = self.authenticate_client()
+        account_id = parse_account_id(fields.get("account_id"))
+        if account_id is None:
+            raise InvalidAccountIdError("Identificador de conta invalido.")
+        try:
+            self.client_portal.remove_account(user_id, account_id)
+        except AccountNotFoundError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=404)
+            return
+        safe_log("client_account_removed", user_id=str(user_id))
+        self.send_json({"ok": True})
 
     def handle_admin_browser_login(self, fields: dict[str, str]) -> None:
         try:
@@ -769,6 +804,8 @@ def main() -> int:
         client_portal = ClientPortalService(
             config.database_path,
             brand_name=config.brand_name,
+            mt5_accounts=accounts,
+            broker_servers=broker_servers,
         )
         OnboardingHandler.bot_token = config.telegram_bot_token
         OnboardingHandler.broker_options = broker_options
