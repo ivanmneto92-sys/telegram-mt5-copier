@@ -271,6 +271,12 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             if path == "/api/v1/channels/toggle":
                 self.handle_client_channel_toggle(fields)
                 return
+            if path == "/api/v1/copier/pause-toggle":
+                self.handle_client_copier_pause_toggle()
+                return
+            if path == "/api/v1/settings":
+                self.handle_client_settings_update(fields)
+                return
             self.send_error(404)
         except WebAppValidationError as exc:
             safe_log("validation_rejected", reason=safe_reason(str(exc)))
@@ -354,6 +360,8 @@ class OnboardingHandler(BaseHTTPRequestHandler):
                 payload = self.client_portal.financial(user_id)
             elif path == "/api/v1/risk":
                 payload = self.client_portal.risk(user_id, account_id)
+            elif path == "/api/v1/settings":
+                payload = self.client_portal.news_preference(user_id)
             else:
                 self.send_error(404)
                 return
@@ -621,6 +629,23 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             user_id=str(user_id),
             channel_id=str(channel_id),
             enabled=str(payload["enabled"]).lower(),
+        )
+        self.send_json({"ok": True, **payload})
+
+    def handle_client_copier_pause_toggle(self) -> None:
+        user_id = self.authenticate_client()
+        payload = self.client_portal.toggle_copier_pause(user_id)
+        safe_log("client_copier_status_toggled", user_id=str(user_id), status=str(payload["status"]))
+        self.send_json({"ok": True, **payload})
+
+    def handle_client_settings_update(self, fields: dict[str, str]) -> None:
+        user_id = self.authenticate_client()
+        avoid_high_impact_news = fields.get("avoid_high_impact_news") == "1"
+        payload = self.client_portal.set_news_preference(user_id, avoid_high_impact_news)
+        safe_log(
+            "client_news_preference_updated",
+            user_id=str(user_id),
+            avoid_high_impact_news=str(avoid_high_impact_news).lower(),
         )
         self.send_json({"ok": True, **payload})
 
@@ -1020,6 +1045,9 @@ def main() -> int:
             brand_name=config.brand_name,
             mt5_accounts=accounts,
             broker_servers=broker_servers,
+            market_news_enabled=config.market_news_enabled,
+            market_news_minutes_before=config.market_news_minutes_before,
+            market_news_minutes_after=config.market_news_minutes_after,
         )
         OnboardingHandler.bot_token = config.telegram_bot_token
         OnboardingHandler.broker_options = broker_options

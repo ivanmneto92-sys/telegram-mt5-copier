@@ -91,6 +91,60 @@ class ClientPortalTests(unittest.TestCase):
         self.assertFalse(new_channel["enabled"])
         self.assertEqual("custom", portal.channels(self.user_id)["selection_mode"])
 
+    def test_toggle_copier_pause_alterna_status_igual_ao_bot(self) -> None:
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+
+        paused = portal.toggle_copier_pause(self.user_id)
+        self.assertEqual({"status": "paused"}, paused)
+        with connect_database(self.database_path) as db:
+            self.assertEqual(
+                "paused",
+                db.execute("SELECT status FROM users WHERE id = ?", (self.user_id,)).fetchone()[0],
+            )
+
+        reactivated = portal.toggle_copier_pause(self.user_id)
+        self.assertEqual({"status": "active"}, reactivated)
+        with connect_database(self.database_path) as db:
+            self.assertEqual(
+                "active",
+                db.execute("SELECT status FROM users WHERE id = ?", (self.user_id,)).fetchone()[0],
+            )
+
+    def test_news_preference_default_e_atualizacao(self) -> None:
+        portal = ClientPortalService(
+            self.database_path,
+            brand_name="Marca",
+            market_news_enabled=True,
+            market_news_minutes_before=15,
+            market_news_minutes_after=10,
+        )
+
+        default = portal.news_preference(self.user_id)
+        self.assertEqual(
+            {
+                "avoid_high_impact_news": False,
+                "market_news_available": True,
+                "minutes_before": 15,
+                "minutes_after": 10,
+            },
+            default,
+        )
+
+        updated = portal.set_news_preference(self.user_id, True)
+        self.assertTrue(updated["avoid_high_impact_news"])
+        self.assertTrue(portal.news_preference(self.user_id)["avoid_high_impact_news"])
+
+        # O mesmo campo que o MarketNewsService le na execucao real -- a troca
+        # pelo portal tem efeito imediato pro bot tambem.
+        with connect_database(self.database_path) as db:
+            self.assertEqual(
+                1,
+                db.execute(
+                    "SELECT avoid_high_impact_news FROM user_settings WHERE user_id = ?",
+                    (self.user_id,),
+                ).fetchone()[0],
+            )
+
     def test_web_registration_creates_pending_customer_and_secure_login(self) -> None:
         auth = ClientBrowserAuthService(self.database_path)
         session = auth.register(
@@ -400,6 +454,60 @@ class ClientPortalTests(unittest.TestCase):
         self.assertEqual(["EURUSD"], [op["symbol"] for op in only_second])
         self.assertEqual(1, portal.dashboard(self.user_id, first)["active_operations"])
         self.assertEqual(2, portal.dashboard(self.user_id)["active_operations"])
+
+    def test_operations_traduz_o_codigo_de_rejeicao_para_texto_legivel(self) -> None:
+        account_id = self._add_account(self.user_id, "Principal", "111111")
+        now = utc_now()
+        with connect_database(self.database_path) as db:
+            db.execute(
+                """
+                INSERT INTO execution_groups (
+                    signal_id, user_id, mt5_account_id, status, direction, symbol,
+                    entry_low, entry_high, selected_entry_price, order_type,
+                    total_volume, stop_loss, expiration_at, execution_mode, error_code,
+                    signal_received_at, pending_created_at, created_at, updated_at
+                ) VALUES ('sig-rejeitado', ?, ?, 'rejected', 'buy', 'XAUUSD',
+                          '1', '1', '1', 'market', '0.01', '0.5', ?, 'simulation',
+                          'daily_loss_limit_reached', ?, ?, ?, ?)
+                """,
+                (self.user_id, account_id, now, now, now, now, now),
+            )
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+
+        operations = portal.operations(self.user_id)["operations"]
+
+        self.assertEqual("daily_loss_limit_reached", operations[0]["error_code"])
+        self.assertEqual(
+            "Limite de perda diária já foi atingido — novos sinais ficam bloqueados até a próxima sessão.",
+            operations[0]["reason_label"],
+        )
+
+    def test_operations_sem_erro_nao_tem_reason_label(self) -> None:
+        self._add_account(self.user_id, "Principal", "111111")
+        # test_operations_can_be_filtered_by_account ja cobre uma operacao 'open'
+        # sem error_code -- so confirmamos aqui que reason_label fica None.
+        first = self._add_account(self.user_id, "Secundaria", "222222")
+        now = utc_now()
+        with connect_database(self.database_path) as db:
+            db.execute(
+                """
+                INSERT INTO execution_groups (
+                    signal_id, user_id, mt5_account_id, status, direction, symbol,
+                    entry_low, entry_high, selected_entry_price, order_type,
+                    total_volume, stop_loss, expiration_at, execution_mode,
+                    signal_received_at, pending_created_at, created_at, updated_at
+                ) VALUES ('sig-ok', ?, ?, 'open', 'buy', 'XAUUSD',
+                          '1', '1', '1', 'market', '0.01', '0.5', ?, 'simulation',
+                          ?, ?, ?, ?)
+                """,
+                (self.user_id, first, now, now, now, now, now),
+            )
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+
+        operations = portal.operations(self.user_id)["operations"]
+
+        self.assertIsNone(operations[0]["error_code"])
+        self.assertIsNone(operations[0]["reason_label"])
 
     def test_risk_rejects_unknown_and_out_of_range_values(self) -> None:
         portal = ClientPortalService(self.database_path, brand_name="Marca")

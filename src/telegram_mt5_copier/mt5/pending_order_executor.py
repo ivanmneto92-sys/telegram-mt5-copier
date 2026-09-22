@@ -1011,6 +1011,56 @@ def money_text(value: Decimal) -> str:
     return f"$ {value.quantize(Decimal('0.01'))}"
 
 
+# Traduz os codigos curtos que o executor grava em execution_groups.error_code
+# pra uma frase legivel. O bot mostra os mesmos codigos crus na tela de
+# historico hoje (nenhum lugar traduzia isso antes); o portal do cliente e
+# quem consome este mapa primeiro. Motivos que ja sao uma frase em portugues
+# (por exemplo os dois primeiros de rejection_guidance) passam direto, sem
+# entrada aqui -- o fallback no final cobre esses e qualquer codigo novo que
+# ainda nao tenha sido adicionado a este mapa.
+REJECTION_REASON_LABELS: dict[str, str] = {
+    "live_accounts_not_allowed": "Execução em contas reais está desativada nesta VPS.",
+    "terminal_not_provisioned": "O terminal MT5 desta conta ainda não foi provisionado.",
+    "account_disconnected": "A conta MT5 está desconectada.",
+    "kill_switch_enabled": "Execução de ordens pausada globalmente (kill switch).",
+    "real_account_blocked": "Contas reais não são permitidas neste modo de execução.",
+    "only_demo_accounts_supported": "Somente contas demo são suportadas neste modo.",
+    "terminal_disconnected": "O terminal MT5 perdeu a conexão.",
+    "terminal_trading_not_allowed": "Negociação não permitida no terminal (verifique o AutoTrading).",
+    "account_trading_not_allowed": "Esta conta não tem permissão para negociar nesta corretora.",
+    "mt5_login_mismatch": "O login conectado no terminal não confere com o da conta cadastrada.",
+    "symbol_select_failed": "Não foi possível selecionar o ativo no MetaTrader 5.",
+    "mt5_initialize_failed": "Falha ao iniciar o terminal MetaTrader 5.",
+    "netting_multiple_tps_not_supported": "Conta netting não suporta múltiplos alvos (TPs) neste sinal.",
+    "missing_orders": "Nenhuma ordem foi gerada para este sinal.",
+    "symbol_trade_disabled": "Negociação deste ativo está desabilitada na corretora.",
+    "order_expired": "A ordem pendente expirou antes de ser preenchida.",
+    "price_hit_sl_before_entry": "O preço já atingiu o stop antes da entrada ser alcançada.",
+    "price_hit_tp_before_entry": "O preço já atingiu o alvo antes da entrada ser alcançada.",
+    "buy_stop_loss_not_below_entry": "Stop loss inválido: precisa ficar abaixo da entrada numa compra.",
+    "buy_take_profit_not_above_entry": "Take profit inválido: precisa ficar acima da entrada numa compra.",
+    "sell_stop_loss_not_above_entry": "Stop loss inválido: precisa ficar acima da entrada numa venda.",
+    "sell_take_profit_not_below_entry": "Take profit inválido: precisa ficar abaixo da entrada numa venda.",
+    "stop_loss_inside_broker_stops_level": "Stop loss muito próximo do preço para o mínimo da corretora.",
+    "take_profit_inside_broker_stops_level": "Take profit muito próximo do preço para o mínimo da corretora.",
+    "symbol_point_invalid": "A corretora retornou dados inválidos para o ativo.",
+    "negative_spread": "Spread inválido (negativo) reportado pela corretora.",
+    "max_spread_exceeded": "Spread acima do limite máximo configurado.",
+    "max_open_signals_reached": "Limite de operações simultâneas já foi atingido.",
+    "daily_profit_target_reached": (
+        "Meta de lucro diária já foi atingida — novos sinais ficam bloqueados até a próxima sessão."
+    ),
+    "daily_loss_limit_reached": (
+        "Limite de perda diária já foi atingido — novos sinais ficam bloqueados até a próxima sessão."
+    ),
+    "high_impact_news_window": "Bloqueado pela proteção de notícias de alto impacto.",
+}
+
+
+def rejection_reason_label(reason: str) -> str:
+    return REJECTION_REASON_LABELS.get(reason, reason)
+
+
 def rejection_guidance(
     reason: str,
     profile: ExecutionProfile | None,

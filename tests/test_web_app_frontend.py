@@ -745,6 +745,62 @@ class MiniAppFrontendTests(unittest.TestCase):
         self.assertFalse(disabled_result["body"]["enabled"])
         self.assertEqual(400, invalid_result["status"])
 
+    def test_cliente_pausa_reativa_e_ajusta_preferencia_de_noticias(self) -> None:
+        def get(url: str, cookie: str = "") -> tuple[int, dict[str, object]]:
+            try:
+                with urlopen(Request(url, headers={"Cookie": cookie}), timeout=5) as response:
+                    return response.status, json.loads(response.read().decode("utf-8"))
+            except HTTPError as exc:
+                return exc.code, json.loads(exc.read().decode("utf-8"))
+
+        server = mini_app_server()
+        with server as base_url:
+            registration = Request(
+                f"{base_url}/api/v1/auth/register",
+                data=urlencode(
+                    {
+                        "customer_name": "Cliente Operacional",
+                        "email": "operacional@example.com",
+                        "phone": "11999990000",
+                        "password": "SenhaOperacional123",
+                        "accepted_terms": "true",
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                method="POST",
+            )
+            with urlopen(registration, timeout=5) as response:
+                cookie = response.headers.get("Set-Cookie", "").split(";", 1)[0]
+
+            _, before_pause = get(f"{base_url}/api/v1/dashboard", cookie)
+            paused_result = post_expect_error_with_cookie(
+                f"{base_url}/api/v1/copier/pause-toggle", {}, cookie
+            )
+            _, after_pause = get(f"{base_url}/api/v1/dashboard", cookie)
+            reactivated_result = post_expect_error_with_cookie(
+                f"{base_url}/api/v1/copier/pause-toggle", {}, cookie
+            )
+
+            _, default_settings = get(f"{base_url}/api/v1/settings", cookie)
+            settings_result = post_expect_error_with_cookie(
+                f"{base_url}/api/v1/settings", {"avoid_high_impact_news": "1"}, cookie
+            )
+            _, after_settings = get(f"{base_url}/api/v1/settings", cookie)
+
+        # Cadastro pelo site sempre comeca pausado (ver README: "Cadastros feitos
+        # diretamente no portal sao criados com usuario pausado e financeiro
+        # pendente") -- o primeiro toggle e quem ativa.
+        self.assertEqual("paused", before_pause["user"]["status"])
+        self.assertEqual(200, paused_result["status"])
+        self.assertEqual("active", paused_result["body"]["status"])
+        self.assertEqual("active", after_pause["user"]["status"])
+        self.assertEqual("paused", reactivated_result["body"]["status"])
+
+        self.assertFalse(default_settings["avoid_high_impact_news"])
+        self.assertEqual(200, settings_result["status"])
+        self.assertTrue(settings_result["body"]["avoid_high_impact_news"])
+        self.assertTrue(after_settings["avoid_high_impact_news"])
+
     def test_registration_sends_confirmation_and_password_reset_flow_works(self) -> None:
         def get(url: str, cookie: str = "") -> tuple[int, dict[str, object]]:
             try:

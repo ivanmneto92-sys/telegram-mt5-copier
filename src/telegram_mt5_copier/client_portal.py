@@ -8,6 +8,9 @@ from .channel_catalog import ChannelCatalogService
 from .client_auth import normalize_email, validate_customer_name, validate_phone
 from .database import connect_database, initialize_database, utc_now
 from .mt5.account_service import MT5AccountForm, MT5AccountService
+from .mt5.pending_order_executor import rejection_reason_label
+from .settings_service import SettingsService
+from .users import USER_STATUS_ACTIVE, USER_STATUS_PAUSED, UserRepository
 from .web_app import WebAppValidationError, validate_broker_name, validate_server_name
 
 
@@ -31,10 +34,16 @@ class ClientPortalService:
         brand_name: str,
         mt5_accounts: MT5AccountService | None = None,
         broker_servers: Mapping[str, tuple[str, ...]] | None = None,
+        market_news_enabled: bool = False,
+        market_news_minutes_before: int = 0,
+        market_news_minutes_after: int = 0,
     ) -> None:
         self.database_path = database_path
         self.brand_name = brand_name
         self.mt5_accounts = mt5_accounts
+        self.market_news_enabled = market_news_enabled
+        self.market_news_minutes_before = market_news_minutes_before
+        self.market_news_minutes_after = market_news_minutes_after
         # Cadastro de conta pelo site reaproveita a mesma validacao de corretora/
         # servidor do fluxo do bot no Telegram (web_app.py), incluindo o mesmo
         # catalogo: sem ele (broker_servers=None), qualquer corretora/servidor
@@ -50,6 +59,8 @@ class ClientPortalService:
         }
         initialize_database(database_path)
         self.channels_catalog = ChannelCatalogService(database_path)
+        self.users = UserRepository(database_path)
+        self.settings = SettingsService(database_path)
 
     def broker_catalog(self) -> dict[str, object]:
         return {
@@ -226,6 +237,44 @@ class ClientPortalService:
         enabled = self.channels_catalog.toggle_subscription(user_id, channel_id)
         return {"channel_id": channel_id, "enabled": enabled}
 
+    def toggle_copier_pause(self, user_id: int) -> dict[str, object]:
+        """Pausa/reativa o copiador pro cliente autenticado.
+
+        Reaproveita UserRepository.set_status -- o mesmo campo que o bot usa
+        no fluxo "Pausar novas entradas" e que o admin usa pra ativar/pausar
+        pelo painel -- entao os tres lugares sempre leem o mesmo estado.
+        Reativar aqui nunca libera sinais por si so: a execucao ao vivo exige
+        billing em dia de forma independente (accounts_for_approved_users),
+        entao um cliente pausado por falta de pagamento nao ganha acesso so
+        por reativar o proprio status.
+        """
+        current = self.users.get_by_id(user_id)
+        next_status = (
+            USER_STATUS_ACTIVE if current.status == USER_STATUS_PAUSED else USER_STATUS_PAUSED
+        )
+        updated = self.users.set_status(user_id, next_status)
+        return {"status": updated.status}
+
+    def news_preference(self, user_id: int) -> dict[str, object]:
+        settings = self.settings.ensure_defaults(user_id)
+        return {
+            "avoid_high_impact_news": settings.avoid_high_impact_news,
+            "market_news_available": self.market_news_enabled,
+            "minutes_before": self.market_news_minutes_before,
+            "minutes_after": self.market_news_minutes_after,
+        }
+
+    def set_news_preference(self, user_id: int, avoid_high_impact_news: bool) -> dict[str, object]:
+        """Liga/desliga o bloqueio de novas entradas em noticias fortes.
+
+        Reaproveita SettingsService.update_avoid_high_impact_news -- o mesmo
+        metodo que o bot usa no menu "Noticias do mercado" -- e o campo e
+        lido direto pelo MarketNewsService na execucao real, entao a troca
+        aqui tem efeito imediato nos dois canais (bot e portal).
+        """
+        self.settings.update_avoid_high_impact_news(user_id, avoid_high_impact_news)
+        return self.news_preference(user_id)
+
     def operations(
         self, user_id: int, *, limit: int = 100, account_id: int | None = None
     ) -> dict[str, object]:
@@ -255,6 +304,7 @@ class ClientPortalService:
                     "id": int(r[0]), "status": r[1], "symbol": r[2], "direction": r[3],
                     "order_type": r[4], "entry_price": r[5], "stop_loss": r[6],
                     "total_volume": r[7], "created_at": r[8], "error_code": r[9],
+                    "reason_label": rejection_reason_label(r[9]) if r[9] else None,
                     "channel_name": r[10] or "Canal nao identificado", "order_count": int(r[11]),
                     "net_profit": str(r[12]),
                 }
