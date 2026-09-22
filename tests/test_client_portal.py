@@ -51,6 +51,46 @@ class ClientPortalTests(unittest.TestCase):
         self.assertEqual("custom", payload["selection_mode"])
         self.assertFalse(payload["channels"][0]["enabled"])
 
+    def test_toggle_channel_liga_e_desliga(self) -> None:
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+        channel_id = portal.channels(self.user_id)["channels"][0]["id"]
+
+        first = portal.toggle_channel(self.user_id, channel_id)
+        self.assertEqual({"channel_id": channel_id, "enabled": True}, first)
+        self.assertTrue(portal.channels(self.user_id)["channels"][0]["enabled"])
+
+        second = portal.toggle_channel(self.user_id, channel_id)
+        self.assertEqual({"channel_id": channel_id, "enabled": False}, second)
+        self.assertFalse(portal.channels(self.user_id)["channels"][0]["enabled"])
+
+    def test_toggle_channel_inexistente_e_rejeitado(self) -> None:
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+
+        with self.assertRaisesRegex(ValueError, "Canal indisponível"):
+            portal.toggle_channel(self.user_id, 999999)
+
+    def test_canal_novo_nao_e_seguido_automaticamente_por_quem_ja_tinha_todos(self) -> None:
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+        portal.channels_catalog.set_selection_mode(self.user_id, "all")
+        self.assertTrue(portal.channels(self.user_id)["channels"][0]["enabled"])
+
+        # Assim que um canal novo e de fato registrado (mesmo caminho que o
+        # bot usa ao validar um canal de origem), quem estava em "todos" e
+        # congelado em "custom" -- o novo canal nunca herda a selecao antiga.
+        portal.channels_catalog.register_configured_channel(
+            telegram_chat_id="-1002",
+            title="Canal Novo",
+            username=None,
+            content_protected=False,
+            history_accessible=True,
+            last_message_id=None,
+        )
+
+        channels = portal.channels(self.user_id)["channels"]
+        new_channel = next(c for c in channels if c["name"] == "Canal Novo")
+        self.assertFalse(new_channel["enabled"])
+        self.assertEqual("custom", portal.channels(self.user_id)["selection_mode"])
+
     def test_web_registration_creates_pending_customer_and_secure_login(self) -> None:
         auth = ClientBrowserAuthService(self.database_path)
         session = auth.register(

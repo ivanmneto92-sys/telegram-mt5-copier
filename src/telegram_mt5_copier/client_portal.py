@@ -4,6 +4,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Mapping
 
+from .channel_catalog import ChannelCatalogService
 from .client_auth import normalize_email, validate_customer_name, validate_phone
 from .database import connect_database, initialize_database, utc_now
 from .mt5.account_service import MT5AccountForm, MT5AccountService
@@ -48,6 +49,7 @@ class ClientPortalService:
             for name, servers in self._broker_catalog.items()
         }
         initialize_database(database_path)
+        self.channels_catalog = ChannelCatalogService(database_path)
 
     def broker_catalog(self) -> dict[str, object]:
         return {
@@ -211,6 +213,18 @@ class ClientPortalService:
                 for row in rows
             ],
         }
+
+    def toggle_channel(self, user_id: int, channel_id: int) -> dict[str, object]:
+        """Liga/desliga um canal aprovado pro cliente autenticado.
+
+        Reaproveita ChannelCatalogService.toggle_subscription -- a mesma
+        logica que o bot do Telegram usa pelo botao inline -- entao um canal
+        novo continua nunca sendo seguido automaticamente por quem ja tinha
+        selecao "todos" (ver _freeze_follow_all_modes) e a troca aqui vira
+        selecao "custom" do mesmo jeito que trocaria vindo do bot.
+        """
+        enabled = self.channels_catalog.toggle_subscription(user_id, channel_id)
+        return {"channel_id": channel_id, "enabled": enabled}
 
     def operations(
         self, user_id: int, *, limit: int = 100, account_id: int | None = None

@@ -679,6 +679,72 @@ class MiniAppFrontendTests(unittest.TestCase):
         self.assertEqual(404, updated_foreign["status"])
         self.assertEqual(1, first_risk["risk"]["max_open_signals"])
 
+    def test_cliente_ativa_e_desativa_canal_pelo_portal(self) -> None:
+        def get(url: str, cookie: str = "") -> tuple[int, dict[str, object]]:
+            try:
+                with urlopen(Request(url, headers={"Cookie": cookie}), timeout=5) as response:
+                    return response.status, json.loads(response.read().decode("utf-8"))
+            except HTTPError as exc:
+                return exc.code, json.loads(exc.read().decode("utf-8"))
+
+        server = mini_app_server()
+        with server as base_url:
+            registration = Request(
+                f"{base_url}/api/v1/auth/register",
+                data=urlencode(
+                    {
+                        "customer_name": "Cliente Canais",
+                        "email": "canais@example.com",
+                        "phone": "11999990000",
+                        "password": "SenhaCanais123",
+                        "accepted_terms": "true",
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                method="POST",
+            )
+            with urlopen(registration, timeout=5) as response:
+                cookie = response.headers.get("Set-Cookie", "").split(";", 1)[0]
+
+            now = utc_now()
+            with connect_database(server.database_path) as db:
+                channel_id = int(
+                    db.execute(
+                        """
+                        INSERT INTO source_channels (
+                            telegram_chat_id, title, status, access_status,
+                            created_at, updated_at
+                        ) VALUES ('-2001', 'Canal HTTP', 'active', 'confirmed', ?, ?)
+                        """,
+                        (now, now),
+                    ).lastrowid
+                )
+
+            status_anonymous = post_expect_error(
+                f"{base_url}/api/v1/channels/toggle", {"channel_id": str(channel_id)}
+            )["status"]
+            enabled_result = post_expect_error_with_cookie(
+                f"{base_url}/api/v1/channels/toggle", {"channel_id": str(channel_id)}, cookie
+            )
+            _, after_enable = get(f"{base_url}/api/v1/channels", cookie)
+            disabled_result = post_expect_error_with_cookie(
+                f"{base_url}/api/v1/channels/toggle", {"channel_id": str(channel_id)}, cookie
+            )
+            invalid_result = post_expect_error_with_cookie(
+                f"{base_url}/api/v1/channels/toggle", {"channel_id": "999999"}, cookie
+            )
+
+        # Rotas POST de /api/v1 mapeiam ValueError (sessao ausente/invalida)
+        # para 400, nao 401 -- comportamento ja existente nas outras rotas de
+        # mutacao do portal (accounts, risk etc.), nao algo especifico daqui.
+        self.assertEqual(400, status_anonymous)
+        self.assertEqual(200, enabled_result["status"])
+        self.assertEqual({"ok": True, "channel_id": channel_id, "enabled": True}, enabled_result["body"])
+        self.assertTrue(after_enable["channels"][0]["enabled"])
+        self.assertEqual(200, disabled_result["status"])
+        self.assertFalse(disabled_result["body"]["enabled"])
+        self.assertEqual(400, invalid_result["status"])
+
     def test_registration_sends_confirmation_and_password_reset_flow_works(self) -> None:
         def get(url: str, cookie: str = "") -> tuple[int, dict[str, object]]:
             try:

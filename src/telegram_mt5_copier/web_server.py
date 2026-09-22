@@ -268,6 +268,9 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             if path == "/api/v1/accounts/remove":
                 self.handle_client_account_remove(fields)
                 return
+            if path == "/api/v1/channels/toggle":
+                self.handle_client_channel_toggle(fields)
+                return
             self.send_error(404)
         except WebAppValidationError as exc:
             safe_log("validation_rejected", reason=safe_reason(str(exc)))
@@ -605,6 +608,21 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         if isinstance(account, dict):
             self.send_mt5_account_removed_notification_best_effort(user_id, account)
         self.send_json({"ok": True})
+
+    def handle_client_channel_toggle(self, fields: dict[str, str]) -> None:
+        user_id = self.authenticate_client()
+        try:
+            channel_id = int(fields.get("channel_id", ""))
+        except (TypeError, ValueError):
+            raise ValueError("Identificador de canal invalido.") from None
+        payload = self.client_portal.toggle_channel(user_id, channel_id)
+        safe_log(
+            "client_channel_toggled",
+            user_id=str(user_id),
+            channel_id=str(channel_id),
+            enabled=str(payload["enabled"]).lower(),
+        )
+        self.send_json({"ok": True, **payload})
 
     def handle_admin_browser_login(self, fields: dict[str, str]) -> None:
         try:
