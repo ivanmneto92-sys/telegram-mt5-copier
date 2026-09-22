@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, urlsplit
 from .admin_auth import AdminBrowserAuthService
 from .admin_panel import AdminIdentity, AdminPanelService, render_admin_panel, render_admin_script
 from .client_auth import ClientBrowserAuthService
-from .client_portal import ClientPortalService
+from .client_portal import AccountNotFoundError, ClientPortalService
 from .config import AppConfig
 from .credential_service import CredentialService
 from .mt5.account_service import MT5AccountService
@@ -24,6 +24,18 @@ from .web_app import (
     render_onboarding_form,
     validate_telegram_web_app_init_data,
 )
+
+
+class InvalidAccountIdError(ValueError):
+    """account_id com formato invalido; vira HTTP 400 (nao 401)."""
+
+
+def parse_account_id(raw: str | None) -> int | None:
+    if raw is None or raw == "":
+        return None
+    if not raw.isascii() or not raw.isdigit() or int(raw) <= 0:
+        raise InvalidAccountIdError("Identificador de conta invalido.")
+    return int(raw)
 
 
 class OnboardingHandler(BaseHTTPRequestHandler):
@@ -282,22 +294,31 @@ class OnboardingHandler(BaseHTTPRequestHandler):
     def handle_client_api_get(self, path: str) -> None:
         try:
             user_id = self.authenticate_client()
+            account_id = parse_account_id(
+                parse_qs(urlsplit(self.path).query).get("account_id", [None])[0]
+            )
             if path in {"/api/v1/session", "/api/v1/dashboard"}:
-                payload = self.client_portal.dashboard(user_id)
+                payload = self.client_portal.dashboard(user_id, account_id)
+            elif path == "/api/v1/accounts":
+                payload = self.client_portal.accounts(user_id)
             elif path == "/api/v1/channels":
                 payload = self.client_portal.channels(user_id)
             elif path == "/api/v1/operations":
-                payload = self.client_portal.operations(user_id)
+                payload = self.client_portal.operations(user_id, account_id=account_id)
             elif path == "/api/v1/profile":
                 payload = self.client_portal.profile(user_id)
             elif path == "/api/v1/financial":
                 payload = self.client_portal.financial(user_id)
             elif path == "/api/v1/risk":
-                payload = self.client_portal.risk(user_id)
+                payload = self.client_portal.risk(user_id, account_id)
             else:
                 self.send_error(404)
                 return
             self.send_json({"ok": True, **payload})
+        except InvalidAccountIdError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=400)
+        except AccountNotFoundError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=404)
         except ValueError as exc:
             safe_log("client_session_rejected", reason=safe_reason(str(exc)))
             self.send_json({"ok": False, "error": "Sessao expirada."}, status=401)
@@ -373,7 +394,13 @@ class OnboardingHandler(BaseHTTPRequestHandler):
 
     def handle_client_risk_update(self, fields: dict[str, str]) -> None:
         user_id = self.authenticate_client()
-        payload = self.client_portal.update_risk(user_id, fields)
+        risk_fields = dict(fields)
+        account_id = parse_account_id(risk_fields.pop("account_id", None))
+        try:
+            payload = self.client_portal.update_risk(user_id, risk_fields, account_id)
+        except AccountNotFoundError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=404)
+            return
         safe_log("client_risk_updated", user_id=str(user_id))
         self.send_json({"ok": True, **payload})
 

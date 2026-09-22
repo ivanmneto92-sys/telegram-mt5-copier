@@ -26,6 +26,7 @@ from telegram_mt5_copier.admin_panel import AdminPanelService, render_admin_pane
 from telegram_mt5_copier.admin_auth import AdminBrowserAuthService
 from telegram_mt5_copier.client_auth import ClientBrowserAuthService
 from telegram_mt5_copier.client_portal import ClientPortalService
+from telegram_mt5_copier.database import connect_database, utc_now
 from telegram_mt5_copier.users import UserRepository
 from telegram_mt5_copier.web_server import OnboardingHandler, safe_reason
 
@@ -518,6 +519,109 @@ class MiniAppFrontendTests(unittest.TestCase):
         self.assertIn('id="connect-form"', html)
         self.assertIn("form { display: block; }", html)
 
+    def test_portal_multiple_accounts_are_scoped_to_the_logged_in_customer(self) -> None:
+        def add_account(db: object, user_id: int, alias: str, login: str) -> int:
+            now = utc_now()
+            account_id = int(db.execute(
+                """
+                INSERT INTO mt5_accounts (
+                    user_id, account_alias, broker_name, terminal_path, server_name,
+                    login, encrypted_password, account_type, account_mode,
+                    connection_status, created_at, updated_at
+                ) VALUES (?, ?, 'HFM', 'terminal64.exe', 'HFM-Live',
+                          ?, 'encrypted', 'real', 'hedging', 'connected', ?, ?)
+                """,
+                (user_id, alias, login, now, now),
+            ).lastrowid)
+            db.execute(
+                """
+                INSERT INTO execution_profiles (
+                    user_id, mt5_account_id, enabled, risk_mode, fixed_lot, risk_percent,
+                    max_spread_points, max_slippage_points, daily_profit_target,
+                    daily_loss_limit, max_open_signals, split_tps, breakeven_enabled,
+                    trailing_enabled, updated_at
+                ) VALUES (?, ?, 1, 'fixed_lot', '0.01', '1', 300, 30, '0', '0',
+                          1, 1, 0, 0, ?)
+                """,
+                (user_id, account_id, now),
+            )
+            return account_id
+
+        def get(url: str, cookie: str = "") -> tuple[int, dict[str, object]]:
+            try:
+                with urlopen(Request(url, headers={"Cookie": cookie}), timeout=5) as response:
+                    return response.status, json.loads(response.read().decode("utf-8"))
+            except HTTPError as exc:
+                return exc.code, json.loads(exc.read().decode("utf-8"))
+
+        server = mini_app_server()
+        with server as base_url:
+            registration = Request(
+                f"{base_url}/api/v1/auth/register",
+                data=urlencode(
+                    {
+                        "customer_name": "Cliente Portal",
+                        "email": "portal@example.com",
+                        "phone": "11999990000",
+                        "password": "SenhaPortal123",
+                        "accepted_terms": "true",
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                method="POST",
+            )
+            with urlopen(registration, timeout=5) as response:
+                cookie = response.headers.get("Set-Cookie", "").split(";", 1)[0]
+                user_id = int(json.loads(response.read().decode("utf-8"))["user"]["id"])
+
+            now = utc_now()
+            with connect_database(server.database_path) as db:
+                other_user = int(db.execute(
+                    "INSERT INTO users (telegram_user_id, telegram_username, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                    (777, "outro", "active", now, now),
+                ).lastrowid)
+                first = add_account(db, user_id, "Principal", "111111")
+                second = add_account(db, user_id, "Secundaria", "222222")
+                foreign = add_account(db, other_user, "Alheia", "999999")
+
+            status_anonymous, _ = get(f"{base_url}/api/v1/accounts")
+            status_list, listed = get(f"{base_url}/api/v1/accounts", cookie)
+            status_second, second_dashboard = get(
+                f"{base_url}/api/v1/dashboard?account_id={second}", cookie
+            )
+            status_foreign, _ = get(f"{base_url}/api/v1/dashboard?account_id={foreign}", cookie)
+            status_foreign_risk, _ = get(f"{base_url}/api/v1/risk?account_id={foreign}", cookie)
+            status_invalid, _ = get(f"{base_url}/api/v1/dashboard?account_id=abc", cookie)
+            status_negative, _ = get(f"{base_url}/api/v1/operations?account_id=-1", cookie)
+            updated = post_expect_error_with_cookie(
+                f"{base_url}/api/v1/risk",
+                {"account_id": str(second), "max_open_signals": "7"},
+                cookie,
+            )
+            updated_foreign = post_expect_error_with_cookie(
+                f"{base_url}/api/v1/risk",
+                {"account_id": str(foreign), "max_open_signals": "7"},
+                cookie,
+            )
+            _, first_risk = get(f"{base_url}/api/v1/risk?account_id={first}", cookie)
+            _, foreign_owner_check = get(f"{base_url}/api/v1/accounts", cookie)
+
+        self.assertEqual(401, status_anonymous)
+        self.assertEqual(200, status_list)
+        self.assertEqual({first, second}, {a["id"] for a in listed["accounts"]})
+        self.assertNotIn(foreign, {a["id"] for a in foreign_owner_check["accounts"]})
+        self.assertNotIn("encrypted", json.dumps(listed))
+        self.assertEqual(200, status_second)
+        self.assertEqual(second, second_dashboard["account"]["id"])
+        self.assertEqual(404, status_foreign)
+        self.assertEqual(404, status_foreign_risk)
+        self.assertEqual(400, status_invalid)
+        self.assertEqual(400, status_negative)
+        self.assertEqual(200, updated["status"])
+        self.assertEqual(7, updated["body"]["risk"]["max_open_signals"])
+        self.assertEqual(404, updated_foreign["status"])
+        self.assertEqual(1, first_risk["risk"]["max_open_signals"])
+
     def test_telegram_valido_mostra_formulario(self) -> None:
         html = render_onboarding_form("test-nonce")
         script = render_miniapp_script()
@@ -547,6 +651,7 @@ class mini_app_server:
         OnboardingHandler.csrf = CSRFTokenService("csrf-secret")
         self.temp_dir = tempfile.TemporaryDirectory()
         database_path = Path(self.temp_dir.name) / "web.sqlite3"
+        self.database_path = database_path
         OnboardingHandler.admin_panel = AdminPanelService(
             database_path,
             bot_token=self.bot_token,
@@ -586,6 +691,22 @@ def post_json(url: str, fields: dict[str, str]) -> dict[str, object]:
     )
     with urlopen(request, timeout=5) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def post_expect_error_with_cookie(
+    url: str, fields: dict[str, str], cookie: str
+) -> dict[str, object]:
+    request = Request(
+        url,
+        data=urlencode(fields).encode("utf-8"),
+        headers={"Content-Type": "application/x-www-form-urlencoded", "Cookie": cookie},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=5) as response:
+            return {"status": response.status, "body": json.loads(response.read().decode("utf-8"))}
+    except HTTPError as exc:
+        return {"status": exc.code, "body": json.loads(exc.read().decode("utf-8"))}
 
 
 def post_expect_error(url: str, fields: dict[str, str]) -> dict[str, object]:

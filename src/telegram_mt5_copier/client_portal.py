@@ -7,6 +7,16 @@ from .client_auth import normalize_email, validate_customer_name, validate_phone
 from .database import connect_database, initialize_database, utc_now
 
 
+class AccountNotFoundError(ValueError):
+    """A conta MT5 pedida nao existe ou nao pertence ao cliente autenticado."""
+
+
+_ACCOUNT_COLUMNS = """
+    id, account_alias, broker_name, server_name, login, account_type,
+    connection_status, balance, equity, worker_heartbeat_at, last_error
+"""
+
+
 class ClientPortalService:
     """Dados e alterações do portal, sempre limitados ao user_id autenticado."""
 
@@ -15,7 +25,41 @@ class ClientPortalService:
         self.brand_name = brand_name
         initialize_database(database_path)
 
-    def dashboard(self, user_id: int) -> dict[str, object]:
+    @staticmethod
+    def _select_account(db: object, user_id: int, account_id: int | None) -> object | None:
+        """Conta escolhida pelo cliente ou, sem escolha, a principal (conectada primeiro).
+
+        Uma conta de outro cliente e tratada como inexistente, nunca como acesso negado,
+        para nao revelar quais IDs existem.
+        """
+        if account_id is not None:
+            row = db.execute(
+                f"SELECT {_ACCOUNT_COLUMNS} FROM mt5_accounts WHERE id = ? AND user_id = ?",
+                (account_id, user_id),
+            ).fetchone()
+            if row is None:
+                raise AccountNotFoundError("Conta MT5 nao encontrada.")
+            return row
+        return db.execute(
+            f"""
+            SELECT {_ACCOUNT_COLUMNS} FROM mt5_accounts WHERE user_id = ?
+            ORDER BY CASE connection_status WHEN 'connected' THEN 0 ELSE 1 END, id DESC LIMIT 1
+            """,
+            (user_id,),
+        ).fetchone()
+
+    def accounts(self, user_id: int) -> dict[str, object]:
+        with connect_database(self.database_path) as db:
+            rows = db.execute(
+                f"""
+                SELECT {_ACCOUNT_COLUMNS} FROM mt5_accounts WHERE user_id = ?
+                ORDER BY CASE connection_status WHEN 'connected' THEN 0 ELSE 1 END, id DESC
+                """,
+                (user_id,),
+            ).fetchall()
+        return {"accounts": [self._account(row) for row in rows]}
+
+    def dashboard(self, user_id: int, account_id: int | None = None) -> dict[str, object]:
         with connect_database(self.database_path) as db:
             user = db.execute(
                 "SELECT telegram_username, status, daily_signal_pause_until FROM users WHERE id = ?",
@@ -23,15 +67,7 @@ class ClientPortalService:
             ).fetchone()
             if user is None:
                 raise ValueError("Cliente nao encontrado.")
-            account = db.execute(
-                """
-                SELECT id, account_alias, broker_name, server_name, login, account_type,
-                       connection_status, balance, equity, worker_heartbeat_at, last_error
-                FROM mt5_accounts WHERE user_id = ?
-                ORDER BY CASE connection_status WHEN 'connected' THEN 0 ELSE 1 END, id DESC LIMIT 1
-                """,
-                (user_id,),
-            ).fetchone()
+            account = self._select_account(db, user_id, account_id)
             performance = None
             if account is not None:
                 performance = db.execute(
@@ -43,12 +79,14 @@ class ClientPortalService:
                     """,
                     (int(account[0]),),
                 ).fetchone()
+            # Sem conta escolhida, conta as operacoes de todas as contas do cliente.
             active_count = db.execute(
                 """
                 SELECT COUNT(*) FROM execution_groups
                 WHERE user_id = ? AND status IN ('pending_active', 'filled', 'open')
+                  AND (? IS NULL OR mt5_account_id = ?)
                 """,
-                (user_id,),
+                (user_id, account_id, account_id),
             ).fetchone()[0]
         return {
             "brand": self.brand_name,
@@ -89,9 +127,13 @@ class ClientPortalService:
             ],
         }
 
-    def operations(self, user_id: int, *, limit: int = 100) -> dict[str, object]:
+    def operations(
+        self, user_id: int, *, limit: int = 100, account_id: int | None = None
+    ) -> dict[str, object]:
         safe_limit = max(1, min(limit, 200))
         with connect_database(self.database_path) as db:
+            if account_id is not None:
+                self._select_account(db, user_id, account_id)
             rows = db.execute(
                 """
                 SELECT g.id, g.status, g.symbol, g.direction, g.order_type,
@@ -102,11 +144,11 @@ class ClientPortalService:
                 LEFT JOIN signals sig ON sig.signature = g.signal_id
                 LEFT JOIN source_channels c ON c.telegram_chat_id = sig.source_chat_id
                 LEFT JOIN execution_orders o ON o.execution_group_id = g.id
-                WHERE g.user_id = ?
+                WHERE g.user_id = ? AND (? IS NULL OR g.mt5_account_id = ?)
                 GROUP BY g.id
                 ORDER BY g.id DESC LIMIT ?
                 """,
-                (user_id, safe_limit),
+                (user_id, account_id, account_id, safe_limit),
             ).fetchall()
         return {
             "operations": [
@@ -232,16 +274,9 @@ class ClientPortalService:
             ],
         }
 
-    def risk(self, user_id: int) -> dict[str, object]:
+    def risk(self, user_id: int, account_id: int | None = None) -> dict[str, object]:
         with connect_database(self.database_path) as db:
-            account = db.execute(
-                """
-                SELECT id, account_alias, login FROM mt5_accounts
-                WHERE user_id = ?
-                ORDER BY CASE connection_status WHEN 'connected' THEN 0 ELSE 1 END, id DESC LIMIT 1
-                """,
-                (user_id,),
-            ).fetchone()
+            account = self._select_account(db, user_id, account_id)
             if account is None:
                 return {"account": None, "risk": None}
             row = db.execute(
@@ -257,13 +292,15 @@ class ClientPortalService:
             "account": {
                 "id": int(account[0]),
                 "alias": account[1],
-                "masked_login": f"••••{str(account[2])[-4:]}",
+                "masked_login": f"••••{str(account[4])[-4:]}",
             },
             "risk": self._risk(row),
         }
 
-    def update_risk(self, user_id: int, fields: dict[str, str]) -> dict[str, object]:
-        current = self.risk(user_id)
+    def update_risk(
+        self, user_id: int, fields: dict[str, str], account_id: int | None = None
+    ) -> dict[str, object]:
+        current = self.risk(user_id, account_id)
         account = current["account"]
         if not isinstance(account, dict):
             raise ValueError("Cadastre uma conta MT5 antes de configurar o risco.")
@@ -292,7 +329,7 @@ class ClientPortalService:
                 f"UPDATE execution_profiles SET {assignments}, updated_at = ? WHERE user_id = ? AND mt5_account_id = ?",
                 (*values.values(), utc_now(), user_id, account_id),
             )
-        return self.risk(user_id)
+        return self.risk(user_id, account_id)
 
     @staticmethod
     def _validate_risk_value(field: str, raw: str) -> str | int:
