@@ -75,6 +75,12 @@ class SignalProcessor:
         self.close()
 
     async def process(self, incoming: IncomingMessage, client: Any | None = None) -> ProcessingDecision:
+        if self.publisher.is_own_echo(incoming.source_chat_id, incoming.source_message_id):
+            echo_decision = ProcessingDecision(DecisionStatus.IGNORED, "destination_echo")
+            self.database.record_event(echo_decision.status, echo_decision.reason, incoming=incoming)
+            self.logger.info("%s: %s", echo_decision.status.value, echo_decision.reason)
+            return echo_decision
+
         text_decision = text_for_analysis(incoming)
         if text_decision.status != DecisionStatus.ACCEPTED:
             self.database.record_event(text_decision.status, text_decision.reason, incoming=incoming)

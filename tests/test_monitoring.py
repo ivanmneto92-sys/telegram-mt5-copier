@@ -18,6 +18,7 @@ from telegram_mt5_copier.listener import (
 )
 from telegram_mt5_copier.models import DecisionStatus, Direction, IncomingMessage
 from telegram_mt5_copier.parser import parse_signal_text
+from telegram_mt5_copier.publisher import TelegramPublisher
 from telegram_mt5_copier.signal_formatter import clean_signal_text
 from telegram_mt5_copier.validator import validate_signal
 
@@ -103,9 +104,27 @@ SELL_XAUUSD_AT = """📍SELL📍 XAUUSD @4090 - 4095
 class FakePublisher:
     def __init__(self) -> None:
         self.messages: list[str] = []
+        self._own_messages: set[tuple[str, int]] = set()
 
     async def publish(self, signal, formatted_message: str, client=None) -> None:
         self.messages.append(formatted_message)
+
+    def remember_sent(self, chat_id, message_id) -> None:
+        """Simula o publisher real tendo mandado (chat_id, message_id).
+
+        Usado pelos testes de destination_echo pra simular o eco de uma
+        publicacao sem precisar de um client Telegram de verdade.
+        """
+        self._own_messages.add((str(chat_id), int(message_id)))
+
+    def is_own_echo(self, chat_id, message_id) -> bool:
+        if chat_id is None or message_id is None:
+            return False
+        try:
+            message_id = int(message_id)
+        except (TypeError, ValueError):
+            return False
+        return (str(chat_id), message_id) in self._own_messages
 
 
 class SlowFakePublisher(FakePublisher):
@@ -371,6 +390,38 @@ class MonitorPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.status, DecisionStatus.ACCEPTED)
         self.assertEqual(second.status, DecisionStatus.IGNORED)
         self.assertEqual(second.reason, "duplicate_signal")
+        self.assertEqual(len(self.publisher.messages), 1)
+
+    async def test_eco_da_propria_publicacao_e_ignorado(self) -> None:
+        # Canal que serve de origem de sinais manuais e tambem de destino das
+        # republicacoes (DESTINATION_CHAT_ID == um dos SOURCE_CHAT_IDS): o
+        # proprio Telethon dispara NewMessage pra mensagem que o publisher
+        # acabou de mandar ali. Sem essa protecao, o eco reentra como sinal
+        # "novo" (fica com um source_chat_id diferente do sinal original) e
+        # so nao chega a abrir ordem duplicada por causa da trava separada em
+        # claim_account_signal -- mas ainda polui o historico de sinais.
+        self.publisher.remember_sent("-100canal", 555)
+
+        decision = await self.processor.process(
+            IncomingMessage(source_chat_id="-100canal", source_message_id=555, text=BUY_VALID)
+        )
+
+        self.assertEqual(decision.status, DecisionStatus.IGNORED)
+        self.assertEqual(decision.reason, "destination_echo")
+        self.assertEqual(len(self.publisher.messages), 0)
+        self.assertEqual(count_signals(self.database.database_path), 0)
+
+    async def test_sinal_manual_no_mesmo_canal_do_destino_continua_processado(self) -> None:
+        # Mesmo canal do teste anterior, mas um id de mensagem diferente de
+        # qualquer coisa que o publisher tenha mandado -- alguem digitou um
+        # sinal novo ali. Isso tem que continuar funcionando normalmente.
+        self.publisher.remember_sent("-100canal", 555)
+
+        decision = await self.processor.process(
+            IncomingMessage(source_chat_id="-100canal", source_message_id=556, text=BUY_VALID)
+        )
+
+        self.assertEqual(decision.status, DecisionStatus.ACCEPTED)
         self.assertEqual(len(self.publisher.messages), 1)
 
     async def test_duplicidade_simultanea_e_reservada_antes_da_publicacao(self) -> None:
@@ -864,6 +915,67 @@ class NullLogger:
 
     def error(self, *_args, **_kwargs) -> None:
         return None
+
+
+class FakeSentMessage:
+    def __init__(self, message_id: int) -> None:
+        self.id = message_id
+
+
+class FakeSendingClient:
+    def __init__(self) -> None:
+        self.sent: list[tuple[int, str]] = []
+        self._next_message_id = 900
+
+    async def send_message(self, chat_id: int, text: str) -> FakeSentMessage:
+        self.sent.append((chat_id, text))
+        self._next_message_id += 1
+        return FakeSentMessage(self._next_message_id)
+
+
+class FakePublisherConfig:
+    def __init__(self, *, destination_chat_id: str, dry_run: bool = False) -> None:
+        self.destination_chat_id = destination_chat_id
+        self.dry_run = dry_run
+
+
+class TelegramPublisherEchoTests(unittest.IsolatedAsyncioTestCase):
+    async def test_mensagem_publicada_e_reconhecida_como_propria(self) -> None:
+        config = FakePublisherConfig(destination_chat_id="-1009876543210")
+        publisher = TelegramPublisher(config, NullLogger())
+        client = FakeSendingClient()
+
+        await publisher.publish(signal=None, formatted_message="XAUUSD BUY", client=client)
+
+        sent_id = client._next_message_id
+        self.assertTrue(publisher.is_own_echo("-1009876543210", sent_id))
+
+    async def test_id_diferente_nao_e_reconhecido_como_eco(self) -> None:
+        config = FakePublisherConfig(destination_chat_id="-1009876543210")
+        publisher = TelegramPublisher(config, NullLogger())
+        client = FakeSendingClient()
+
+        await publisher.publish(signal=None, formatted_message="XAUUSD BUY", client=client)
+
+        self.assertFalse(publisher.is_own_echo("-1009876543210", 1))
+
+    async def test_mesmo_id_em_outro_canal_nao_e_reconhecido_como_eco(self) -> None:
+        config = FakePublisherConfig(destination_chat_id="-1009876543210")
+        publisher = TelegramPublisher(config, NullLogger())
+        client = FakeSendingClient()
+
+        await publisher.publish(signal=None, formatted_message="XAUUSD BUY", client=client)
+
+        sent_id = client._next_message_id
+        self.assertFalse(publisher.is_own_echo("-1009999999999", sent_id))
+
+    async def test_dry_run_nao_registra_nada_para_reconhecer(self) -> None:
+        config = FakePublisherConfig(destination_chat_id="-1009876543210", dry_run=True)
+        publisher = TelegramPublisher(config, NullLogger())
+
+        await publisher.publish(signal=None, formatted_message="XAUUSD BUY", client=None)
+
+        self.assertFalse(publisher.is_own_echo("-1009876543210", 901))
 
 
 def count_signals(database_path: Path) -> int:
