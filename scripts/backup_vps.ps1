@@ -1,6 +1,6 @@
 # Faz o backup criptografado desta instancia e envia para o Backblaze B2.
 # Chamado pela Tarefa Agendada de backup (separada da tarefa que sobe o
-# supervisor) — ver README, secao "Backup". Rode a partir da pasta raiz do
+# supervisor) - ver README, secao "Backup". Rode a partir da pasta raiz do
 # projeto clonado na VPS (a mesma pasta que contem o `.env` desta instancia).
 
 $ErrorActionPreference = "Stop"
@@ -76,7 +76,7 @@ Write-Host "stdout: $StdoutLog"
 Write-Host "stderr: $StderrLog"
 
 # Mesma razao do start_windows.ps1: o logger da aplicacao escreve linhas
-# INFO/WARNING em stderr normalmente — nao sao falhas. So o codigo de saida
+# INFO/WARNING em stderr normalmente - nao sao falhas. So o codigo de saida
 # (checado logo abaixo) decide sucesso ou falha de verdade.
 $PreviousErrorActionPreference = $ErrorActionPreference
 $ErrorActionPreference = "Continue"

@@ -3,7 +3,7 @@
 #
 # Diferente da tarefa principal (Telegram MT5 Copier), que usa `-AtLogOn`
 # porque o MetaTrader5 exige uma sessao grafica, o backup nao abre nenhum
-# terminal MT5 nem precisa de tela — por isso esta tarefa roda com
+# terminal MT5 nem precisa de tela - por isso esta tarefa roda com
 # `LogonType Password`, funcionando mesmo sem ninguem logado por RDP depois
 # de um reboot. O script pede a senha da conta interativamente (nunca fica
 # salva em texto neste arquivo nem em nenhum log).
@@ -81,5 +81,5 @@ Register-ScheduledTask `
     -Description "Backup diario criptografado da instancia $instanceId para o Backblaze B2." `
     -Force | Out-Null
 
-Write-Host "Tarefa '$TaskName' instalada — roda todo dia as $Time, mesmo sem RDP aberto."
+Write-Host "Tarefa '$TaskName' instalada - roda todo dia as $Time, mesmo sem RDP aberto."
 Write-Host "Para testar agora: Start-ScheduledTask -TaskName '$TaskName'"
