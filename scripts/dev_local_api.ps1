@@ -9,10 +9,13 @@
 # - Nunca aponte este script para os diretorios C:\Apps\... da VPS.
 #
 # -Instance homolog: mesma isolacao do 'main' de desenvolvimento, mas com
-# identidade propria (INSTANCE_ID=homolog, marca "(Homologacao)") para nunca
-# ser confundida com a instancia de dev ad-hoc nem com producao, e pronta
-# para receber CLIENT_APP_URL/RESEND_* apontando para a homologacao real
-# (Worker + Cloudflare Tunnel), nao para localhost.
+# identidade propria (INSTANCE_ID=homolog) para nunca ser confundida com a
+# instancia de dev ad-hoc nem com producao, e pronta para receber
+# CLIENT_APP_URL/RESEND_* apontando para a homologacao real (Worker +
+# Cloudflare Tunnel), nao para localhost. A marca (BRAND_NAME) usa o mesmo
+# nome de producao ("Instituto Trader"), sem sufixo — os e-mails enviados
+# daqui vao para caixas de entrada reais durante os testes, entao precisam
+# ficar identicos ao que um cliente real veria.
 [CmdletBinding()]
 param(
     [ValidateSet('main', 'robo_braba', 'homolog')]
@@ -56,7 +59,7 @@ if (-not (Test-Path -LiteralPath $envPath)) {
     $brand = switch ($Instance) {
         'main' { 'Instituto Trader (DEV)' }
         'robo_braba' { 'Robo Braba (DEV)' }
-        'homolog' { 'Instituto Trader (Homologacao)' }
+        'homolog' { 'Instituto Trader' }
     }
 
     # Template MT5 falso (so o arquivo precisa existir; nunca e executado de

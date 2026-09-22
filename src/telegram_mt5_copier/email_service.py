@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
@@ -88,21 +89,17 @@ class ResendEmailService(EmailService):
 # por vários clientes).
 # ---------------------------------------------------------------------------
 
-_LOGO_SVG = """<svg width="24" height="29" viewBox="0 0 405 491" xmlns="http://www.w3.org/2000/svg">
-<path d="M147.507 279.381V355.337L90.3942 310.711V279.381H111.957V243.677H125.944V279.381H147.507Z" fill="url(#g0)"/>
-<path d="M318.242 156.463V307.707L261.118 352.345V156.463H282.681V117.471H296.679V156.463H318.242Z" fill="url(#g0)"/>
-<path d="M230.622 228.243V376.165L205.771 395.59L202.394 398.221L173.509 375.65V228.243H195.072V189.678H209.059V228.243H230.622Z" fill="url(#g0)"/>
-<path d="M57.1133 146.662V283.305L56.1263 283.941L57.1133 284.709V304.462L202.393 417.964L205.77 415.333L347.017 304.977V146.86L404.13 110.619V332.832L261.414 444.338L261.118 444.097V444.57L205.77 487.814L202.393 490.446L0 332.328V110.433L57.1133 146.662Z" fill="url(#g1)"/>
-<path d="M404.13 63.1531L347.017 99.3934V57.1133H230.621V151.245L173.509 187.475V57.1133H57.1133V99.1965L0 62.9669V0H404.13V63.1531Z" fill="url(#g1)"/>
-<defs>
-<linearGradient id="g0" x1="204.318" y1="178.507" x2="204.318" y2="398.221" gradientUnits="userSpaceOnUse">
-<stop stop-color="white"/><stop offset="1" stop-color="#D9E9FF"/>
-</linearGradient>
-<linearGradient id="g1" x1="404.13" y1="0" x2="10.72" y2="465.199" gradientUnits="userSpaceOnUse">
-<stop stop-color="white"/><stop offset="1" stop-color="#FFB100"/>
-</linearGradient>
-</defs>
-</svg>"""
+# O logo e servido como PNG (nao SVG inline) porque o Gmail e outros clientes
+# de e-mail nao renderizam <svg> no corpo da mensagem — so imagens via <img>.
+# O arquivo (public/logo-email.png) e publicado junto com cada Worker do
+# portal (main, homolog, robo-braba), entao a mesma URL sempre existe na
+# origem de onde vem o link do e-mail (CLIENT_APP_URL da instancia).
+_LOGO_PATH = "/logo-email.png"
+
+
+def _logo_url(cta_url: str) -> str:
+    parts = urlsplit(cta_url)
+    return f"{parts.scheme}://{parts.netloc}{_LOGO_PATH}"
 
 
 def _info_box(html: str) -> str:
@@ -162,6 +159,7 @@ def render_email(
         f"Você recebeu este e-mail porque possui uma conta no {brand_name}.<br>"
         "Este é um endereço somente para envio — não responda a esta mensagem."
     )
+    logo_url = _logo_url(cta_url)
     return f"""<!doctype html>
 <html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
 <body style="margin:0; padding:0; background-color:#EFF7FF; font-family: 'Inter', Arial, Helvetica, sans-serif;">
@@ -177,9 +175,7 @@ def render_email(
             <table role="presentation" cellpadding="0" cellspacing="0">
               <tr>
                 <td style="padding-right:10px;">
-                  <table role="presentation" width="40" height="40" cellpadding="0" cellspacing="0" style="background-color:#051F43; border-radius:9px;">
-                    <tr><td align="center" valign="middle" style="width:40px; height:40px;">{_LOGO_SVG}</td></tr>
-                  </table>
+                  <img src="{logo_url}" width="40" height="40" alt="{brand_name}" style="display:block; border-radius:9px;">
                 </td>
                 <td valign="middle">
                   <span style="font-family: Georgia, 'Cormorant Garamond', serif; font-weight:600; letter-spacing:2px; font-size:15px; color:#051F43;">{brand_name.upper()}</span>
