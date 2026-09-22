@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import time
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from .account_service import AccountService
 from .access_control import ACCESS_EXPIRED, paid_access_decision
@@ -408,7 +408,7 @@ class BotService:
         if callback == CB_ADMIN_BROWSER_ACCESS:
             if telegram_user_id not in self.admin_ids:
                 return BotResponse("Acesso administrativo não autorizado.", MAIN_MENU)
-            panel_url = admin_panel_url(self.mt5_onboarding_url)
+            panel_url = self._effective_admin_panel_url()
             if not panel_url:
                 return BotResponse(
                     "URL HTTPS do painel administrativo não configurada.",
@@ -1097,6 +1097,19 @@ class BotService:
             screen="channels",
         )
 
+    def _effective_admin_panel_url(self) -> str | None:
+        """URL que o botao/link 'painel pelo PC' deve abrir.
+
+        Prefere o portal novo (client_app_url + /admin-login), que ja tem o
+        painel do admin reconstruido em React e permite configurar login por
+        e-mail/senha; sem client_app_url configurado (ex.: Robo Braba, que
+        ainda nao tem portal novo), cai na pagina antiga servida pela propria
+        API (admin_panel_url).
+        """
+        if self.client_app_url:
+            return urljoin(self.client_app_url, "admin-login")
+        return admin_panel_url(self.mt5_onboarding_url)
+
     def _main_panel(self, user: User, first_name: str | None = None) -> BotResponse:
         name = first_name or user.telegram_username or "trader"
         status_label, operations_label = self._status_labels(user)
@@ -1105,7 +1118,7 @@ class BotService:
         if mt5_account is not None:
             mt5_status = mt5_account_connection_label(mt5_account.connection_status)
         admin_url = (
-            admin_panel_url(self.mt5_onboarding_url)
+            self._effective_admin_panel_url()
             if user.telegram_user_id in self.admin_ids
             else None
         )

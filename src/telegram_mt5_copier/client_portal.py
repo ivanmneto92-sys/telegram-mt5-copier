@@ -100,12 +100,15 @@ class ClientPortalService:
             row = self._select_account(db, user_id, account.id)
         return {"account": self._account(row)}
 
-    def remove_account(self, user_id: int, account_id: int) -> None:
+    def remove_account(self, user_id: int, account_id: int) -> dict[str, object]:
+        """Remove a conta e devolve os dados dela (para o aviso por e-mail)."""
         if self.mt5_accounts is None:
             raise ValueError("Remocao de conta MT5 indisponivel nesta instancia.")
         with connect_database(self.database_path) as db:
-            self._select_account(db, user_id, account_id)  # levanta AccountNotFoundError
+            row = self._select_account(db, user_id, account_id)  # levanta AccountNotFoundError
+        removed = self._account(row)
         self.mt5_accounts.remove_account(user_id, account_id)
+        return {"account": removed}
 
     @staticmethod
     def _select_account(db: object, user_id: int, account_id: int | None) -> object | None:
@@ -249,9 +252,11 @@ class ClientPortalService:
         with connect_database(self.database_path) as db:
             row = db.execute(
                 """
-                SELECT u.telegram_username, u.status, b.customer_name, b.email, b.phone
+                SELECT u.telegram_username, u.status, b.customer_name, b.email, b.phone,
+                       c.email_confirmed_at
                 FROM users u
                 LEFT JOIN customer_billing b ON b.user_id = u.id
+                LEFT JOIN client_credentials c ON c.user_id = u.id
                 WHERE u.id = ?
                 """,
                 (user_id,),
@@ -265,6 +270,7 @@ class ClientPortalService:
                 "customer_name": row[2],
                 "email": row[3],
                 "phone": row[4],
+                "email_confirmed": row[5] is not None,
             }
         }
 
@@ -310,8 +316,16 @@ class ClientPortalService:
                 (user_id, clean_name, clean_email, clean_phone, now, now),
             )
             db.execute(
-                "UPDATE client_credentials SET email = ?, updated_at = ? WHERE user_id = ?",
-                (clean_email, now, user_id),
+                """
+                UPDATE client_credentials
+                SET email = ?,
+                    email_confirmed_at = CASE
+                        WHEN email = ? COLLATE NOCASE THEN email_confirmed_at ELSE NULL
+                    END,
+                    updated_at = ?
+                WHERE user_id = ?
+                """,
+                (clean_email, clean_email, now, user_id),
             )
         return self.profile(user_id)
 

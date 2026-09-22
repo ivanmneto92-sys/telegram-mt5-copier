@@ -5,14 +5,26 @@ from http.cookies import SimpleCookie
 import json
 import secrets
 import sys
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urljoin, urlsplit
 
 from .admin_auth import AdminBrowserAuthService
 from .admin_panel import AdminIdentity, AdminPanelService, render_admin_panel, render_admin_script
-from .client_auth import ClientBrowserAuthService
+from .client_auth import ClientBrowserAuthService, normalize_email
 from .client_portal import AccountNotFoundError, ClientPortalService
 from .config import AppConfig
 from .credential_service import CredentialService
+from .email_service import (
+    EmailSendError,
+    EmailService,
+    NullEmailService,
+    ResendEmailService,
+    email_changed_email,
+    email_confirmation_email,
+    mt5_account_connected_email,
+    mt5_account_removed_email,
+    password_changed_email,
+    password_reset_email,
+)
 from .mt5.account_service import MT5AccountService
 from .mt5.terminal_manager import TerminalManager
 from .users import UserRepository
@@ -50,6 +62,8 @@ class OnboardingHandler(BaseHTTPRequestHandler):
     broker_servers: dict[str, tuple[str, ...]] = {}
     brand_name: str = "Instituto Trader"
     instance_id: str = "main"
+    client_app_url: str | None = None
+    email_service: EmailService = NullEmailService()
 
     def log_message(self, format: str, *args: object) -> None:
         if self.command == "POST":
@@ -176,6 +190,12 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             if path == "/api/admin/browser-login":
                 self.handle_admin_browser_login(fields)
                 return
+            if path == "/api/admin/login":
+                self.handle_admin_password_login(fields)
+                return
+            if path == "/api/admin/password":
+                self.handle_admin_password_setup(fields)
+                return
             if path == "/api/admin/logout":
                 self.handle_admin_logout(fields)
                 return
@@ -220,6 +240,18 @@ class OnboardingHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/v1/auth/password":
                 self.handle_client_password_setup(fields)
+                return
+            if path == "/api/v1/auth/password/forgot":
+                self.handle_client_password_forgot(fields)
+                return
+            if path == "/api/v1/auth/password/reset":
+                self.handle_client_password_reset(fields)
+                return
+            if path == "/api/v1/auth/email/confirm":
+                self.handle_client_email_confirm(fields)
+                return
+            if path == "/api/v1/auth/email/resend":
+                self.handle_client_email_resend()
                 return
             if path == "/api/v1/auth/logout":
                 self.handle_client_logout()
@@ -361,7 +393,130 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             password=fields.get("password", ""),
         )
         safe_log("client_registration_accepted")
+        self.send_email_confirmation_best_effort(session.user_id)
         self.send_client_session(session.user_id, session.session_token)
+
+    def send_email_confirmation_best_effort(self, user_id: int) -> None:
+        """Envia o e-mail de confirmacao sem nunca derrubar o fluxo chamador.
+
+        Falha de e-mail (chave ausente, provedor fora do ar) nao pode impedir
+        o cadastro nem o reenvio manual — o cliente so tenta de novo depois.
+        """
+        if not self.client_app_url:
+            return
+        try:
+            confirm_url = self.client_browser_auth.request_email_confirmation(
+                user_id, urljoin(self.client_app_url, "confirmar-email")
+            )
+            email = str(self.client_portal.profile(user_id)["profile"]["email"])
+            subject, html = email_confirmation_email(brand_name=self.brand_name, confirm_url=confirm_url)
+            self.email_service.send(to=email, subject=subject, html=html)
+        except (ValueError, EmailSendError) as exc:
+            safe_log("email_confirmation_send_failed", reason=safe_reason(str(exc)))
+
+    def send_password_changed_notification_best_effort(self, user_id: int) -> None:
+        """Avisa por e-mail que a senha da conta acabou de mudar.
+
+        Best-effort (nunca derruba o fluxo de troca de senha em si) — mesmo
+        padrao de send_email_confirmation_best_effort.
+        """
+        if not self.client_app_url:
+            return
+        try:
+            email = str(self.client_portal.profile(user_id)["profile"]["email"])
+            subject, html = password_changed_email(
+                brand_name=self.brand_name,
+                security_url=urljoin(self.client_app_url, "esqueci-senha"),
+            )
+            self.email_service.send(to=email, subject=subject, html=html)
+        except (ValueError, EmailSendError) as exc:
+            safe_log("password_changed_notification_failed", reason=safe_reason(str(exc)))
+
+    def send_email_changed_notification_best_effort(self, *, old_email: str, new_email: str) -> None:
+        """Avisa o e-mail ANTIGO que o e-mail de acesso da conta foi trocado."""
+        if not self.client_app_url or not old_email:
+            return
+        try:
+            subject, html = email_changed_email(
+                brand_name=self.brand_name,
+                new_email=new_email,
+                profile_url=urljoin(self.client_app_url, "perfil"),
+            )
+            self.email_service.send(to=old_email, subject=subject, html=html)
+        except EmailSendError as exc:
+            safe_log("email_changed_notification_failed", reason=safe_reason(str(exc)))
+
+    def send_mt5_account_connected_notification_best_effort(
+        self, user_id: int, account: dict[str, object]
+    ) -> None:
+        if not self.client_app_url:
+            return
+        try:
+            email = str(self.client_portal.profile(user_id)["profile"]["email"])
+            subject, html = mt5_account_connected_email(
+                brand_name=self.brand_name,
+                broker=str(account.get("broker", "")),
+                server=str(account.get("server", "")),
+                masked_login=str(account.get("masked_login", "")),
+                accounts_url=urljoin(self.client_app_url, "conta-mt5"),
+            )
+            self.email_service.send(to=email, subject=subject, html=html)
+        except (ValueError, EmailSendError) as exc:
+            safe_log("mt5_account_connected_notification_failed", reason=safe_reason(str(exc)))
+
+    def send_mt5_account_removed_notification_best_effort(
+        self, user_id: int, account: dict[str, object]
+    ) -> None:
+        if not self.client_app_url:
+            return
+        try:
+            email = str(self.client_portal.profile(user_id)["profile"]["email"])
+            subject, html = mt5_account_removed_email(
+                brand_name=self.brand_name,
+                broker=str(account.get("broker", "")),
+                masked_login=str(account.get("masked_login", "")),
+                accounts_url=urljoin(self.client_app_url, "conta-mt5"),
+            )
+            self.email_service.send(to=email, subject=subject, html=html)
+        except (ValueError, EmailSendError) as exc:
+            safe_log("mt5_account_removed_notification_failed", reason=safe_reason(str(exc)))
+
+    def handle_client_password_forgot(self, fields: dict[str, str]) -> None:
+        email = fields.get("email", "")
+        try:
+            if self.client_app_url:
+                reset_url = self.client_browser_auth.request_password_reset(
+                    email, urljoin(self.client_app_url, "redefinir-senha")
+                )
+                if reset_url is not None:
+                    subject, html = password_reset_email(
+                        brand_name=self.brand_name, reset_url=reset_url
+                    )
+                    self.email_service.send(to=normalize_email(email), subject=subject, html=html)
+        except (ValueError, EmailSendError) as exc:
+            # Nunca revela ao chamador se o e-mail existe ou se o envio falhou.
+            safe_log("password_reset_send_failed", reason=safe_reason(str(exc)))
+        safe_log("password_reset_requested")
+        self.send_json({"ok": True})
+
+    def handle_client_password_reset(self, fields: dict[str, str]) -> None:
+        user_id = self.client_browser_auth.reset_password(
+            fields.get("token", ""), fields.get("password", "")
+        )
+        safe_log("password_reset_completed")
+        self.send_password_changed_notification_best_effort(user_id)
+        self.send_json({"ok": True})
+
+    def handle_client_email_confirm(self, fields: dict[str, str]) -> None:
+        self.client_browser_auth.confirm_email(fields.get("token", ""))
+        safe_log("email_confirmed")
+        self.send_json({"ok": True})
+
+    def handle_client_email_resend(self) -> None:
+        user_id = self.authenticate_client()
+        self.send_email_confirmation_best_effort(user_id)
+        safe_log("email_confirmation_resent", user_id=str(user_id))
+        self.send_json({"ok": True})
 
     def handle_client_password_setup(self, fields: dict[str, str]) -> None:
         user_id = self.authenticate_client()
@@ -371,6 +526,7 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             password=fields.get("password", ""),
         )
         safe_log("client_password_configured", user_id=str(user_id))
+        self.send_password_changed_notification_best_effort(user_id)
         self.send_json({"ok": True})
 
     def send_client_session(self, user_id: int, session_token: str) -> None:
@@ -391,6 +547,7 @@ class OnboardingHandler(BaseHTTPRequestHandler):
 
     def handle_client_profile_update(self, fields: dict[str, str]) -> None:
         user_id = self.authenticate_client()
+        old_email = str(self.client_portal.profile(user_id)["profile"]["email"] or "")
         payload = self.client_portal.update_profile(
             user_id,
             customer_name=fields.get("customer_name", ""),
@@ -398,6 +555,10 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             phone=fields.get("phone", ""),
         )
         safe_log("client_profile_updated", user_id=str(user_id))
+        new_email = str(payload["profile"]["email"] or "")
+        if old_email and new_email and old_email.casefold() != new_email.casefold():
+            self.send_email_changed_notification_best_effort(old_email=old_email, new_email=new_email)
+            self.send_email_confirmation_best_effort(user_id)
         self.send_json({"ok": True, **payload})
 
     def handle_client_risk_update(self, fields: dict[str, str]) -> None:
@@ -424,6 +585,9 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             account_alias=fields.get("account_alias", ""),
         )
         safe_log("client_account_created", user_id=str(user_id))
+        account = payload.get("account")
+        if isinstance(account, dict):
+            self.send_mt5_account_connected_notification_best_effort(user_id, account)
         self.send_json({"ok": True, **payload})
 
     def handle_client_account_remove(self, fields: dict[str, str]) -> None:
@@ -432,11 +596,14 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         if account_id is None:
             raise InvalidAccountIdError("Identificador de conta invalido.")
         try:
-            self.client_portal.remove_account(user_id, account_id)
+            removed = self.client_portal.remove_account(user_id, account_id)
         except AccountNotFoundError as exc:
             self.send_json({"ok": False, "error": str(exc)}, status=404)
             return
         safe_log("client_account_removed", user_id=str(user_id))
+        account = removed.get("account")
+        if isinstance(account, dict):
+            self.send_mt5_account_removed_notification_best_effort(user_id, account)
         self.send_json({"ok": True})
 
     def handle_admin_browser_login(self, fields: dict[str, str]) -> None:
@@ -449,6 +616,35 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             identity,
             extra_headers=(("Set-Cookie", admin_session_cookie(session.session_token)),),
         )
+
+    def handle_admin_password_login(self, fields: dict[str, str]) -> None:
+        try:
+            session = self.admin_browser_auth.login(
+                email=fields.get("email", ""),
+                password=fields.get("password", ""),
+            )
+        except ValueError as exc:
+            safe_log("admin_password_login_rejected", reason="credentials")
+            self.send_json({"ok": False, "error": str(exc)}, status=401)
+            return
+        safe_log("admin_password_login_accepted", user_id=str(session.admin_telegram_user_id))
+        identity = AdminIdentity(session.admin_telegram_user_id, None)
+        self.send_admin_dashboard(
+            identity,
+            extra_headers=(("Set-Cookie", admin_session_cookie(session.session_token)),),
+        )
+
+    def handle_admin_password_setup(self, fields: dict[str, str]) -> None:
+        # So quem ja provou ser admin (sessao valida, aberta a partir do link do
+        # bot na primeira vez) pode configurar e-mail/senha — nunca auto-cadastro.
+        identity = self.authenticate_admin_mutation(fields)
+        self.admin_browser_auth.set_password_for_admin(
+            identity.telegram_user_id,
+            email=fields.get("email", ""),
+            password=fields.get("password", ""),
+        )
+        safe_log("admin_password_configured", user_id=str(identity.telegram_user_id))
+        self.send_json({"ok": True})
 
     def handle_admin_logout(self, fields: dict[str, str]) -> None:
         identity = self.authenticate_admin(fields)
@@ -818,6 +1014,13 @@ def main() -> int:
         OnboardingHandler.admin_browser_auth = admin_browser_auth
         OnboardingHandler.client_browser_auth = client_browser_auth
         OnboardingHandler.client_portal = client_portal
+        OnboardingHandler.client_app_url = config.client_app_url
+        if config.resend_api_key and config.resend_from_email:
+            OnboardingHandler.email_service = ResendEmailService(
+                config.resend_api_key, from_address=config.resend_from_email
+            )
+        else:
+            OnboardingHandler.email_service = NullEmailService()
 
         server = ThreadingHTTPServer(
             (config.onboarding_host, config.onboarding_port),
@@ -910,6 +1113,8 @@ def safe_endpoint(value: str) -> str:
         "connect",
         "/api/admin/session",
         "/api/admin/browser-login",
+        "/api/admin/login",
+        "/api/admin/password",
         "/api/admin/logout",
         "/api/admin/user-status",
         "/api/admin/mt5-account-delete",

@@ -9,7 +9,7 @@ import threading
 import tempfile
 import time
 from urllib.error import HTTPError
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import Request, urlopen
 import unittest
 
@@ -26,7 +26,11 @@ from telegram_mt5_copier.admin_panel import AdminPanelService, render_admin_pane
 from telegram_mt5_copier.admin_auth import AdminBrowserAuthService
 from telegram_mt5_copier.client_auth import ClientBrowserAuthService
 from telegram_mt5_copier.client_portal import ClientPortalService
+from telegram_mt5_copier.credential_service import CredentialService
 from telegram_mt5_copier.database import connect_database, utc_now
+from telegram_mt5_copier.mt5.account_service import MT5AccountService
+from telegram_mt5_copier.mt5.client import SimulatedMT5Client
+from telegram_mt5_copier.mt5.terminal_manager import TerminalManager
 from telegram_mt5_copier.users import UserRepository
 from telegram_mt5_copier.web_server import OnboardingHandler, safe_reason
 
@@ -408,6 +412,59 @@ class MiniAppFrontendTests(unittest.TestCase):
         self.assertTrue(approval_payload["ok"])
         self.assertEqual(approval_payload["approval"]["status"], "active")
 
+    def test_admin_configura_senha_pelo_link_do_telegram_e_depois_loga_direto(self) -> None:
+        """Bootstrap (unica vez, via link do bot) -> configura senha -> dali em
+        diante loga direto por e-mail/senha, sem depender do Telegram de novo."""
+        with mini_app_server(admin_ids=(9001,)) as base_url:
+            login_url = OnboardingHandler.admin_browser_auth.create_login_url(
+                9001, "https://institutotrader.online/admin"
+            )
+            bootstrap_token = login_url.split("#token=", 1)[1]
+            bootstrap_request = Request(
+                f"{base_url}/api/admin/browser-login",
+                data=urlencode({"token": bootstrap_token}).encode("utf-8"),
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                method="POST",
+            )
+            with urlopen(bootstrap_request, timeout=5) as response:
+                bootstrap_payload = json.loads(response.read().decode("utf-8"))
+                bootstrap_cookie = response.headers.get("Set-Cookie", "").split(";", 1)[0]
+
+            password_setup_request = Request(
+                f"{base_url}/api/admin/password",
+                data=urlencode(
+                    {
+                        "csrf_token": bootstrap_payload["csrf_token"],
+                        "email": "admin@institutotrader.online",
+                        "password": "SenhaAdmin123",
+                    }
+                ).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Cookie": bootstrap_cookie,
+                },
+                method="POST",
+            )
+            with urlopen(password_setup_request, timeout=5) as response:
+                setup_payload = json.loads(response.read().decode("utf-8"))
+
+            # Login direto por e-mail/senha, sem init_data e sem token do bot.
+            password_login = post_json(
+                f"{base_url}/api/admin/login",
+                {"email": "admin@institutotrader.online", "password": "SenhaAdmin123"},
+            )
+
+            wrong_password = post_expect_error(
+                f"{base_url}/api/admin/login",
+                {"email": "admin@institutotrader.online", "password": "SenhaErrada123"},
+            )
+
+        self.assertTrue(setup_payload["ok"])
+        self.assertTrue(password_login["ok"])
+        self.assertEqual(password_login["admin"]["telegram_user_id"], 9001)
+        self.assertIn("csrf_token", password_login)
+        self.assertEqual(401, wrong_password["status"])
+
     def test_cadastro_e_login_web_criam_sessao_segura_pendente(self) -> None:
         with mini_app_server() as base_url:
             registration = Request(
@@ -622,6 +679,177 @@ class MiniAppFrontendTests(unittest.TestCase):
         self.assertEqual(404, updated_foreign["status"])
         self.assertEqual(1, first_risk["risk"]["max_open_signals"])
 
+    def test_registration_sends_confirmation_and_password_reset_flow_works(self) -> None:
+        def get(url: str, cookie: str = "") -> tuple[int, dict[str, object]]:
+            try:
+                with urlopen(Request(url, headers={"Cookie": cookie}), timeout=5) as response:
+                    return response.status, json.loads(response.read().decode("utf-8"))
+            except HTTPError as exc:
+                return exc.code, json.loads(exc.read().decode("utf-8"))
+
+        def login_and_get_cookie(password: str) -> str:
+            with urlopen(
+                Request(
+                    f"{base_url}/api/v1/auth/login",
+                    data=urlencode(
+                        {"email": "confirmacao@example.com", "password": password}
+                    ).encode("utf-8"),
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    method="POST",
+                ),
+                timeout=5,
+            ) as response:
+                return response.headers.get("Set-Cookie", "").split(";", 1)[0]
+
+        def token_from_email_link(html: str, param: str) -> str:
+            href = re.search(r'href="([^"]+)"', html).group(1)
+            return parse_qs(urlsplit(href).fragment)[param][0]
+
+        server = mini_app_server()
+        with server as base_url:
+            registration = post_json(
+                f"{base_url}/api/v1/auth/register",
+                {
+                    "customer_name": "Cliente Confirmacao",
+                    "email": "confirmacao@example.com",
+                    "phone": "11999990000",
+                    "password": "SenhaAntiga123",
+                    "accepted_terms": "true",
+                },
+            )
+            self.assertTrue(registration["ok"])
+
+            # Registro dispara e-mail de confirmacao automaticamente.
+            self.assertEqual(1, len(server.sent_emails))
+            self.assertEqual("confirmacao@example.com", server.sent_emails[0]["to"])
+            confirm_html = server.sent_emails[0]["html"]
+
+            # Esqueci minha senha: e-mail existente recebe link; inexistente nao recebe
+            # nada, mas os dois respondem {"ok": true} (nao revela quais e-mails existem).
+            forgot_existing = post_json(
+                f"{base_url}/api/v1/auth/password/forgot", {"email": "confirmacao@example.com"}
+            )
+            forgot_missing = post_json(
+                f"{base_url}/api/v1/auth/password/forgot", {"email": "naoexiste@example.com"}
+            )
+            self.assertTrue(forgot_existing["ok"])
+            self.assertTrue(forgot_missing["ok"])
+            self.assertEqual(2, len(server.sent_emails))  # confirmacao + 1 redefinicao
+
+            reset_token = token_from_email_link(server.sent_emails[-1]["html"], "reset_token")
+            reset_result = post_json(
+                f"{base_url}/api/v1/auth/password/reset",
+                {"token": reset_token, "password": "SenhaNova123"},
+            )
+            self.assertTrue(reset_result["ok"])
+
+            # Redefinir a senha tambem dispara o aviso de seguranca "senha alterada".
+            self.assertEqual(3, len(server.sent_emails))
+            self.assertEqual("confirmacao@example.com", server.sent_emails[-1]["to"])
+            self.assertIn("alterada", server.sent_emails[-1]["subject"])
+
+            old_password_status = post_expect_error(
+                f"{base_url}/api/v1/auth/login",
+                {"email": "confirmacao@example.com", "password": "SenhaAntiga123"},
+            )
+            self.assertEqual(401, old_password_status["status"])
+
+            confirm_cookie = login_and_get_cookie("SenhaNova123")
+
+            # Confirma o e-mail usando o link recebido no cadastro.
+            confirm_token = token_from_email_link(confirm_html, "confirm_token")
+            confirm_result = post_json(
+                f"{base_url}/api/v1/auth/email/confirm", {"token": confirm_token}
+            )
+            self.assertTrue(confirm_result["ok"])
+            status_profile, profile = get(f"{base_url}/api/v1/profile", confirm_cookie)
+            self.assertEqual(200, status_profile)
+            self.assertTrue(profile["profile"]["email_confirmed"])
+
+            # Reenviar confirmacao (autenticado) gera um novo e-mail.
+            resend_result = post_expect_error_with_cookie(
+                f"{base_url}/api/v1/auth/email/resend", {}, confirm_cookie
+            )
+            self.assertEqual(200, resend_result["status"])
+            self.assertEqual(4, len(server.sent_emails))
+
+    def test_email_alterado_e_conta_mt5_disparam_avisos_por_email(self) -> None:
+        def register_and_get_cookie(email: str) -> str:
+            request = Request(
+                f"{base_url}/api/v1/auth/register",
+                data=urlencode(
+                    {
+                        "customer_name": "Cliente Eventos",
+                        "email": email,
+                        "phone": "11999990000",
+                        "password": "SenhaOriginal123",
+                        "accepted_terms": "true",
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                method="POST",
+            )
+            with urlopen(request, timeout=5) as response:
+                json.loads(response.read().decode("utf-8"))
+                return response.headers.get("Set-Cookie", "").split(";", 1)[0]
+
+        server = mini_app_server(with_mt5_accounts=True)
+        with server as base_url:
+            cookie = register_and_get_cookie("original@example.com")
+            self.assertEqual(1, len(server.sent_emails))  # confirmacao do cadastro
+
+            # Trocar o e-mail avisa o ENDERECO ANTIGO e reenvia confirmacao para o novo.
+            profile_result = post_expect_error_with_cookie(
+                f"{base_url}/api/v1/profile",
+                {
+                    "customer_name": "Cliente Eventos",
+                    "email": "novo@example.com",
+                    "phone": "11999990000",
+                },
+                cookie,
+            )
+            self.assertEqual(200, profile_result["status"])
+            self.assertEqual(3, len(server.sent_emails))
+            email_changed_notice = server.sent_emails[-2]
+            new_confirmation = server.sent_emails[-1]
+            self.assertEqual("original@example.com", email_changed_notice["to"])
+            self.assertIn("alterado", email_changed_notice["subject"])
+            self.assertIn("novo@example.com", email_changed_notice["html"])
+            self.assertEqual("novo@example.com", new_confirmation["to"])
+
+            # Conectar uma conta MT5 avisa o e-mail (ja o novo) da conta.
+            account_result = post_expect_error_with_cookie(
+                f"{base_url}/api/v1/accounts",
+                {
+                    "broker_name": "HFM",
+                    "server_name": "HFM-Demo",
+                    "login": "88887777",
+                    "password": "mt5-secret",
+                    "account_alias": "Conta principal",
+                },
+                cookie,
+            )
+            self.assertEqual(200, account_result["status"])
+            self.assertEqual(4, len(server.sent_emails))
+            connected_notice = server.sent_emails[-1]
+            self.assertEqual("novo@example.com", connected_notice["to"])
+            self.assertIn("conectada", connected_notice["subject"])
+            self.assertIn("HFM", connected_notice["html"])
+
+            account_id = account_result["body"]["account"]["id"]
+
+            # Remover a conta MT5 avisa o mesmo e-mail.
+            removal_result = post_expect_error_with_cookie(
+                f"{base_url}/api/v1/accounts/remove",
+                {"account_id": str(account_id)},
+                cookie,
+            )
+            self.assertEqual(200, removal_result["status"])
+            self.assertEqual(5, len(server.sent_emails))
+            removed_notice = server.sent_emails[-1]
+            self.assertEqual("novo@example.com", removed_notice["to"])
+            self.assertIn("removida", removed_notice["subject"])
+
     def test_telegram_valido_mostra_formulario(self) -> None:
         html = render_onboarding_form("test-nonce")
         script = render_miniapp_script()
@@ -634,17 +862,30 @@ class MiniAppFrontendTests(unittest.TestCase):
         self.assertIn('id="connect-form"', html)
 
 
+class RecordingEmailService:
+    """Substitui o Resend nos testes: guarda os e-mails em memoria, nao envia nada de verdade."""
+
+    def __init__(self, sink: list[dict[str, str]]) -> None:
+        self.sink = sink
+
+    def send(self, *, to: str, subject: str, html: str) -> None:
+        self.sink.append({"to": to, "subject": subject, "html": html})
+
+
 class mini_app_server:
     def __init__(
         self,
         bot_token: str = "123456:bot-token",
         admin_ids: tuple[int, ...] = (),
+        with_mt5_accounts: bool = False,
     ) -> None:
         self.bot_token = bot_token
         self.admin_ids = admin_ids
+        self.with_mt5_accounts = with_mt5_accounts
         self.server: ThreadingHTTPServer | None = None
         self.thread: threading.Thread | None = None
         self.temp_dir: tempfile.TemporaryDirectory[str] | None = None
+        self.mt5_accounts: MT5AccountService | None = None
 
     def __enter__(self) -> str:
         OnboardingHandler.bot_token = self.bot_token
@@ -662,10 +903,21 @@ class mini_app_server:
             admin_ids=self.admin_ids,
         )
         OnboardingHandler.client_browser_auth = ClientBrowserAuthService(database_path)
+        if self.with_mt5_accounts:
+            self.mt5_accounts = MT5AccountService(
+                database_path,
+                credential_service=CredentialService(CredentialService.generate_key()),
+                terminal_manager=TerminalManager(Path(self.temp_dir.name) / "mt5_accounts"),
+                client_factory=SimulatedMT5Client,
+            )
         OnboardingHandler.client_portal = ClientPortalService(
             database_path,
             brand_name="Instituto Trader",
+            mt5_accounts=self.mt5_accounts,
         )
+        OnboardingHandler.client_app_url = "https://app.example.com/"
+        self.sent_emails: list[dict[str, str]] = []
+        OnboardingHandler.email_service = RecordingEmailService(self.sent_emails)
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), OnboardingHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -678,6 +930,8 @@ class mini_app_server:
             self.server.server_close()
         if self.thread is not None:
             self.thread.join(timeout=5)
+        if self.mt5_accounts is not None:
+            self.mt5_accounts.close()
         if self.temp_dir is not None:
             self.temp_dir.cleanup()
 

@@ -104,6 +104,8 @@ class AppConfig:
     telegram_image_ocr_chat_ids: tuple[str, ...] = field(repr=False)
     tesseract_command: str | None = field(repr=False)
     peer_channel_sync_database_paths: tuple[Path, ...] = field(repr=False)
+    resend_api_key: str | None = field(repr=False)
+    resend_from_email: str | None = field(repr=False)
 
     @classmethod
     def load(
@@ -236,6 +238,8 @@ class AppConfig:
                 _optional_value("PEER_CHANNEL_SYNC_DATABASES", file_values, runtime_env),
                 root,
             ),
+            resend_api_key=_optional_value("RESEND_API_KEY", file_values, runtime_env),
+            resend_from_email=_optional_value("RESEND_FROM_EMAIL", file_values, runtime_env),
         )
 
         if create_dirs:

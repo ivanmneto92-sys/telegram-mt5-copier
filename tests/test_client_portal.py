@@ -496,9 +496,11 @@ class ClientPortalAccountRegistrationTests(unittest.TestCase):
         )
         account_id = created["account"]["id"]
 
-        portal.remove_account(self.user_id, account_id)
+        removed = portal.remove_account(self.user_id, account_id)
 
         self.assertEqual([], portal.accounts(self.user_id)["accounts"])
+        self.assertEqual(account_id, removed["account"]["id"])
+        self.assertEqual("Broker", removed["account"]["broker"])
 
     def test_remove_account_de_outro_cliente_nao_encontrada_e_nao_apaga(self) -> None:
         portal = self.portal()

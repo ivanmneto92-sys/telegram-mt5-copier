@@ -688,9 +688,47 @@ def initialize_database(database_path: Path) -> None:
                 failed_attempts INTEGER NOT NULL DEFAULT 0,
                 locked_until TEXT,
                 password_changed_at TEXT NOT NULL,
+                email_confirmed_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS client_password_reset_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_hash TEXT NOT NULL UNIQUE,
+                user_id INTEGER NOT NULL,
+                expires_at TEXT NOT NULL,
+                used_at TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS client_email_confirmation_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_hash TEXT NOT NULL UNIQUE,
+                user_id INTEGER NOT NULL,
+                email TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                used_at TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            );
+
+            -- Login por e-mail/senha para administradores, no mesmo padrao de
+            -- client_credentials: a identidade continua sendo o Telegram user id
+            -- configurado em BOT_ADMIN_IDS (nunca um conceito de usuario novo),
+            -- e-mail/senha e so um segundo jeito de abrir sessao nessa mesma
+            -- identidade, sem depender do bot para logar toda vez.
+            CREATE TABLE IF NOT EXISTS admin_credentials (
+                admin_telegram_user_id INTEGER PRIMARY KEY,
+                email TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                password_hash TEXT NOT NULL,
+                failed_attempts INTEGER NOT NULL DEFAULT 0,
+                locked_until TEXT,
+                password_changed_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS source_channels (
@@ -1016,6 +1054,7 @@ def run_schema_migrations(connection: sqlite3.Connection) -> None:
         "be_attempts",
         "INTEGER NOT NULL DEFAULT 0",
     )
+    ensure_column(connection, "client_credentials", "email_confirmed_at", "TEXT")
     migrate_channel_subscriptions_to_explicit_opt_in(connection)
 
 
