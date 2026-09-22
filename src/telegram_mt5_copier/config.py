@@ -104,6 +104,11 @@ class AppConfig:
     telegram_image_ocr_chat_ids: tuple[str, ...] = field(repr=False)
     tesseract_command: str | None = field(repr=False)
     peer_channel_sync_database_paths: tuple[Path, ...] = field(repr=False)
+    backup_encryption_key: str | None = field(repr=False)
+    backup_retention_days: int
+    b2_key_id: str | None = field(repr=False)
+    b2_application_key: str | None = field(repr=False)
+    b2_bucket_name: str | None = field(repr=False)
 
     @classmethod
     def load(
@@ -236,6 +241,16 @@ class AppConfig:
                 _optional_value("PEER_CHANNEL_SYNC_DATABASES", file_values, runtime_env),
                 root,
             ),
+            backup_encryption_key=_optional_value(
+                "BACKUP_ENCRYPTION_KEY", file_values, runtime_env
+            ),
+            backup_retention_days=parse_positive_int(
+                _value("BACKUP_RETENTION_DAYS", file_values, runtime_env, "14"),
+                "BACKUP_RETENTION_DAYS",
+            ),
+            b2_key_id=_optional_value("B2_KEY_ID", file_values, runtime_env),
+            b2_application_key=_optional_value("B2_APPLICATION_KEY", file_values, runtime_env),
+            b2_bucket_name=_optional_value("B2_BUCKET_NAME", file_values, runtime_env),
         )
 
         if create_dirs:

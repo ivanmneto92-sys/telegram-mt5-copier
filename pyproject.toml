@@ -27,6 +27,7 @@ telegram-mt5-worker-pool = "telegram_mt5_copier.mt5_worker_pool:main"
 telegram-mt5-supervisor = "telegram_mt5_copier.supervisor:main"
 telegram-mt5-health-monitor = "telegram_mt5_copier.operational_health:main"
 telegram-market-news = "telegram_mt5_copier.market_news_monitor:main"
+telegram-mt5-backup = "telegram_mt5_copier.backup:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
