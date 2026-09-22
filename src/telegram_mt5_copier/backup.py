@@ -304,7 +304,7 @@ class B2Client:
         self._ensure_authorized()
         assert self._download_url_base is not None
         request = Request(
-            f"{self._download_url_base}/file/{self.bucket_name}/{quote(remote_name)}",
+            f"{self._download_url_base}/file/{quote(self.bucket_name, safe='')}/{quote(remote_name)}",
             headers={"Authorization": self._auth_token},
         )
         try:

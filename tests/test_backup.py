@@ -200,6 +200,30 @@ class B2ClientTests(unittest.TestCase):
         self.assertEqual(3, mock_urlopen.call_count)
 
     @patch("telegram_mt5_copier.backup.urlopen")
+    def test_download_url_encodes_a_bucket_name_with_spaces(self, mock_urlopen: MagicMock) -> None:
+        """Reproduz o bug real encontrado em producao: um B2_BUCKET_NAME com
+        espaco (ex.: "comerciante de instituto", digitado errado no .env)
+        quebrava a URL de download com InvalidURL — bucket_name nao estava
+        sendo escapado, so remote_name estava."""
+        download_response = MagicMock()
+        download_response.read.return_value = b"conteudo-do-backup"
+        mock_urlopen.return_value.__enter__.side_effect = [
+            self._authorize_response(),
+            download_response,
+        ]
+
+        with tempfile.TemporaryDirectory() as raw_dir:
+            destination = Path(raw_dir) / "baixado.enc"
+            client = B2Client("key-id", "app-key", "comerciante de instituto")
+            client.download("main/backup-x.zip.enc", destination)
+
+            self.assertEqual(b"conteudo-do-backup", destination.read_bytes())
+
+        download_request = mock_urlopen.call_args_list[-1].args[0]
+        self.assertNotIn(" ", download_request.full_url)
+        self.assertIn("comerciante%20de%20instituto", download_request.full_url)
+
+    @patch("telegram_mt5_copier.backup.urlopen")
     def test_bucket_scoped_key_skips_list_buckets_call(self, mock_urlopen: MagicMock) -> None:
         """Uma chave ja restrita a um bucket devolve o bucketId na propria
         autorizacao — nao deveria precisar de uma chamada extra a mais."""
