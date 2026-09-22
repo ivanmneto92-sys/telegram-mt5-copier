@@ -801,6 +801,102 @@ class MiniAppFrontendTests(unittest.TestCase):
         self.assertTrue(settings_result["body"]["avoid_high_impact_news"])
         self.assertTrue(after_settings["avoid_high_impact_news"])
 
+    def test_migracao_de_cliente_telegram_vincula_conta_existente_pela_web(self) -> None:
+        """Ponta a ponta do fluxo real: bot emite o link ("Acessar aplicativo"),
+        o navegador troca o token por sessao, o cliente configura e-mail/senha
+        e passa a entrar direto -- tudo na MESMA conta, com a mesma conta MT5
+        que ja existia antes de qualquer coisa pelo site."""
+        server = mini_app_server(with_mt5_accounts=True)
+        with server as base_url:
+            now = utc_now()
+            with connect_database(server.database_path) as db:
+                telegram_user_id = int(
+                    db.execute(
+                        """
+                        INSERT INTO users (
+                            telegram_user_id, telegram_username, status, created_at, updated_at
+                        ) VALUES (555333, 'cliente_migrando', 'active', ?, ?)
+                        """,
+                        (now, now),
+                    ).lastrowid
+                )
+                db.execute(
+                    """
+                    INSERT INTO mt5_accounts (
+                        user_id, account_alias, broker_name, terminal_path, server_name,
+                        login, encrypted_password, account_type, account_mode,
+                        connection_status, created_at, updated_at
+                    ) VALUES (?, 'Conta de sempre', 'HFM', 'terminal64.exe', 'HFM-Live',
+                              '444555', 'encrypted', 'real', 'hedging', 'connected', ?, ?)
+                    """,
+                    (telegram_user_id, now, now),
+                )
+
+            # O bot gera esse link quando o cliente toca em "Acessar aplicativo".
+            # create_login_url exige HTTPS (o servidor de teste e http://127.0.0.1);
+            # so o token do fragmento importa aqui, o resto da URL nunca e usado.
+            bot_auth = ClientBrowserAuthService(server.database_path)
+            login_url = bot_auth.create_login_url(telegram_user_id, "https://app.example.com/")
+            token = parse_qs(urlsplit(login_url).fragment)["token"][0]
+
+            exchange = urlopen(
+                Request(
+                    f"{base_url}/api/v1/auth/browser-login",
+                    data=urlencode({"token": token}).encode("utf-8"),
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    method="POST",
+                ),
+                timeout=5,
+            )
+            cookie = exchange.headers.get("Set-Cookie", "").split(";", 1)[0]
+            dashboard_before = json.loads(exchange.read().decode("utf-8"))
+
+            setup_result = post_expect_error_with_cookie(
+                f"{base_url}/api/v1/auth/password",
+                {"email": "migrado@example.com", "password": "SenhaMigrada123"},
+                cookie,
+            )
+
+            password_login = urlopen(
+                Request(
+                    f"{base_url}/api/v1/auth/login",
+                    data=urlencode(
+                        {"email": "migrado@example.com", "password": "SenhaMigrada123"}
+                    ).encode("utf-8"),
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    method="POST",
+                ),
+                timeout=5,
+            )
+            new_cookie = password_login.headers.get("Set-Cookie", "").split(";", 1)[0]
+            dashboard_after_login = json.loads(password_login.read().decode("utf-8"))
+
+            # Ninguem mais consegue reivindicar esse e-mail.
+            second_registration = post_expect_error(
+                f"{base_url}/api/v1/auth/register",
+                {
+                    "customer_name": "Impostor",
+                    "email": "migrado@example.com",
+                    "phone": "11900000000",
+                    "password": "TentativaInvasao1",
+                    "accepted_terms": "true",
+                },
+            )
+
+            with connect_database(server.database_path) as db:
+                total_users = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+
+        self.assertEqual(telegram_user_id, dashboard_before["user"]["id"])
+        self.assertEqual("Conta de sempre", dashboard_before["account"]["alias"])
+        self.assertEqual(200, setup_result["status"])
+        self.assertEqual(telegram_user_id, dashboard_after_login["user"]["id"])
+        self.assertEqual("Conta de sempre", dashboard_after_login["account"]["alias"])
+        self.assertEqual(400, second_registration["status"])
+        self.assertEqual(1, total_users)
+        # A sessao antiga (do link) e a nova (senha) sao independentes, ambas
+        # validas -- nao ha necessidade de derrubar uma pra outra funcionar.
+        self.assertNotEqual(cookie, new_cookie)
+
     def test_registration_sends_confirmation_and_password_reset_flow_works(self) -> None:
         def get(url: str, cookie: str = "") -> tuple[int, dict[str, object]]:
             try:
