@@ -355,11 +355,30 @@ class UpgradeFromEtapa2Tests(unittest.TestCase):
                 ).fetchone()
             self.assertEqual(row, ("signal_shadow_write", "done", None))
 
-            # Novo enqueue funciona normalmente depois do upgrade.
+            # Novo enqueue funciona normalmente depois do upgrade -- registra o
+            # canal primeiro pra provar o caminho real (nao o no-op de canal
+            # ausente), e confirma que source_signal_id foi gravado certo e
+            # que o indice unico protege contra reenfileirar o mesmo sinal.
+            ChannelCatalogService(database_path).register_configured_channel(
+                telegram_chat_id="123456",
+                title="Canal Upgrade",
+                username=None,
+                content_protected=False,
+                history_accessible=True,
+                last_message_id=None,
+            )
             outbox = CentralSyncOutbox(database_path)
             outbox.enqueue_signal_shadow_write(make_signal(), "mensagem", 999)
             rows = outbox.claim_batch(10)
-            self.assertEqual(len(rows), 0)  # canal "123456" nao foi registrado neste teste, enqueue vira no-op
+            self.assertEqual(len(rows), 1)
+            with connect_database(database_path) as connection:
+                (source_signal_id,) = connection.execute(
+                    "SELECT source_signal_id FROM central_sync_outbox WHERE id = ?", (rows[0].id,)
+                ).fetchone()
+            self.assertEqual(source_signal_id, 999)
+
+            with self.assertRaises(Exception):
+                outbox.enqueue_signal_shadow_write(make_signal(), "mensagem de novo", 999)
 
             # Reaplicar initialize_database de novo (idempotencia do upgrade em si).
             initialize_database(database_path)
