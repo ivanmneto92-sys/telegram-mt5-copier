@@ -173,11 +173,11 @@ class OperationalHealthMonitor:
             activation_row = connection.execute(
                 "SELECT activation_signal_id FROM central_sync_activation WHERE id = 1"
             ).fetchone()
-            gap_count = 0
+            gap_first_id: int | None = None
             if activation_row is not None:
                 gap_row = connection.execute(
                     """
-                    SELECT COUNT(*) FROM signals s
+                    SELECT MIN(s.id) FROM signals s
                     WHERE s.id > ?
                       AND NOT EXISTS (
                         SELECT 1 FROM central_sync_outbox o
@@ -186,20 +186,19 @@ class OperationalHealthMonitor:
                     """,
                     (int(activation_row[0]),),
                 ).fetchone()
-                gap_count = int(gap_row[0])
+                gap_first_id = int(gap_row[0]) if gap_row[0] is not None else None
 
             lag_cutoff = (
                 current_time - timedelta(seconds=self.config.central_sync_delivery_lag_seconds)
             ).isoformat()
             lag_row = connection.execute(
                 """
-                SELECT COUNT(*), MIN(created_at) FROM central_sync_outbox
+                SELECT MIN(created_at) FROM central_sync_outbox
                 WHERE kind = 'signal_shadow_write' AND status != 'done' AND created_at < ?
                 """,
                 (lag_cutoff,),
             ).fetchone()
-            lag_count = int(lag_row[0])
-            lag_oldest = parse_datetime(lag_row[1]) if lag_row[1] else None
+            lag_oldest = parse_datetime(lag_row[0]) if lag_row[0] else None
 
             heartbeat_row = connection.execute(
                 "SELECT heartbeat_at FROM service_heartbeats WHERE service_name = ?",
@@ -208,7 +207,16 @@ class OperationalHealthMonitor:
 
         issues: list[HealthIssue] = []
 
-        if gap_count > 0:
+        # Os resumos abaixo usam apenas ancoras ESTAVEIS (id/timestamp do item
+        # mais antigo) -- nunca uma contagem ao vivo. _synchronize (mais
+        # abaixo) reenvia a notificacao sempre que o resumo muda, entao um
+        # resumo com "N sinais" mudaria a cada novo gap/atraso durante um
+        # incidente em andamento e ignoraria a janela de repeticao
+        # (OPERATIONAL_ALERT_REPEAT_MINUTES) -- viraria spam, um alerta por
+        # sinal. O id/timestamp mais antigo so muda quando aquele item
+        # especifico e resolvido, entao o resumo fica estavel enquanto o
+        # problema for essencialmente o mesmo.
+        if gap_first_id is not None:
             issues.append(
                 HealthIssue(
                     key="central_sync:enqueue_gap",
@@ -216,24 +224,21 @@ class OperationalHealthMonitor:
                     entity_id=self.config.instance_id,
                     title="Sincronização central",
                     summary=(
-                        f"{gap_count} sinal(is) aceito(s) localmente nunca foram "
-                        "enfileirados para replicação central."
+                        f"Sinal local id={gap_first_id} nunca foi enfileirado para replicação "
+                        "central. Pode haver outros mais recentes na mesma situação."
                     ),
                 )
             )
 
-        if lag_count > 0:
-            oldest_text = format_timestamp(lag_oldest) if lag_oldest is not None else "data desconhecida"
+        if lag_oldest is not None:
+            oldest_text = format_timestamp(lag_oldest)
             issues.append(
                 HealthIssue(
                     key="central_sync:delivery_lag",
                     alert_type="central_sync_delivery_lag",
                     entity_id=self.config.instance_id,
                     title="Sincronização central",
-                    summary=(
-                        f"{lag_count} sinal(is) com replicação atrasada. "
-                        f"O mais antigo está pendente desde {oldest_text}."
-                    ),
+                    summary=f"Replicação central atrasada. O item mais antigo está pendente desde {oldest_text}.",
                 )
             )
 

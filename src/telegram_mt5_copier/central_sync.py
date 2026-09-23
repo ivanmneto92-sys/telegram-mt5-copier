@@ -366,11 +366,15 @@ async def run_central_sync_drain_loop(
     logger: logging.Logger,
 ) -> None:
     while True:
-        # Heartbeat proprio, sempre, mesmo se o resto do corpo do loop falhar --
-        # mede "o loop de drenagem esta vivo", separado de "o Supabase esta
-        # alcancavel" (que a conexao abaixo pode falhar sem travar o loop).
-        await asyncio.to_thread(update_service_heartbeat, outbox.database_path, CENTRAL_SYNC_SERVICE_NAME)
         try:
+            # Heartbeat proprio, sempre, mesmo se o resto do corpo do loop
+            # falhar -- mede "o loop de drenagem esta vivo", separado de "o
+            # Supabase esta alcancavel" (que a conexao abaixo pode falhar sem
+            # travar o loop). Fica DENTRO do try: uma falha transitoria aqui
+            # (ex.: SQLite bloqueado por outro escritor no mesmo instante) nao
+            # pode matar a task inteira pro resto da vida do processo -- so
+            # essa iteracao falha, o loop continua na proxima.
+            await asyncio.to_thread(update_service_heartbeat, outbox.database_path, CENTRAL_SYNC_SERVICE_NAME)
             if not client.connected:
                 await client.connect()
             await client.upsert_node(config.node_id, config.node_label)

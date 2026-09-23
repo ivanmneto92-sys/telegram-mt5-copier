@@ -327,9 +327,14 @@ def initialize_database(database_path: Path) -> None:
                 next_attempt_at TEXT NOT NULL
             );
 
-            CREATE UNIQUE INDEX IF NOT EXISTS central_sync_outbox_source_signal_idx
-                ON central_sync_outbox (kind, source_signal_id)
-                WHERE source_signal_id IS NOT NULL;
+            -- Indice unico de (kind, source_signal_id) NAO fica aqui -- essa
+            -- coluna so existe de fabrica em banco novo; num banco que ja
+            -- tinha central_sync_outbox antes desta coluna existir (Etapa 2),
+            -- CREATE TABLE IF NOT EXISTS acima e um no-op e a coluna so chega
+            -- via ensure_column() em run_schema_migrations, mais abaixo neste
+            -- arquivo. Criar o indice aqui quebraria esse upgrade com
+            -- "no such column: source_signal_id". O indice e criado logo
+            -- depois do ensure_column correspondente.
 
             -- Marco de ativacao: qual signals.id existia quando o shadow-write
             -- comecou a rodar pela primeira vez nesta instalacao. Sinais com id
@@ -1091,6 +1096,16 @@ def run_schema_migrations(connection: sqlite3.Connection) -> None:
     )
     ensure_column(connection, "client_credentials", "email_confirmed_at", "TEXT")
     ensure_column(connection, "central_sync_outbox", "source_signal_id", "INTEGER")
+    # So depois do ensure_column acima: numa instalacao que ja tinha
+    # central_sync_outbox antes desta coluna existir, criar o indice antes
+    # falharia com "no such column: source_signal_id".
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS central_sync_outbox_source_signal_idx
+            ON central_sync_outbox (kind, source_signal_id)
+            WHERE source_signal_id IS NOT NULL
+        """
+    ).close()
     migrate_channel_subscriptions_to_explicit_opt_in(connection)
 
 

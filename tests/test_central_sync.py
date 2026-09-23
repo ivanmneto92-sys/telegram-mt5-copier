@@ -18,6 +18,7 @@ from telegram_mt5_copier.database import (
     CENTRAL_SYNC_SERVICE_NAME,
     SignalDatabase,
     connect_database,
+    initialize_database,
     get_service_heartbeat,
 )
 from telegram_mt5_copier.listener import SignalProcessor
@@ -288,6 +289,82 @@ class CentralSyncOutboxTests(unittest.TestCase):
                 "SELECT activation_signal_id FROM central_sync_activation WHERE id = 1"
             ).fetchone()
         self.assertEqual(row_again[0], signal_id)
+
+
+class UpgradeFromEtapa2Tests(unittest.TestCase):
+    """Regressao: um banco ja inicializado pela Etapa 2 (e8d83bb) nao tinha
+    central_sync_outbox.source_signal_id. initialize_database() precisa
+    conseguir rodar de novo nesse banco (upgrade in-place) sem erro e sem
+    perder as linhas existentes -- o indice unico em (kind, source_signal_id)
+    so pode ser criado DEPOIS que ensure_column() adiciona a coluna, nunca
+    antes (achado real: criar o indice no executescript inicial, antes de
+    run_schema_migrations rodar, quebrava com "no such column: source_signal_id"
+    em qualquer banco que ja existia antes desta mudanca)."""
+
+    def test_initialize_database_faz_upgrade_de_banco_formato_etapa_2_sem_erro(self) -> None:
+        temp_dir = tempfile.TemporaryDirectory()
+        try:
+            database_path = Path(temp_dir.name) / "legacy.sqlite3"
+
+            # Recria o formato exato da Etapa 2: central_sync_outbox SEM a
+            # coluna source_signal_id (e sem o indice, que dependia dela).
+            with connect_database(database_path) as connection:
+                connection.execute(
+                    """
+                    CREATE TABLE central_sync_outbox (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        kind TEXT NOT NULL,
+                        payload TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        attempts INTEGER NOT NULL DEFAULT 0,
+                        last_error TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        next_attempt_at TEXT NOT NULL
+                    )
+                    """
+                ).close()
+                connection.execute(
+                    """
+                    INSERT INTO central_sync_outbox (
+                        kind, payload, status, attempts, created_at, updated_at, next_attempt_at
+                    ) VALUES ('signal_shadow_write', '{"symbol":"XAUUSD"}', 'done', 1,
+                              '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')
+                    """
+                ).close()
+
+            # Upgrade: initialize_database precisa ser idempotente e seguro
+            # de rodar num banco que ja existia antes desta coluna/indice.
+            initialize_database(database_path)
+
+            with connect_database(database_path) as connection:
+                columns = {row[1] for row in connection.execute("PRAGMA table_info(central_sync_outbox)")}
+                self.assertIn("source_signal_id", columns)
+
+                indexes = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='central_sync_outbox'"
+                    )
+                }
+                self.assertIn("central_sync_outbox_source_signal_idx", indexes)
+
+                # A linha que ja existia antes do upgrade continua la, intacta.
+                row = connection.execute(
+                    "SELECT kind, status, source_signal_id FROM central_sync_outbox"
+                ).fetchone()
+            self.assertEqual(row, ("signal_shadow_write", "done", None))
+
+            # Novo enqueue funciona normalmente depois do upgrade.
+            outbox = CentralSyncOutbox(database_path)
+            outbox.enqueue_signal_shadow_write(make_signal(), "mensagem", 999)
+            rows = outbox.claim_batch(10)
+            self.assertEqual(len(rows), 0)  # canal "123456" nao foi registrado neste teste, enqueue vira no-op
+
+            # Reaplicar initialize_database de novo (idempotencia do upgrade em si).
+            initialize_database(database_path)
+        finally:
+            temp_dir.cleanup()
 
 
 class DrainOneUnknownKindTests(unittest.IsolatedAsyncioTestCase):
