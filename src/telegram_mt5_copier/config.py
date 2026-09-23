@@ -112,6 +112,7 @@ class AppConfig:
     central_sync_database_url: str | None = field(repr=False)
     central_sync_poll_seconds: int
     central_sync_max_batch: int
+    central_sync_delivery_lag_seconds: int
 
     @classmethod
     def load(
@@ -264,6 +265,10 @@ class AppConfig:
             central_sync_max_batch=parse_positive_int(
                 _value("CENTRAL_SYNC_MAX_BATCH", file_values, runtime_env, "20"),
                 "CENTRAL_SYNC_MAX_BATCH",
+            ),
+            central_sync_delivery_lag_seconds=parse_positive_int(
+                _value("CENTRAL_SYNC_DELIVERY_LAG_SECONDS", file_values, runtime_env, "600"),
+                "CENTRAL_SYNC_DELIVERY_LAG_SECONDS",
             ),
         )
 

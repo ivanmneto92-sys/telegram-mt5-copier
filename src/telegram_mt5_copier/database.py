@@ -12,6 +12,7 @@ from .models import DecisionStatus, IncomingMessage, TradeSignal, decimal_to_tex
 SQLITE_TIMEOUT_SECONDS = 30.0
 DUPLICATE_WINDOW_MINUTES = 240
 SIGNAL_MONITOR_SERVICE_NAME = "telegram_signal_monitor"
+CENTRAL_SYNC_SERVICE_NAME = "telegram_central_sync"
 
 
 class SignalDatabase:
@@ -152,7 +153,7 @@ class SignalDatabase:
             finally:
                 cursor.close()
 
-    def record_accepted(self, signal: TradeSignal, formatted_message: str) -> None:
+    def record_accepted(self, signal: TradeSignal, formatted_message: str) -> int:
         now = utc_now()
         with connect_database(self.database_path) as connection:
             cursor = connection.execute(
@@ -190,6 +191,7 @@ class SignalDatabase:
                     now,
                 ),
             )
+            signal_id = int(cursor.lastrowid)
             cursor.close()
             cursor = connection.execute(
                 """
@@ -215,6 +217,7 @@ class SignalDatabase:
                 ),
             )
             cursor.close()
+        return signal_id
 
     def record_event(
         self,
@@ -314,6 +317,7 @@ def initialize_database(database_path: Path) -> None:
             CREATE TABLE IF NOT EXISTS central_sync_outbox (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 kind TEXT NOT NULL,
+                source_signal_id INTEGER,
                 payload TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'pending',
                 attempts INTEGER NOT NULL DEFAULT 0,
@@ -321,6 +325,22 @@ def initialize_database(database_path: Path) -> None:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 next_attempt_at TEXT NOT NULL
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS central_sync_outbox_source_signal_idx
+                ON central_sync_outbox (kind, source_signal_id)
+                WHERE source_signal_id IS NOT NULL;
+
+            -- Marco de ativacao: qual signals.id existia quando o shadow-write
+            -- comecou a rodar pela primeira vez nesta instalacao. Sinais com id
+            -- menor ou igual a este nunca vao ter linha de outbox (o recurso nao
+            -- existia ainda) -- usado por operational_health.py pra nao gerar
+            -- alerta falso permanente de "sinal nunca enfileirado" sobre
+            -- historico anterior a Etapa 2.
+            CREATE TABLE IF NOT EXISTS central_sync_activation (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                activation_signal_id INTEGER NOT NULL,
+                activated_at TEXT NOT NULL
             );
 
             CREATE INDEX IF NOT EXISTS central_sync_outbox_pending_idx
@@ -1070,6 +1090,7 @@ def run_schema_migrations(connection: sqlite3.Connection) -> None:
         "INTEGER NOT NULL DEFAULT 0",
     )
     ensure_column(connection, "client_credentials", "email_confirmed_at", "TEXT")
+    ensure_column(connection, "central_sync_outbox", "source_signal_id", "INTEGER")
     migrate_channel_subscriptions_to_explicit_opt_in(connection)
 
 

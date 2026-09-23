@@ -8,12 +8,18 @@ import unittest
 
 from telegram_mt5_copier.central_sync import (
     CentralSyncOutbox,
+    _drain_one,
     build_outbox_payload,
     resolve_local_channel,
     run_central_sync_drain_loop,
 )
 from telegram_mt5_copier.channel_catalog import ChannelCatalogService
-from telegram_mt5_copier.database import SignalDatabase, connect_database
+from telegram_mt5_copier.database import (
+    CENTRAL_SYNC_SERVICE_NAME,
+    SignalDatabase,
+    connect_database,
+    get_service_heartbeat,
+)
 from telegram_mt5_copier.listener import SignalProcessor
 from telegram_mt5_copier.models import DecisionStatus, Direction, IncomingMessage, TradeSignal
 
@@ -32,6 +38,14 @@ class NullLogger:
         pass
 
 
+class CapturingLogger(NullLogger):
+    def __init__(self) -> None:
+        self.info_messages: list[str] = []
+
+    def info(self, message, *args, **kwargs) -> None:
+        self.info_messages.append(message % args if args else message)
+
+
 class FakePublisher:
     def __init__(self) -> None:
         self.messages: list[str] = []
@@ -41,7 +55,7 @@ class FakePublisher:
 
 
 class RaisingOutbox:
-    def enqueue_signal_shadow_write(self, signal, formatted_message: str) -> None:
+    def enqueue_signal_shadow_write(self, signal, formatted_message: str, local_signal_id: int) -> None:
         raise RuntimeError("supabase indisponivel (simulado)")
 
 
@@ -148,28 +162,77 @@ class CentralSyncOutboxTests(unittest.TestCase):
                 cursor.close()
 
     def test_enqueue_grava_linha_para_canal_registrado(self) -> None:
-        self.outbox.enqueue_signal_shadow_write(make_signal(), "mensagem formatada")
+        self.outbox.enqueue_signal_shadow_write(make_signal(), "mensagem formatada", 42)
 
         self.assertEqual(self._row_count(), 1)
         rows = self.outbox.claim_batch(10)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].kind, "signal_shadow_write")
         self.assertEqual(rows[0].payload["symbol"], "XAUUSD")
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                "SELECT source_signal_id FROM central_sync_outbox WHERE id = ?", (rows[0].id,)
+            )
+            try:
+                (source_signal_id,) = cursor.fetchone()
+            finally:
+                cursor.close()
+        self.assertEqual(source_signal_id, 42)
 
     def test_enqueue_nao_grava_nada_para_canal_nao_registrado(self) -> None:
-        self.outbox.enqueue_signal_shadow_write(make_signal(source_chat_id="999999"), "mensagem")
+        self.outbox.enqueue_signal_shadow_write(make_signal(source_chat_id="999999"), "mensagem", 43)
 
         self.assertEqual(self._row_count(), 0)
 
+    def test_enqueue_loga_info_quando_canal_nao_registrado(self) -> None:
+        logger = CapturingLogger()
+        outbox = CentralSyncOutbox(self.database_path, logger=logger)
+
+        outbox.enqueue_signal_shadow_write(make_signal(source_chat_id="999999"), "mensagem", 44)
+
+        self.assertTrue(
+            any("canal nao registrado" in msg for msg in logger.info_messages),
+            logger.info_messages,
+        )
+
+    def test_enqueue_loga_info_quando_sem_source_message_id(self) -> None:
+        logger = CapturingLogger()
+        outbox = CentralSyncOutbox(self.database_path, logger=logger)
+        signal = make_signal()
+        signal_sem_message_id = signal.__class__(
+            symbol=signal.symbol,
+            direction=signal.direction,
+            entry_low=signal.entry_low,
+            entry_high=signal.entry_high,
+            stop_loss=signal.stop_loss,
+            take_profits=signal.take_profits,
+            raw_text=signal.raw_text,
+            source_chat_id=signal.source_chat_id,
+            source_message_id=None,
+        )
+
+        outbox.enqueue_signal_shadow_write(signal_sem_message_id, "mensagem", 45)
+
+        self.assertTrue(
+            any("sem source_message_id" in msg for msg in logger.info_messages),
+            logger.info_messages,
+        )
+
+    def test_segundo_enqueue_do_mesmo_sinal_e_rejeitado_pelo_indice_unico(self) -> None:
+        self.outbox.enqueue_signal_shadow_write(make_signal(), "mensagem", 46)
+
+        with self.assertRaises(Exception):
+            self.outbox.enqueue_signal_shadow_write(make_signal(), "mensagem de novo", 46)
+
     def test_claim_mark_done_remove_da_proxima_leva(self) -> None:
-        self.outbox.enqueue_signal_shadow_write(make_signal(), "mensagem")
+        self.outbox.enqueue_signal_shadow_write(make_signal(), "mensagem", 47)
         rows = self.outbox.claim_batch(10)
         self.outbox.mark_done(rows[0].id)
 
         self.assertEqual(self.outbox.claim_batch(10), [])
 
     def test_mark_failed_adia_next_attempt_at_e_nao_aparece_na_proxima_leva_imediata(self) -> None:
-        self.outbox.enqueue_signal_shadow_write(make_signal(), "mensagem")
+        self.outbox.enqueue_signal_shadow_write(make_signal(), "mensagem", 48)
         rows = self.outbox.claim_batch(10)
         self.outbox.mark_failed(rows[0].id, "erro de conexao")
 
@@ -187,6 +250,54 @@ class CentralSyncOutboxTests(unittest.TestCase):
         self.assertEqual(status, "failed")
         self.assertEqual(attempts, 1)
         self.assertEqual(last_error, "erro de conexao")
+
+    def test_ensure_activation_baseline_grava_max_id_uma_unica_vez(self) -> None:
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO signals (
+                    signature, content_signature, symbol, direction, entry_low, entry_high,
+                    stop_loss, take_profits, source_chat_id, source_message_id, raw_text,
+                    formatted_message, created_at
+                ) VALUES ('sig-a','sig-a','XAUUSD','BUY','4100','4105','4090','[]','123456','1','raw','fmt','2026-01-01T00:00:00+00:00')
+                """
+            ).close()
+            (signal_id,) = connection.execute("SELECT MAX(id) FROM signals").fetchone()
+
+        self.outbox.ensure_activation_baseline()
+        with connect_database(self.database_path) as connection:
+            row = connection.execute(
+                "SELECT activation_signal_id FROM central_sync_activation WHERE id = 1"
+            ).fetchone()
+        self.assertEqual(row[0], signal_id)
+
+        # Segunda chamada e no-op: novos sinais depois nao mudam o baseline ja gravado.
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO signals (
+                    signature, content_signature, symbol, direction, entry_low, entry_high,
+                    stop_loss, take_profits, source_chat_id, source_message_id, raw_text,
+                    formatted_message, created_at
+                ) VALUES ('sig-b','sig-b','XAUUSD','BUY','4100','4105','4090','[]','123456','2','raw','fmt','2026-01-01T00:00:01+00:00')
+                """
+            ).close()
+        self.outbox.ensure_activation_baseline()
+        with connect_database(self.database_path) as connection:
+            row_again = connection.execute(
+                "SELECT activation_signal_id FROM central_sync_activation WHERE id = 1"
+            ).fetchone()
+        self.assertEqual(row_again[0], signal_id)
+
+
+class DrainOneUnknownKindTests(unittest.IsolatedAsyncioTestCase):
+    async def test_kind_desconhecido_levanta_em_vez_de_ser_ignorado(self) -> None:
+        from telegram_mt5_copier.central_sync import OutboxRow
+
+        row = OutboxRow(id=1, kind="algum_tipo_futuro_desconhecido", payload={}, attempts=0)
+
+        with self.assertRaises(ValueError):
+            await _drain_one(client=None, config=None, row=row)
 
 
 class SignalProcessorShadowWriteIsolationTests(unittest.IsolatedAsyncioTestCase):
@@ -293,6 +404,10 @@ class DrainLoopResilienceTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreaterEqual(client.connect_attempts, 3)  # 2 falhas + 1 sucesso
             self.assertTrue(client.connected)
             self.assertGreaterEqual(client.upsert_calls, 2)  # node + instance, apos reconectar
+            # Heartbeat proprio do loop deve ter sido registrado mesmo durante
+            # as tentativas com falha -- e o que operational_health.py usa pra
+            # distinguir "loop morto" de "Supabase fora do ar".
+            self.assertIsNotNone(get_service_heartbeat(database_path, CENTRAL_SYNC_SERVICE_NAME))
         finally:
             temp_dir.cleanup()
 

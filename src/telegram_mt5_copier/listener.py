@@ -133,10 +133,12 @@ class SignalProcessor:
                 signal.source_chat_id,
                 signal.source_message_id,
             )
-        self.database.record_accepted(signal, formatted_message)
+        local_signal_id = self.database.record_accepted(signal, formatted_message)
         if self.central_sync_outbox is not None:
             try:
-                self.central_sync_outbox.enqueue_signal_shadow_write(signal, formatted_message)
+                self.central_sync_outbox.enqueue_signal_shadow_write(
+                    signal, formatted_message, local_signal_id
+                )
             except Exception:
                 self.logger.exception("central_sync_outbox_enqueue_failed")
         if self.pending_order_executor is not None:
@@ -203,7 +205,11 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
     database = SignalDatabase(config.database_path)
     database.initialize()
     channel_catalog = ChannelCatalogService(config.database_path)
-    central_sync_outbox = CentralSyncOutbox(config.database_path) if config.central_sync_enabled else None
+    central_sync_outbox = (
+        CentralSyncOutbox(config.database_path, logger=logger) if config.central_sync_enabled else None
+    )
+    if central_sync_outbox is not None:
+        central_sync_outbox.ensure_activation_baseline()
     central_sync_client = (
         CentralSyncClient(config.central_sync_database_url) if config.central_sync_enabled else None
     )

@@ -83,6 +83,7 @@ def _fake_config(node_id: str = "dev-local") -> AppConfig:
         central_sync_database_url=LOCAL_DATABASE_URL,
         central_sync_poll_seconds=5,
         central_sync_max_batch=20,
+        central_sync_delivery_lag_seconds=600,
     )
 
 
@@ -145,7 +146,7 @@ class CentralSyncIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_shadow_write_cria_registro_central_e_uma_revisao(self) -> None:
         signal = self._make_signal()
-        self.outbox.enqueue_signal_shadow_write(signal, "mensagem formatada")
+        self.outbox.enqueue_signal_shadow_write(signal, "mensagem formatada", 9501)
         rows = self.outbox.claim_batch(10)
         self.assertEqual(len(rows), 1)
 
@@ -186,7 +187,7 @@ class CentralSyncIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_drenar_o_mesmo_sinal_duas_vezes_e_idempotente(self) -> None:
         await self._upsert_registry()
         signal = self._make_signal(source_message_id=502)
-        self.outbox.enqueue_signal_shadow_write(signal, "mensagem formatada")
+        self.outbox.enqueue_signal_shadow_write(signal, "mensagem formatada", 9502)
         rows = self.outbox.claim_batch(10)
         await _drain_one(self.client, self.config, rows[0])
         # Redrena a MESMA linha (simula retry apos falha parcial).
@@ -202,6 +203,59 @@ class CentralSyncIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "select count(*) from portal.signal_revisions where signal_id = $1", signal_row["id"]
         )
         self.assertEqual(revision_count, 1)
+
+    async def test_revisao_com_conteudo_diferente_atualiza_campos_estruturados(self) -> None:
+        """Regressao da correcao Etapa 3 em portal.append_signal_revision():
+        uma segunda revisao com conteudo diferente precisa atualizar
+        symbol/direction/entry_low/etc em portal.signals, nao so content_signature."""
+        await self._upsert_registry()
+        signal_v1 = self._make_signal(source_message_id=504)
+        self.outbox.enqueue_signal_shadow_write(signal_v1, "mensagem v1", 9504)
+        rows = self.outbox.claim_batch(10)
+        await _drain_one(self.client, self.config, rows[0])
+        self.outbox.mark_done(rows[0].id)
+
+        pool = self.client._pool
+        signal_row = await pool.fetchrow(
+            "select id from portal.signals where instance_id = $1 and source_message_id = $2",
+            TEST_INSTANCE_ID,
+            504,
+        )
+        signal_id = signal_row["id"]
+
+        # Segunda revisao, conteudo bem diferente, aplicada diretamente via a
+        # funcao (simula o que _drain_one faria se o mesmo sinal fosse
+        # reprocessado com um payload novo).
+        from telegram_mt5_copier.central_sync import build_outbox_payload, resolve_local_channel
+
+        channel = resolve_local_channel(self.database_path, "987654321")
+        signal_v2 = TradeSignal(
+            symbol="EURUSD",
+            direction=Direction.SELL,
+            entry_low=Decimal("1.1000"),
+            entry_high=Decimal("1.1010"),
+            stop_loss=Decimal("1.1050"),
+            take_profits=(Decimal("1.0950"),),
+            raw_text="EURUSD SELL",
+            source_chat_id="987654321",
+            source_message_id=504,
+        )
+        payload_v2 = build_outbox_payload(signal_v2, "mensagem v2", channel)
+        await self.client.append_signal_revision(signal_id, signal_v2.content_signature, payload_v2)
+
+        updated = await pool.fetchrow(
+            "select symbol, direction, entry_low, stop_loss from portal.signals where id = $1",
+            signal_id,
+        )
+        self.assertEqual(updated["symbol"], "EURUSD")
+        self.assertEqual(updated["direction"], "SELL")
+        self.assertEqual(float(updated["entry_low"]), 1.1000)
+        self.assertEqual(float(updated["stop_loss"]), 1.1050)
+
+        revision_count = await pool.fetchval(
+            "select count(*) from portal.signal_revisions where signal_id = $1", signal_id
+        )
+        self.assertEqual(revision_count, 2)
 
     async def test_nao_toca_tabelas_fora_do_escopo_da_etapa_2(self) -> None:
         pool = self.client._pool
@@ -219,7 +273,7 @@ class CentralSyncIntegrationTests(unittest.IsolatedAsyncioTestCase):
         before = await counts()
         await self._upsert_registry()
         signal = self._make_signal(source_message_id=503)
-        self.outbox.enqueue_signal_shadow_write(signal, "mensagem formatada")
+        self.outbox.enqueue_signal_shadow_write(signal, "mensagem formatada", 9503)
         rows = self.outbox.claim_batch(10)
         await _drain_one(self.client, self.config, rows[0])
         after = await counts()

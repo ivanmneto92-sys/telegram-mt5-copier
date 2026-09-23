@@ -17,7 +17,13 @@ from pathlib import Path
 from typing import Any
 
 from .config import AppConfig
-from .database import as_text, connect_database, utc_now
+from .database import (
+    CENTRAL_SYNC_SERVICE_NAME,
+    as_text,
+    connect_database,
+    update_service_heartbeat,
+    utc_now,
+)
 from .models import TradeSignal, decimal_to_text
 
 try:
@@ -97,17 +103,52 @@ class CentralSyncOutbox:
     barata (mesmo arquivo/conexao do banco de sinais) -- drenada de forma
     assincrona por run_central_sync_drain_loop."""
 
-    def __init__(self, database_path: Path) -> None:
+    def __init__(self, database_path: Path, *, logger: logging.Logger | None = None) -> None:
         self.database_path = database_path
+        self.logger = logger
 
-    def enqueue_signal_shadow_write(self, signal: TradeSignal, formatted_message: str) -> None:
+    def ensure_activation_baseline(self) -> None:
+        """Grava, uma unica vez, o signals.id mais alto que ja existia quando o
+        shadow-write comecou a rodar nesta instalacao -- e o corte usado por
+        operational_health.py pra nao alertar sobre historico anterior a
+        Etapa 2. Idempotente: chamadas seguintes sao no-op."""
+        with connect_database(self.database_path) as connection:
+            row = connection.execute(
+                "SELECT activation_signal_id FROM central_sync_activation WHERE id = 1"
+            ).fetchone()
+            if row is not None:
+                return
+            baseline_row = connection.execute("SELECT COALESCE(MAX(id), 0) FROM signals").fetchone()
+            baseline = int(baseline_row[0])
+            connection.execute(
+                """
+                INSERT INTO central_sync_activation (id, activation_signal_id, activated_at)
+                VALUES (1, ?, ?)
+                """,
+                (baseline, utc_now()),
+            ).close()
+
+    def enqueue_signal_shadow_write(
+        self, signal: TradeSignal, formatted_message: str, local_signal_id: int
+    ) -> None:
         if signal.source_message_id is None:
+            if self.logger is not None:
+                self.logger.info(
+                    "central_sync_enqueue_skipped: sinal local_id=%s sem source_message_id",
+                    local_signal_id,
+                )
             return
         channel = resolve_local_channel(self.database_path, signal.source_chat_id)
         if channel is None:
             # Canal nao registrado localmente (hoje so acontece em testes
             # unitarios que criam SignalProcessor sem passar pelo startup real,
             # onde register_configured_channel ja roda) -- nada a replicar.
+            if self.logger is not None:
+                self.logger.info(
+                    "central_sync_enqueue_skipped: canal nao registrado para sinal local_id=%s chat_id=%s",
+                    local_signal_id,
+                    signal.source_chat_id,
+                )
             return
         payload = build_outbox_payload(signal, formatted_message, channel)
         now = utc_now()
@@ -115,11 +156,11 @@ class CentralSyncOutbox:
             cursor = connection.execute(
                 """
                 INSERT INTO central_sync_outbox (
-                    kind, payload, status, attempts, created_at, updated_at, next_attempt_at
+                    kind, source_signal_id, payload, status, attempts, created_at, updated_at, next_attempt_at
                 )
-                VALUES (?, ?, 'pending', 0, ?, ?, ?)
+                VALUES (?, ?, ?, 'pending', 0, ?, ?, ?)
                 """,
-                (OUTBOX_KIND_SIGNAL_SHADOW_WRITE, json.dumps(payload), now, now, now),
+                (OUTBOX_KIND_SIGNAL_SHADOW_WRITE, local_signal_id, json.dumps(payload), now, now, now),
             )
             cursor.close()
 
@@ -303,18 +344,19 @@ class CentralSyncClient:
 
 async def _drain_one(client: CentralSyncClient, config: AppConfig, row: OutboxRow) -> None:
     if row.kind != OUTBOX_KIND_SIGNAL_SHADOW_WRITE:
-        return
+        # Nao existe outro "kind" hoje -- levanta em vez de retornar silenciosamente
+        # pra nao deixar o chamador marcar a linha como "done" sem ter processado
+        # nada (run_central_sync_drain_loop so chama mark_done apos _drain_one
+        # terminar sem excecao).
+        raise ValueError(f"tipo de outbox desconhecido: {row.kind!r}")
     payload = row.payload
     channel_id = await client.upsert_channel(config.instance_id, payload)
     signal_id = await client.upsert_signal(config.instance_id, channel_id, payload)
-    raw_payload = {
-        "raw_text": payload["raw_text"],
-        "formatted_message": payload["formatted_message"],
-        "source_chat_id": payload["telegram_chat_id"],
-        "source_message_id": payload["source_message_id"],
-        "received_at": payload["received_at"],
-    }
-    await client.append_signal_revision(signal_id, payload["content_signature"], raw_payload)
+    # payload completo (inclui symbol/direction/entry_low/entry_high/stop_loss/
+    # take_profits) -- portal.append_signal_revision extrai os campos
+    # estruturados daqui pra manter portal.signals atualizado a cada revisao,
+    # nao so o content_signature.
+    await client.append_signal_revision(signal_id, payload["content_signature"], payload)
 
 
 async def run_central_sync_drain_loop(
@@ -324,6 +366,10 @@ async def run_central_sync_drain_loop(
     logger: logging.Logger,
 ) -> None:
     while True:
+        # Heartbeat proprio, sempre, mesmo se o resto do corpo do loop falhar --
+        # mede "o loop de drenagem esta vivo", separado de "o Supabase esta
+        # alcancavel" (que a conexao abaixo pode falhar sem travar o loop).
+        await asyncio.to_thread(update_service_heartbeat, outbox.database_path, CENTRAL_SYNC_SERVICE_NAME)
         try:
             if not client.connected:
                 await client.connect()
