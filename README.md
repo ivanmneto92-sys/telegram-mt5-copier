@@ -726,6 +726,92 @@ já pertence a um cliente cadastrado pelo Telegram, o portal não cria uma conta
 duplicada: esse cliente deve entrar pelo bot e configurar o acesso web na sua
 sessão autenticada.
 
+## Backup
+
+O comando `telegram-mt5-backup` (`scripts\backup_vps.ps1`) faz um backup
+criptografado desta instância e envia para um bucket privado do Backblaze
+B2, fora da VPS. Cada execução:
+
+1. Tira um snapshot consistente do SQLite usando a API de backup online do
+   próprio `sqlite3` — seguro mesmo com o banco aberto e em uso pelo
+   supervisor, ao contrário de copiar o arquivo `.sqlite3` diretamente.
+2. Empacota nesse snapshot: `.env`, sessões do Telegram (`*.session`), o
+   `Caddyfile` (só a instância `main` leva essa cópia, já que ele é
+   compartilhado pela VPS) e um manifesto das contas MT5 (id, tamanho,
+   última modificação) — nunca os binários do terminal em si, que são
+   grandes e completamente reproduzíveis a partir do template configurado
+   em `MT5_BROKER_TEMPLATES`.
+3. Criptografa o pacote com `BACKUP_ENCRYPTION_KEY`, uma chave dedicada,
+   nunca a mesma `MT5_CREDENTIAL_KEY` — misturar chaves de propósitos
+   diferentes é uma prática ruim: comprometer uma nunca deveria comprometer
+   a outra.
+4. Envia o pacote criptografado ao Backblaze B2 e apaga do bucket as
+   versões mais velhas que `BACKUP_RETENTION_DAYS`.
+5. Não deixa nada — nem o zip criptografado — armazenado na VPS depois de
+   terminar.
+
+### Configuração inicial (uma vez por VPS)
+
+1. Crie uma conta gratuita em backblaze.com/b2.
+2. Crie um bucket **privado** (por exemplo `institutotrader-backups`).
+3. Em *App Keys*, crie uma chave restrita a esse bucket (leitura e escrita).
+   Copie o `keyID` e a `applicationKey` — a `applicationKey` só aparece uma
+   vez.
+4. No `.env` de cada instância (`main` e `robo_braba` podem compartilhar a
+   mesma chave B2 e a mesma `BACKUP_ENCRYPTION_KEY`, já que cada uma grava
+   num prefixo próprio dentro do bucket):
+
+   ```env
+   BACKUP_ENCRYPTION_KEY=
+   BACKUP_RETENTION_DAYS=14
+   B2_KEY_ID=
+   B2_APPLICATION_KEY=
+   B2_BUCKET_NAME=institutotrader-backups
+   ```
+
+   Gere a `BACKUP_ENCRYPTION_KEY` com:
+
+   ```powershell
+   .\.venv\Scripts\python.exe -m telegram_mt5_copier.backup --generate-key
+   ```
+
+   Guarde essa chave também no seu gerenciador de senhas pessoal — sem ela,
+   o backup (e as senhas MT5 já criptografadas dentro dele) não podem ser
+   restaurados, mesmo com o arquivo em mãos. O mesmo vale para
+   `MT5_CREDENTIAL_KEY`: perder as duas juntas é irrecuperável.
+
+5. Teste manualmente antes de agendar:
+
+   ```powershell
+   .\.venv\Scripts\python.exe -m telegram_mt5_copier.backup
+   ```
+
+6. Instale a tarefa agendada diária (PowerShell como Administrador):
+
+   ```powershell
+   .\scripts\install_backup_task.ps1
+   ```
+
+   Diferente da tarefa principal (que usa `-AtLogOn` porque o MetaTrader5
+   exige sessão gráfica), a tarefa de backup roda com `LogonType Password`
+   — funciona mesmo sem ninguém logado por RDP depois de um reboot.
+
+### Testar a restauração
+
+Não confie num backup que nunca foi restaurado. Numa pasta vazia dedicada
+ao teste (nunca sobre os dados reais):
+
+```powershell
+.\.venv\Scripts\python.exe -m telegram_mt5_copier.backup `
+    --restore main/backup-main-20260922-030000.zip.enc `
+    --into C:\Temp\restore-test
+```
+
+O comando baixa, descriptografa, descompacta e roda
+`PRAGMA integrity_check` no banco restaurado, imprimindo o resultado. O
+nome exato do arquivo (`main/backup-main-AAAAMMDD-HHMMSS.zip.enc`) aparece
+na saída de cada backup e no painel do Backblaze B2.
+
 ## Supervisor e inicialização automática no Windows
 
 A partir da versão `0.12.0`, o comando `telegram-mt5-supervisor` inicia e

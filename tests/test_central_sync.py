@@ -48,11 +48,37 @@ class CapturingLogger(NullLogger):
 
 
 class FakePublisher:
+    """Mesmo padrao de tests/test_monitoring.py (destination-echo, trazido pelo
+    merge com main): remember_sent/is_own_echo simulam o publisher real sem
+    precisar de client Telegram de verdade."""
+
     def __init__(self) -> None:
         self.messages: list[str] = []
+        self._own_messages: set[tuple[str, int]] = set()
 
     async def publish(self, signal, formatted_message: str, client=None) -> None:
         self.messages.append(formatted_message)
+
+    def remember_sent(self, chat_id, message_id) -> None:
+        self._own_messages.add((str(chat_id), int(message_id)))
+
+    def is_own_echo(self, chat_id, message_id) -> bool:
+        if chat_id is None or message_id is None:
+            return False
+        try:
+            message_id = int(message_id)
+        except (TypeError, ValueError):
+            return False
+        return (str(chat_id), message_id) in self._own_messages
+
+
+class SpyPendingOrderExecutor:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def execute_for_signal(self, signal):
+        self.calls += 1
+        return []
 
 
 class RaisingOutbox:
@@ -430,6 +456,92 @@ class SignalProcessorShadowWriteIsolationTests(unittest.IsolatedAsyncioTestCase)
 
         self.assertEqual(decision.status, DecisionStatus.ACCEPTED)
         self.assertEqual(len(self.publisher.messages), 1)
+
+
+class EcoNaoInterfereComShadowWriteTests(unittest.IsolatedAsyncioTestCase):
+    """Prova que a protecao de destination-echo (trazida pelo merge com main)
+    e o shadow-write da Etapa 2/3 convivem sem interferencia. Eco NAO e
+    reprocessar a mesma mensagem de origem -- e uma mensagem NOVA, no chat de
+    DESTINO, com o message_id que o Telegram devolveu quando o publisher
+    mandou a republicacao (mesmo padrao de tests/test_monitoring.py:
+    remember_sent simula esse retorno sem precisar de client Telegram real)."""
+
+    DESTINATION_CHAT_ID = "-1009876543210"
+    DESTINATION_MESSAGE_ID = 9001
+
+    async def asyncSetUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.database_path = Path(self.temp_dir.name) / "signals.sqlite3"
+        self.database = SignalDatabase(self.database_path)
+        self.database.initialize()
+        ChannelCatalogService(self.database_path).register_configured_channel(
+            telegram_chat_id="123456",
+            title="Canal VIP",
+            username=None,
+            content_protected=False,
+            history_accessible=True,
+            last_message_id=None,
+        )
+        self.publisher = FakePublisher()
+        self.executor = SpyPendingOrderExecutor()
+        self.outbox = CentralSyncOutbox(self.database_path)
+        self.processor = SignalProcessor(
+            self.database,
+            self.publisher,
+            logger=NullLogger(),
+            pending_order_executor=self.executor,
+            central_sync_outbox=self.outbox,
+        )
+
+    async def asyncTearDown(self) -> None:
+        self.database.close()
+        self.temp_dir.cleanup()
+
+    def _row_counts(self) -> tuple[int, int]:
+        with connect_database(self.database_path) as connection:
+            signals = connection.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
+            outbox = connection.execute("SELECT COUNT(*) FROM central_sync_outbox").fetchone()[0]
+        return signals, outbox
+
+    async def test_sinal_normal_depois_eco_da_propria_publicacao_nao_gera_nada_a_mais(self) -> None:
+        # 1) Sinal real, de um canal fonte -- processamento normal.
+        original_decision = await self.processor.process(
+            IncomingMessage(source_chat_id="123456", source_message_id=1, text=BUY_VALID)
+        )
+        self.assertEqual(original_decision.status, DecisionStatus.ACCEPTED)
+
+        # Confirma o "inverso": um sinal normal produz exatamente 1 registro
+        # local e 1 item na outbox -- nada a mais, nada a menos.
+        signals_before, outbox_before = self._row_counts()
+        self.assertEqual((signals_before, outbox_before), (1, 1))
+        self.assertEqual(self.executor.calls, 1)
+        self.assertEqual(len(self.publisher.messages), 1)
+
+        # 2) O publisher "lembra" que acabou de mandar essa republicacao pro
+        # canal de destino, com o message_id que o Telegram devolveu.
+        self.publisher.remember_sent(self.DESTINATION_CHAT_ID, self.DESTINATION_MESSAGE_ID)
+
+        # 3) O proprio Telegram dispara um NewMessage pra essa republicacao no
+        # canal de destino -- uma mensagem DIFERENTE da original (chat_id e
+        # message_id diferentes), mas que e o eco da propria publicacao.
+        echo_decision = await self.processor.process(
+            IncomingMessage(
+                source_chat_id=self.DESTINATION_CHAT_ID,
+                source_message_id=self.DESTINATION_MESSAGE_ID,
+                text=BUY_VALID,
+            )
+        )
+
+        self.assertEqual(echo_decision.status, DecisionStatus.IGNORED)
+        self.assertEqual(echo_decision.reason, "destination_echo")
+
+        # Nada novo foi criado por causa do eco -- as contagens de DEPOIS do
+        # eco sao iguais as de ANTES (nao zero: o sinal original ja tinha
+        # gerado 1 de cada).
+        signals_after, outbox_after = self._row_counts()
+        self.assertEqual((signals_after, outbox_after), (signals_before, outbox_before))
+        self.assertEqual(self.executor.calls, 1)  # nao chamou de novo
+        self.assertEqual(len(self.publisher.messages), 1)  # nao republicou
 
 
 class FakeConfig:

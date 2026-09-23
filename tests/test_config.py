@@ -68,6 +68,42 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.central_sync_poll_seconds, 10)
             self.assertEqual(config.central_sync_max_batch, 50)
 
+    def test_config_combinado_backup_e_central_sync_nao_se_contaminam(self) -> None:
+        """Reconciliacao com main: backup (Backblaze B2) e central_sync (Etapa
+        2/3) sao dois blocos de config totalmente independentes, adicionados
+        cada um do seu lado do merge -- confirma que carregar os dois juntos
+        nao quebra nada, e que CENTRAL_SYNC_ENABLED continua false por padrao
+        (a variavel e OMITIDA aqui de proposito, pra testar o default de
+        verdade, nao um "false" explicito)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "BACKUP_ENCRYPTION_KEY": "chave-teste-123",
+                "BACKUP_RETENTION_DAYS": "30",
+                "B2_KEY_ID": "b2-key-id",
+                "B2_APPLICATION_KEY": "b2-app-key",
+                "B2_BUCKET_NAME": "meu-bucket",
+                "NODE_ID": "vps-homolog",
+                "CENTRAL_SYNC_DATABASE_URL": "postgresql://postgres:postgres@127.0.0.1:54322/postgres",
+                "CENTRAL_SYNC_POLL_SECONDS": "5",
+                "CENTRAL_SYNC_MAX_BATCH": "20",
+                "CENTRAL_SYNC_DELIVERY_LAG_SECONDS": "600",
+            }
+            self.assertNotIn("CENTRAL_SYNC_ENABLED", env)
+
+            config = AppConfig.load(project_root=Path(tmp), env=env, create_dirs=True)
+
+            # Backup carregou certo.
+            self.assertEqual(config.backup_encryption_key, "chave-teste-123")
+            self.assertEqual(config.backup_retention_days, 30)
+            self.assertEqual(config.b2_key_id, "b2-key-id")
+            self.assertEqual(config.b2_application_key, "b2-app-key")
+            self.assertEqual(config.b2_bucket_name, "meu-bucket")
+
+            # Central sync carregou certo, mas continua DESLIGADO por padrao
+            # mesmo com NODE_ID e as outras variaveis presentes.
+            self.assertEqual(config.node_id, "vps-homolog")
+            self.assertIs(config.central_sync_enabled, False)
+
     def test_node_label_default_para_node_id_quando_vazio(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = AppConfig.load(

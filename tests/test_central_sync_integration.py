@@ -84,6 +84,11 @@ def _fake_config(node_id: str = "dev-local") -> AppConfig:
         central_sync_poll_seconds=5,
         central_sync_max_batch=20,
         central_sync_delivery_lag_seconds=600,
+        backup_encryption_key=None,
+        backup_retention_days=14,
+        b2_key_id=None,
+        b2_application_key=None,
+        b2_bucket_name=None,
     )
 
 
