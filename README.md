@@ -726,6 +726,59 @@ já pertence a um cliente cadastrado pelo Telegram, o portal não cria uma conta
 duplicada: esse cliente deve entrar pelo bot e configurar o acesso web na sua
 sessão autenticada.
 
+## Backend central (Supabase)
+
+O listener grava cada sinal aceito também numa fila local
+(`central_sync_outbox`), drenada em segundo plano pro Supabase — schema
+`portal` (registro de nós/instâncias/canais/sinais) e `agent_api` (RPCs pro
+futuro agente de execução da VPS). Desligado por padrão
+(`CENTRAL_SYNC_ENABLED=false`); nunca afeta o processamento real mesmo se o
+Supabase estiver fora do ar.
+
+**Atenção, confirmado na prática**: existem múltiplas contas Supabase
+acessíveis a partir desta máquina/ferramentas, e elas **não enxergam os
+mesmos projetos**:
+
+- O conector MCP do Claude Code usado neste projeto está autenticado na
+  organização "Projeto Bíblico", que contém o projeto real
+  **"Instituto Trader"** (`ijwhlzkdxsvsdresbler`) — esse é o projeto certo.
+- A CLI `supabase` local (`supabase login` já feito nesta máquina, mas por
+  outra pessoa/sessão) está autenticada numa **conta diferente**, que só
+  enxerga projetos sem relação com este trabalho (`corecripto`,
+  `Forex Golden IA`, `braba trader`, todos inativos).
+- Já apareceu uma terceira visão diferente (`CRM Instituto` + um projeto
+  inativo) numa verificação feita por fora desta sessão.
+
+**Antes de rodar qualquer `supabase link`, `apply_migration` ou comando que
+toque em Supabase remoto, confirme qual conta está autenticada** (via
+`list_organizations`/`list_projects` no conector, ou `supabase projects list`
+na CLI) e se o projeto que aparece é mesmo o `ijwhlzkdxsvsdresbler` — nunca
+assuma que "Supabase" nesta máquina significa uma conta só.
+
+`apply_migration` (a ferramenta MCP) sempre grava sua própria versão
+(timestamp de quando foi chamada) na tabela de controle
+`supabase_migrations.schema_migrations`, **não** o timestamp do nome do
+arquivo local — isso gera uma divergência de numeração a cada migration
+aplicada por essa via (o schema fica correto, só o número da versão registrado
+diverge do arquivo). Se isso importar (ex.: antes de linkar um `supabase` CLI
+de verdade a este projeto), corrija com um `UPDATE
+supabase_migrations.schema_migrations SET version = '<timestamp do arquivo>'
+WHERE version = '<timestamp que o apply_migration gerou>'` — é a mesma coisa
+que `supabase migration repair` faz por baixo dos panos.
+
+Conexão da VPS pro Postgres remoto: use o **Session Pooler** (porta `5432`,
+não o endpoint direto) — a VPS provavelmente só tem IPv4, e o endpoint direto
+do Supabase geralmente depende de IPv6; o pooler de sessão é IPv4-compatível e
+ainda suporta prepared statements (ao contrário do pooler em modo transação,
+porta `6543`, que o `asyncpg` não usa bem). Exija SSL (`sslmode=require` no
+mínimo; `verify-full` com o certificado CA quando possível).
+
+O papel de banco usado pelo shadow-write é `central_sync_vps` — privilégio
+mínimo, sem acesso a nada fora de `portal.nodes`/`instances`/`channels`/
+`signals` e a função `portal.append_signal_revision`. A senha desse papel
+nunca deve aparecer em código, commit ou conversa — defina/redefina direto no
+painel do Supabase (Database → Roles) e guarde num gerenciador de senhas.
+
 ## Backup
 
 O comando `telegram-mt5-backup` (`scripts\backup_vps.ps1`) faz um backup
