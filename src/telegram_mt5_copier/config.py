@@ -106,6 +106,12 @@ class AppConfig:
     peer_channel_sync_database_paths: tuple[Path, ...] = field(repr=False)
     resend_api_key: str | None = field(repr=False)
     resend_from_email: str | None = field(repr=False)
+    node_id: str
+    node_label: str
+    central_sync_enabled: bool
+    central_sync_database_url: str | None = field(repr=False)
+    central_sync_poll_seconds: int
+    central_sync_max_batch: int
 
     @classmethod
     def load(
@@ -133,6 +139,8 @@ class AppConfig:
         ).strip()
         if not onboarding_host:
             raise ValueError("ONBOARDING_HOST nao pode ficar vazio.")
+        node_id = parse_optional_node_id(_value("NODE_ID", file_values, runtime_env, ""))
+        node_label = _value("NODE_LABEL", file_values, runtime_env, "").strip() or node_id
 
         config = cls(
             project_root=root,
@@ -240,6 +248,23 @@ class AppConfig:
             ),
             resend_api_key=_optional_value("RESEND_API_KEY", file_values, runtime_env),
             resend_from_email=_optional_value("RESEND_FROM_EMAIL", file_values, runtime_env),
+            node_id=node_id,
+            node_label=node_label,
+            central_sync_enabled=parse_bool(
+                _value("CENTRAL_SYNC_ENABLED", file_values, runtime_env, "false"),
+                default=False,
+            ),
+            central_sync_database_url=_optional_value(
+                "CENTRAL_SYNC_DATABASE_URL", file_values, runtime_env
+            ),
+            central_sync_poll_seconds=parse_positive_int(
+                _value("CENTRAL_SYNC_POLL_SECONDS", file_values, runtime_env, "5"),
+                "CENTRAL_SYNC_POLL_SECONDS",
+            ),
+            central_sync_max_batch=parse_positive_int(
+                _value("CENTRAL_SYNC_MAX_BATCH", file_values, runtime_env, "20"),
+                "CENTRAL_SYNC_MAX_BATCH",
+            ),
         )
 
         if create_dirs:
@@ -311,6 +336,19 @@ def parse_instance_id(value: str) -> str:
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,39}", normalized):
         raise ValueError(
             "INSTANCE_ID deve ter de 1 a 40 caracteres: letras, numeros, _ ou -."
+        )
+    return normalized
+
+
+def parse_optional_node_id(value: str) -> str:
+    """Valida NODE_ID quando presente; vazio fica vazio (checado como obrigatorio
+    so quando CENTRAL_SYNC_ENABLED=true, em run_telegram_listener)."""
+    normalized = value.strip().lower()
+    if not normalized:
+        return ""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,39}", normalized):
+        raise ValueError(
+            "NODE_ID deve ter de 1 a 40 caracteres: letras, numeros, _ ou -."
         )
     return normalized
 

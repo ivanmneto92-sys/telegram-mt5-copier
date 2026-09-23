@@ -311,6 +311,21 @@ def initialize_database(database_path: Path) -> None:
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS central_sync_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                next_attempt_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS central_sync_outbox_pending_idx
+                ON central_sync_outbox (status, next_attempt_at);
+
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 telegram_user_id INTEGER NOT NULL UNIQUE,

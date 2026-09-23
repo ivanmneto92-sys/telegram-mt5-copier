@@ -10,6 +10,7 @@ from telegram_mt5_copier.config import (
     parse_broker_servers,
     parse_bool,
     parse_instance_id,
+    parse_optional_node_id,
     parse_port,
     parse_source_chat_ids,
     project_path,
@@ -35,6 +36,52 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.brand_name, "Instituto Trader")
             self.assertEqual(config.local_onboarding_url, "http://127.0.0.1:8080")
             self.assertEqual(config.peer_channel_sync_database_paths, ())
+            self.assertEqual(config.node_id, "")
+            self.assertEqual(config.central_sync_enabled, False)
+            self.assertIsNone(config.central_sync_database_url)
+
+    def test_central_sync_desligado_por_padrao_nao_exige_node_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = AppConfig.load(project_root=Path(tmp), env={}, create_dirs=True)
+
+            self.assertFalse(config.central_sync_enabled)
+            self.assertEqual(config.node_id, "")
+
+    def test_central_sync_le_variaveis_quando_habilitado(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "NODE_ID": "vps-01",
+                "CENTRAL_SYNC_ENABLED": "true",
+                "CENTRAL_SYNC_DATABASE_URL": "postgresql://postgres:postgres@127.0.0.1:54322/postgres",
+                "CENTRAL_SYNC_POLL_SECONDS": "10",
+                "CENTRAL_SYNC_MAX_BATCH": "50",
+            }
+            config = AppConfig.load(project_root=Path(tmp), env=env, create_dirs=True)
+
+            self.assertTrue(config.central_sync_enabled)
+            self.assertEqual(config.node_id, "vps-01")
+            self.assertEqual(config.node_label, "vps-01")
+            self.assertEqual(
+                config.central_sync_database_url,
+                "postgresql://postgres:postgres@127.0.0.1:54322/postgres",
+            )
+            self.assertEqual(config.central_sync_poll_seconds, 10)
+            self.assertEqual(config.central_sync_max_batch, 50)
+
+    def test_node_label_default_para_node_id_quando_vazio(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = AppConfig.load(
+                project_root=Path(tmp), env={"NODE_ID": "vps-02"}, create_dirs=True
+            )
+
+            self.assertEqual(config.node_label, "vps-02")
+
+    def test_node_id_invalido_e_rejeitado(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_optional_node_id("VPS com espaço!")
+
+    def test_node_id_vazio_e_permitido_pelo_parser(self) -> None:
+        self.assertEqual(parse_optional_node_id(""), "")
 
     def test_peer_channel_sync_databases_sao_resolvidos_a_partir_da_raiz(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -9,6 +9,7 @@ from dataclasses import replace
 from typing import Any, Awaitable, Callable
 from urllib import parse, request
 
+from .central_sync import CentralSyncClient, CentralSyncOutbox, run_central_sync_drain_loop
 from .config import AppConfig
 from .channel_catalog import ChannelCatalogService
 from .database import (
@@ -51,6 +52,7 @@ class SignalProcessor:
         pending_order_executor: PendingOrderExecutor | None = None,
         execution_notifier: Callable[[PendingExecutionResult], Awaitable[None]] | None = None,
         publication_scope: str | None = None,
+        central_sync_outbox: CentralSyncOutbox | None = None,
     ) -> None:
         self.database = database
         self.publisher = publisher
@@ -58,6 +60,7 @@ class SignalProcessor:
         self.pending_order_executor = pending_order_executor
         self.execution_notifier = execution_notifier
         self.publication_scope = publication_scope
+        self.central_sync_outbox = central_sync_outbox
         self._closed = False
 
     def close(self) -> None:
@@ -131,6 +134,11 @@ class SignalProcessor:
                 signal.source_message_id,
             )
         self.database.record_accepted(signal, formatted_message)
+        if self.central_sync_outbox is not None:
+            try:
+                self.central_sync_outbox.enqueue_signal_shadow_write(signal, formatted_message)
+            except Exception:
+                self.logger.exception("central_sync_outbox_enqueue_failed")
         if self.pending_order_executor is not None:
             execution_results = await asyncio.to_thread(
                 self.pending_order_executor.execute_for_signal,
@@ -187,9 +195,18 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
     except ImportError as exc:
         raise RuntimeError("Telethon nao instalado. Execute o setup do ambiente primeiro.") from exc
 
+    if config.central_sync_enabled and not config.node_id:
+        raise ValueError("NODE_ID obrigatorio quando CENTRAL_SYNC_ENABLED=true.")
+    if config.central_sync_enabled and not config.central_sync_database_url:
+        raise ValueError("CENTRAL_SYNC_DATABASE_URL obrigatoria quando CENTRAL_SYNC_ENABLED=true.")
+
     database = SignalDatabase(config.database_path)
     database.initialize()
     channel_catalog = ChannelCatalogService(config.database_path)
+    central_sync_outbox = CentralSyncOutbox(config.database_path) if config.central_sync_enabled else None
+    central_sync_client = (
+        CentralSyncClient(config.central_sync_database_url) if config.central_sync_enabled else None
+    )
     publisher = TelegramPublisher(config, logger)
     pending_order_executor = None
     if config.mt5_execution_mode in {"simulation", "demo_execution", "live_execution"}:
@@ -238,6 +255,7 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
         pending_order_executor=pending_order_executor,
         execution_notifier=execution_notifier,
         publication_scope=config.destination_chat_id,
+        central_sync_outbox=central_sync_outbox,
     )
 
     client = TelegramClient(
@@ -319,6 +337,13 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
         validation_task = asyncio.create_task(
             run_channel_validation_loop(client, channel_catalog, logger)
         )
+        central_sync_task = (
+            asyncio.create_task(
+                run_central_sync_drain_loop(central_sync_outbox, central_sync_client, config, logger)
+            )
+            if central_sync_client is not None
+            else None
+        )
         logger.info("Monitoramento Telegram iniciado. DRY_RUN=%s", str(config.dry_run).lower())
         try:
             await client.run_until_disconnected()
@@ -326,6 +351,8 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
         finally:
             heartbeat_task.cancel()
             validation_task.cancel()
+            if central_sync_task is not None:
+                central_sync_task.cancel()
             try:
                 await heartbeat_task
             except asyncio.CancelledError:
@@ -334,6 +361,13 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
                 await validation_task
             except asyncio.CancelledError:
                 pass
+            if central_sync_task is not None:
+                try:
+                    await central_sync_task
+                except asyncio.CancelledError:
+                    pass
+            if central_sync_client is not None:
+                await central_sync_client.close()
     finally:
         processor.close()
         await client.disconnect()
