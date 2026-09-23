@@ -760,18 +760,26 @@ assuma que "Supabase" nesta máquina significa uma conta só.
 `supabase_migrations.schema_migrations`, **não** o timestamp do nome do
 arquivo local — isso gera uma divergência de numeração a cada migration
 aplicada por essa via (o schema fica correto, só o número da versão registrado
-diverge do arquivo). Se isso importar (ex.: antes de linkar um `supabase` CLI
-de verdade a este projeto), corrija com um `UPDATE
-supabase_migrations.schema_migrations SET version = '<timestamp do arquivo>'
-WHERE version = '<timestamp que o apply_migration gerou>'` — é a mesma coisa
-que `supabase migration repair` faz por baixo dos panos.
+diverge do arquivo). O jeito certo de corrigir isso é **`supabase migration
+repair`** (com a CLI linkada à conta certa — ver aviso de identidades acima),
+não editar a tabela de controle à mão. Um `UPDATE
+supabase_migrations.schema_migrations` direto é o que `migration repair` faz
+por baixo dos panos, mas só deve ser usado como recuperação excepcional
+(ex.: a CLI local está numa conta sem acesso ao projeto, como aconteceu aqui)
+— e só depois de comparar o conteúdo aplicado remotamente contra o arquivo
+local (confirmar que são equivalentes) e validar o schema/contagens de linha
+antes e depois da correção.
 
 Conexão da VPS pro Postgres remoto: use o **Session Pooler** (porta `5432`,
 não o endpoint direto) — a VPS provavelmente só tem IPv4, e o endpoint direto
-do Supabase geralmente depende de IPv6; o pooler de sessão é IPv4-compatível e
-ainda suporta prepared statements (ao contrário do pooler em modo transação,
-porta `6543`, que o `asyncpg` não usa bem). Exija SSL (`sslmode=require` no
-mínimo; `verify-full` com o certificado CA quando possível).
+do Supabase geralmente depende de IPv6; o modo sessão é IPv4-compatível e
+suporta prepared statements normalmente. **Não** use o pooler em modo
+transação (mesmo host, porta `6543`) para isto: modo transação não suporta
+prepared statements, que o `asyncpg` usa por padrão — não é uma limitação do
+`asyncpg` em si, é como PgBouncer em modo transação funciona (reaproveita a
+conexão de banco entre clientes diferentes a cada transação, então não pode
+manter um prepared statement vivo entre chamadas). Exija SSL (`sslmode=require`
+no mínimo; `verify-full` com o certificado CA quando possível).
 
 O papel de banco usado pelo shadow-write é `central_sync_vps` — privilégio
 mínimo, sem acesso a nada fora de `portal.nodes`/`instances`/`channels`/
