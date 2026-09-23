@@ -6,11 +6,20 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from tests.central_sync_execution_helpers import (
+    make_execution_group,
+    make_execution_order,
+    make_mt5_account,
+    seed_customer_and_account,
+)
 from telegram_mt5_copier.central_sync import (
     CentralSyncOutbox,
     _drain_one,
+    build_execution_job_outbox_payload,
+    build_execution_key,
     build_outbox_payload,
     resolve_local_channel,
+    resolve_local_customer_and_account,
     run_central_sync_drain_loop,
 )
 from telegram_mt5_copier.channel_catalog import ChannelCatalogService
@@ -23,6 +32,9 @@ from telegram_mt5_copier.database import (
 )
 from telegram_mt5_copier.listener import SignalProcessor
 from telegram_mt5_copier.models import DecisionStatus, Direction, IncomingMessage, TradeSignal
+from telegram_mt5_copier.mt5.execution_group_service import ExecutionGroupResult
+from telegram_mt5_copier.mt5.models import ExecutionGroup, ExecutionOrder, MT5Account
+from telegram_mt5_copier.mt5.pending_order_executor import PendingExecutionResult
 
 
 class NullLogger:
@@ -84,6 +96,38 @@ class SpyPendingOrderExecutor:
 class RaisingOutbox:
     def enqueue_signal_shadow_write(self, signal, formatted_message: str, local_signal_id: int) -> None:
         raise RuntimeError("supabase indisponivel (simulado)")
+
+
+class FakeExecutionRepositoryForMirror:
+    def __init__(self, orders_by_group: dict[int, tuple[ExecutionOrder, ...]] | None = None) -> None:
+        self.orders_by_group = orders_by_group or {}
+        self.calls: list[int] = []
+
+    def orders_for_group(self, group_id: int) -> tuple[ExecutionOrder, ...]:
+        self.calls.append(group_id)
+        return self.orders_by_group.get(group_id, ())
+
+
+class FakeMirrorExecutor:
+    """Simula PendingOrderExecutor so com o que o gancho de mirror em
+    listener.py precisa: execution_mode, execute_for_signal() e
+    repository.orders_for_group()."""
+
+    def __init__(
+        self,
+        execution_mode: str,
+        results: list[PendingExecutionResult],
+        orders_by_group: dict[int, tuple[ExecutionOrder, ...]] | None = None,
+    ) -> None:
+        self.execution_mode = execution_mode
+        self._results = results
+        self.repository = FakeExecutionRepositoryForMirror(orders_by_group)
+
+    def execute_for_signal(self, signal):
+        return self._results
+
+    def close(self) -> None:
+        pass
 
 
 BUY_VALID = """XAUUSD BUY
@@ -159,6 +203,105 @@ class BuildOutboxPayloadTests(unittest.TestCase):
         self.assertEqual(payload["source_message_id"], "1")
         self.assertEqual(payload["formatted_message"], "mensagem formatada")
         self.assertIn("received_at", payload)
+
+
+class BuildExecutionKeyTests(unittest.TestCase):
+    def test_usa_8_chars_do_signal_id_mais_tp_index(self) -> None:
+        self.assertEqual(build_execution_key("ABCDEF1234567890", 1), "abcdef12T1")
+
+    def test_mesmo_sinal_mesmo_tp_gera_a_mesma_chave_em_contas_diferentes(self) -> None:
+        # Achado da revisao: execution_key e derivado SO do sinal, nao da
+        # conta -- por isso a unicidade em portal.execution_job_orders precisa
+        # ser por (execution_job_id, tp_index), nunca (execution_key) global.
+        key_conta_a = build_execution_key("abcdef1234567890", 1)
+        key_conta_b = build_execution_key("abcdef1234567890", 1)
+        self.assertEqual(key_conta_a, key_conta_b)
+
+
+class ResolveLocalCustomerAndAccountTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.database_path = Path(self.temp_dir.name) / "signals.sqlite3"
+        SignalDatabase(self.database_path).initialize()
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_conta_nao_encontrada_retorna_none(self) -> None:
+        self.assertIsNone(resolve_local_customer_and_account(self.database_path, 9999))
+
+    def test_conta_encontrada_traz_login_truncado_para_4_digitos(self) -> None:
+        _, account_id = seed_customer_and_account(self.database_path, login="9988776655")
+
+        row = resolve_local_customer_and_account(self.database_path, account_id)
+
+        self.assertIsNotNone(row)
+        self.assertEqual(row.login_last4, "6655")
+        self.assertEqual(row.broker_name, "XM")
+        self.assertEqual(row.billing_status, "paid")
+        self.assertEqual(row.customer_name, "Cliente Teste")
+
+
+class BuildExecutionJobOutboxPayloadTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.database_path = Path(self.temp_dir.name) / "signals.sqlite3"
+        SignalDatabase(self.database_path).initialize()
+        self.user_id, self.account_id = seed_customer_and_account(self.database_path)
+        self.account = make_mt5_account(self.account_id, self.user_id)
+        self.signal = make_signal()
+        from telegram_mt5_copier.central_sync import ChannelRow
+
+        self.channel = ChannelRow(id=7, telegram_chat_id="123456", title="Canal VIP", status="active", access_status="confirmed")
+        self.customer_account = resolve_local_customer_and_account(self.database_path, self.account_id)
+        self.group = make_execution_group(1, self.account, self.signal)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_sucesso_marca_status_succeeded_e_ordens_com_ticket_como_sent(self) -> None:
+        orders = (make_execution_order(self.group.id, 1), make_execution_order(self.group.id, 2))
+
+        payload = build_execution_job_outbox_payload(
+            self.signal, self.channel, self.customer_account, self.group, orders, rejected_reason=None
+        )
+
+        self.assertEqual(payload["status"], "succeeded")
+        self.assertIsNone(payload["last_error_code"])
+        self.assertEqual(len(payload["orders"]), 2)
+        for order_payload in payload["orders"]:
+            self.assertEqual(order_payload["status"], "sent")
+            self.assertEqual(order_payload["mt5_order_ticket"], "123456")
+        self.assertEqual(payload["customer"]["source_user_id"], self.user_id)
+        self.assertEqual(payload["account"]["source_account_id"], self.account_id)
+        self.assertEqual(payload["account"]["login_last4"], "6655")
+        self.assertNotIn("login", payload["account"])
+
+    def test_rejeicao_marca_status_rejected_e_ordem_sem_ticket_como_failed(self) -> None:
+        orders = (
+            make_execution_order(self.group.id, 1, status="failed", mt5_order_ticket=None, broker_retcode="10004"),
+        )
+
+        payload = build_execution_job_outbox_payload(
+            self.signal, self.channel, self.customer_account, self.group, orders,
+            rejected_reason="order_send_failed:requote",
+        )
+
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["last_error_code"], "order_send_failed:requote")
+        self.assertEqual(payload["orders"][0]["status"], "failed")
+        self.assertIsNone(payload["orders"][0]["mt5_order_ticket"])
+
+    def test_execution_key_usa_signal_id_do_grupo_nao_content_signature(self) -> None:
+        orders = (make_execution_order(self.group.id, 1),)
+
+        payload = build_execution_job_outbox_payload(
+            self.signal, self.channel, self.customer_account, self.group, orders, rejected_reason=None
+        )
+
+        expected = build_execution_key(self.group.signal_id, 1)
+        self.assertEqual(payload["orders"][0]["execution_key"], expected)
+        self.assertNotEqual(expected, build_execution_key(self.signal.content_signature, 1))
 
 
 class CentralSyncOutboxTests(unittest.TestCase):
@@ -315,6 +458,99 @@ class CentralSyncOutboxTests(unittest.TestCase):
                 "SELECT activation_signal_id FROM central_sync_activation WHERE id = 1"
             ).fetchone()
         self.assertEqual(row_again[0], signal_id)
+
+
+class CentralSyncOutboxExecutionJobTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.database_path = Path(self.temp_dir.name) / "signals.sqlite3"
+        SignalDatabase(self.database_path).initialize()
+        self.catalog = ChannelCatalogService(self.database_path)
+        self.catalog.register_configured_channel(
+            telegram_chat_id="123456",
+            title="Canal VIP",
+            username=None,
+            content_protected=False,
+            history_accessible=True,
+            last_message_id=None,
+        )
+        self.user_id, self.account_id = seed_customer_and_account(self.database_path)
+        self.account = make_mt5_account(self.account_id, self.user_id)
+        self.signal = make_signal()
+        self.group = make_execution_group(1, self.account, self.signal)
+        self.outbox = CentralSyncOutbox(self.database_path)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def _row_count(self, kind: str) -> int:
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                "SELECT COUNT(*) FROM central_sync_outbox WHERE kind = ?", (kind,)
+            )
+            try:
+                return cursor.fetchone()[0]
+            finally:
+                cursor.close()
+
+    def test_enqueue_grava_linha_com_source_execution_group_id(self) -> None:
+        orders = (make_execution_order(self.group.id, 1),)
+
+        self.outbox.enqueue_execution_job_shadow_write(
+            self.signal, self.account, self.group, orders, rejected_reason=None, local_group_id=self.group.id
+        )
+
+        self.assertEqual(self._row_count("execution_job_shadow_write"), 1)
+        rows = self.outbox.claim_batch(10)
+        row = next(r for r in rows if r.kind == "execution_job_shadow_write")
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                "SELECT source_execution_group_id FROM central_sync_outbox WHERE id = ?", (row.id,)
+            )
+            try:
+                (source_execution_group_id,) = cursor.fetchone()
+            finally:
+                cursor.close()
+        self.assertEqual(source_execution_group_id, self.group.id)
+
+    def test_segundo_enqueue_do_mesmo_grupo_e_rejeitado_pelo_indice_unico(self) -> None:
+        orders = (make_execution_order(self.group.id, 1),)
+        self.outbox.enqueue_execution_job_shadow_write(
+            self.signal, self.account, self.group, orders, rejected_reason=None, local_group_id=self.group.id
+        )
+
+        with self.assertRaises(Exception):
+            self.outbox.enqueue_execution_job_shadow_write(
+                self.signal, self.account, self.group, orders, rejected_reason=None, local_group_id=self.group.id
+            )
+
+    def test_canal_nao_registrado_nao_grava_e_loga(self) -> None:
+        logger = CapturingLogger()
+        outbox = CentralSyncOutbox(self.database_path, logger=logger)
+        sinal_de_canal_desconhecido = make_signal(source_chat_id="999999")
+        orders = (make_execution_order(self.group.id, 1),)
+
+        outbox.enqueue_execution_job_shadow_write(
+            sinal_de_canal_desconhecido, self.account, self.group, orders,
+            rejected_reason=None, local_group_id=self.group.id,
+        )
+
+        self.assertEqual(self._row_count("execution_job_shadow_write"), 0)
+        self.assertTrue(any("canal nao registrado" in msg for msg in logger.info_messages))
+
+    def test_conta_local_nao_encontrada_nao_grava_e_loga(self) -> None:
+        logger = CapturingLogger()
+        outbox = CentralSyncOutbox(self.database_path, logger=logger)
+        conta_inexistente = make_mt5_account(999999, self.user_id)
+        orders = (make_execution_order(self.group.id, 1),)
+
+        outbox.enqueue_execution_job_shadow_write(
+            self.signal, conta_inexistente, self.group, orders,
+            rejected_reason=None, local_group_id=self.group.id,
+        )
+
+        self.assertEqual(self._row_count("execution_job_shadow_write"), 0)
+        self.assertTrue(any("conta/cliente local nao encontrado" in msg for msg in logger.info_messages))
 
 
 class UpgradeFromEtapa2Tests(unittest.TestCase):
@@ -542,6 +778,177 @@ class EcoNaoInterfereComShadowWriteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((signals_after, outbox_after), (signals_before, outbox_before))
         self.assertEqual(self.executor.calls, 1)  # nao chamou de novo
         self.assertEqual(len(self.publisher.messages), 1)  # nao republicou
+
+
+class ListenerExecutionMirrorTests(unittest.IsolatedAsyncioTestCase):
+    """Gancho novo em listener.py: espelha execution_jobs/execution_job_orders
+    so quando execution_mode e demo/live E group_result.group nao e None
+    (identidade local real pra ancorar o outbox) -- nunca em simulation, nunca
+    em duplicata, nunca em rejeicao de preflight (kill switch etc., que nunca
+    chega a criar uma linha em execution_groups)."""
+
+    async def asyncSetUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.database_path = Path(self.temp_dir.name) / "signals.sqlite3"
+        self.database = SignalDatabase(self.database_path)
+        self.database.initialize()
+        ChannelCatalogService(self.database_path).register_configured_channel(
+            telegram_chat_id="123456",
+            title="Canal VIP",
+            username=None,
+            content_protected=False,
+            history_accessible=True,
+            last_message_id=None,
+        )
+        self.user_id, self.account_id = seed_customer_and_account(self.database_path)
+        self.account = make_mt5_account(self.account_id, self.user_id)
+        self.publisher = FakePublisher()
+        self.outbox = CentralSyncOutbox(self.database_path)
+
+    async def asyncTearDown(self) -> None:
+        self.database.close()
+        self.temp_dir.cleanup()
+
+    def _execution_job_rows(self) -> int:
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                "SELECT COUNT(*) FROM central_sync_outbox WHERE kind = 'execution_job_shadow_write'"
+            )
+            try:
+                return cursor.fetchone()[0]
+            finally:
+                cursor.close()
+
+    async def test_execucao_demo_bem_sucedida_enfileira_mirror(self) -> None:
+        signal = make_signal()
+        group = make_execution_group(101, self.account, signal)
+        orders = (make_execution_order(group.id, 1),)
+        result = PendingExecutionResult(
+            account=self.account,
+            group_result=ExecutionGroupResult(group=group, orders=()),
+            message="ok",
+        )
+        executor = FakeMirrorExecutor("demo_execution", [result], orders_by_group={group.id: orders})
+        processor = SignalProcessor(
+            self.database, self.publisher, logger=NullLogger(),
+            pending_order_executor=executor, central_sync_outbox=self.outbox,
+        )
+
+        decision = await processor.process(
+            IncomingMessage(source_chat_id="123456", source_message_id=1, text=BUY_VALID)
+        )
+
+        self.assertEqual(decision.status, DecisionStatus.ACCEPTED)
+        self.assertEqual(self._execution_job_rows(), 1)
+        # Prova a correcao central desta etapa: o gancho reconsultou o banco
+        # (orders_for_group), nao confiou no objeto congelado do resultado.
+        self.assertEqual(executor.repository.calls, [group.id])
+
+    async def test_modo_simulation_nao_enfileira_mirror(self) -> None:
+        signal = make_signal()
+        group = make_execution_group(102, self.account, signal)
+        result = PendingExecutionResult(
+            account=self.account,
+            group_result=ExecutionGroupResult(group=group, orders=()),
+            message="ok",
+        )
+        executor = FakeMirrorExecutor(
+            "simulation", [result], orders_by_group={group.id: (make_execution_order(group.id, 1),)}
+        )
+        processor = SignalProcessor(
+            self.database, self.publisher, logger=NullLogger(),
+            pending_order_executor=executor, central_sync_outbox=self.outbox,
+        )
+
+        await processor.process(IncomingMessage(source_chat_id="123456", source_message_id=1, text=BUY_VALID))
+
+        self.assertEqual(self._execution_job_rows(), 0)
+
+    async def test_resultado_duplicado_nao_enfileira_mirror(self) -> None:
+        signal = make_signal()
+        result = PendingExecutionResult(
+            account=self.account,
+            group_result=ExecutionGroupResult(group=None, orders=(), duplicate=True),
+            message="",
+        )
+        executor = FakeMirrorExecutor("demo_execution", [result])
+        processor = SignalProcessor(
+            self.database, self.publisher, logger=NullLogger(),
+            pending_order_executor=executor, central_sync_outbox=self.outbox,
+        )
+
+        await processor.process(IncomingMessage(source_chat_id="123456", source_message_id=1, text=BUY_VALID))
+
+        self.assertEqual(self._execution_job_rows(), 0)
+
+    async def test_rejeicao_de_preflight_sem_grupo_nao_enfileira_mirror(self) -> None:
+        signal = make_signal()
+        result = PendingExecutionResult(
+            account=self.account,
+            group_result=ExecutionGroupResult(group=None, orders=(), rejected_reason="kill_switch_enabled"),
+            message="rejeitado",
+        )
+        executor = FakeMirrorExecutor("demo_execution", [result])
+        processor = SignalProcessor(
+            self.database, self.publisher, logger=NullLogger(),
+            pending_order_executor=executor, central_sync_outbox=self.outbox,
+        )
+
+        await processor.process(IncomingMessage(source_chat_id="123456", source_message_id=1, text=BUY_VALID))
+
+        self.assertEqual(self._execution_job_rows(), 0)
+
+    async def test_rejeicao_pos_grupo_enfileira_mirror_como_rejected(self) -> None:
+        signal = make_signal()
+        group = make_execution_group(103, self.account, signal)
+        orders = (make_execution_order(group.id, 1, status="failed", mt5_order_ticket=None),)
+        result = PendingExecutionResult(
+            account=self.account,
+            group_result=ExecutionGroupResult(group=group, orders=(), rejected_reason="order_send_failed:requote"),
+            message="rejeitado",
+        )
+        executor = FakeMirrorExecutor("demo_execution", [result], orders_by_group={group.id: orders})
+        processor = SignalProcessor(
+            self.database, self.publisher, logger=NullLogger(),
+            pending_order_executor=executor, central_sync_outbox=self.outbox,
+        )
+
+        await processor.process(IncomingMessage(source_chat_id="123456", source_message_id=1, text=BUY_VALID))
+
+        self.assertEqual(self._execution_job_rows(), 1)
+        rows = self.outbox.claim_batch(10)
+        row = next(r for r in rows if r.kind == "execution_job_shadow_write")
+        self.assertEqual(row.payload["status"], "rejected")
+        self.assertEqual(row.payload["last_error_code"], "order_send_failed:requote")
+
+    async def test_falha_no_enqueue_de_execucao_nao_impede_sinal_de_ser_aceito(self) -> None:
+        class RaisingExecutionOutbox:
+            def enqueue_signal_shadow_write(self, *args, **kwargs) -> None:
+                pass
+
+            def enqueue_execution_job_shadow_write(self, *args, **kwargs) -> None:
+                raise RuntimeError("supabase indisponivel (simulado)")
+
+        signal = make_signal()
+        group = make_execution_group(104, self.account, signal)
+        result = PendingExecutionResult(
+            account=self.account,
+            group_result=ExecutionGroupResult(group=group, orders=()),
+            message="ok",
+        )
+        executor = FakeMirrorExecutor(
+            "demo_execution", [result], orders_by_group={group.id: (make_execution_order(group.id, 1),)}
+        )
+        processor = SignalProcessor(
+            self.database, self.publisher, logger=NullLogger(),
+            pending_order_executor=executor, central_sync_outbox=RaisingExecutionOutbox(),
+        )
+
+        decision = await processor.process(
+            IncomingMessage(source_chat_id="123456", source_message_id=1, text=BUY_VALID)
+        )
+
+        self.assertEqual(decision.status, DecisionStatus.ACCEPTED)
 
 
 class FakeConfig:

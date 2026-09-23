@@ -10,6 +10,12 @@ import socket
 import tempfile
 import unittest
 
+from tests.central_sync_execution_helpers import (
+    make_execution_group,
+    make_execution_order,
+    make_mt5_account,
+    seed_customer_and_account,
+)
 from telegram_mt5_copier.central_sync import CentralSyncClient, CentralSyncOutbox, _drain_one
 from telegram_mt5_copier.channel_catalog import ChannelCatalogService
 from telegram_mt5_copier.config import AppConfig
@@ -284,6 +290,244 @@ class CentralSyncIntegrationTests(unittest.IsolatedAsyncioTestCase):
         after = await counts()
 
         self.assertEqual(before, after)
+
+
+@unittest.skipUnless(_local_postgres_reachable(), "Postgres local (supabase start) nao esta rodando")
+class ExecutionJobShadowWriteIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    """Finalizacao da Etapa 2: mirror de execution_jobs/execution_job_orders
+    contra o Postgres local real -- inclui a regressao do bug de schema
+    encontrado nesta revisao (execution_key nao pode ter unique GLOBAL, so
+    contas diferentes executando o mesmo sinal no mesmo TP geram o mesmo
+    execution_key)."""
+
+    async def asyncSetUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.database_path = Path(self.temp_dir.name) / "signals.sqlite3"
+        SignalDatabase(self.database_path).initialize()
+        self.catalog = ChannelCatalogService(self.database_path)
+        self.catalog.register_configured_channel(
+            telegram_chat_id="987654321",
+            title="Canal Integracao",
+            username=None,
+            content_protected=False,
+            history_accessible=True,
+            last_message_id=None,
+        )
+        self.user_id, self.account_id = seed_customer_and_account(self.database_path, telegram_user_id=777001)
+        self.account = make_mt5_account(self.account_id, self.user_id)
+        self.outbox = CentralSyncOutbox(self.database_path)
+        self.config = _fake_config()
+        self.client = CentralSyncClient(LOCAL_DATABASE_URL)
+        await self.client.connect()
+        await self._cleanup_rows()
+
+    async def asyncTearDown(self) -> None:
+        await self._cleanup_rows()
+        await self.client.close()
+        self.temp_dir.cleanup()
+
+    async def _cleanup_rows(self) -> None:
+        pool = self.client._pool
+        await pool.execute(
+            "delete from portal.execution_job_orders where execution_job_id in "
+            "(select id from portal.execution_jobs where instance_id = $1)",
+            TEST_INSTANCE_ID,
+        )
+        await pool.execute("delete from portal.execution_jobs where instance_id = $1", TEST_INSTANCE_ID)
+        await pool.execute("delete from portal.mt5_accounts where instance_id = $1", TEST_INSTANCE_ID)
+        await pool.execute("delete from portal.customers where instance_id = $1", TEST_INSTANCE_ID)
+        await pool.execute(
+            "delete from portal.signal_revisions where signal_id in (select id from portal.signals where instance_id = $1)",
+            TEST_INSTANCE_ID,
+        )
+        await pool.execute("delete from portal.signals where instance_id = $1", TEST_INSTANCE_ID)
+        await pool.execute("delete from portal.channels where instance_id = $1", TEST_INSTANCE_ID)
+        await pool.execute("delete from portal.instances where id = $1", TEST_INSTANCE_ID)
+        await pool.execute("delete from portal.nodes where id = $1", self.config.node_id)
+
+    async def _upsert_registry(self) -> None:
+        await self.client.upsert_node(self.config.node_id, self.config.node_label)
+        await self.client.upsert_instance(self.config.instance_id, self.config.brand_name, node_id=self.config.node_id)
+
+    def _make_signal(self, source_message_id: int) -> TradeSignal:
+        return TradeSignal(
+            symbol="XAUUSD",
+            direction=Direction.BUY,
+            entry_low=Decimal("4103"),
+            entry_high=Decimal("4105"),
+            stop_loss=Decimal("4090"),
+            take_profits=(Decimal("4110"), Decimal("4115")),
+            raw_text="XAUUSD BUY\nENTRY 4103-4105\nSL 4090\nTP 4110\nTP 4115",
+            source_chat_id="987654321",
+            source_message_id=source_message_id,
+        )
+
+    async def test_mirror_completo_popula_customers_accounts_jobs_orders(self) -> None:
+        await self._upsert_registry()
+        signal = self._make_signal(710)
+        self.outbox.enqueue_signal_shadow_write(signal, "mensagem formatada", 8710)
+        group = make_execution_group(1, self.account, signal)
+        orders = (make_execution_order(group.id, 1), make_execution_order(group.id, 2))
+        self.outbox.enqueue_execution_job_shadow_write(
+            signal, self.account, group, orders, rejected_reason=None, local_group_id=group.id
+        )
+
+        rows = self.outbox.claim_batch(10)
+        self.assertEqual(len(rows), 2)
+        for row in rows:
+            await _drain_one(self.client, self.config, row)
+            self.outbox.mark_done(row.id)
+
+        pool = self.client._pool
+        customer_row = await pool.fetchrow(
+            "select id, source_user_id, billing_status from portal.customers "
+            "where instance_id = $1 and source_user_id = $2",
+            TEST_INSTANCE_ID,
+            self.user_id,
+        )
+        self.assertIsNotNone(customer_row)
+        self.assertEqual(customer_row["billing_status"], "paid")
+
+        account_row = await pool.fetchrow(
+            "select id, customer_id, login_last4 from portal.mt5_accounts "
+            "where instance_id = $1 and source_account_id = $2",
+            TEST_INSTANCE_ID,
+            self.account_id,
+        )
+        self.assertIsNotNone(account_row)
+        self.assertEqual(account_row["customer_id"], customer_row["id"])
+        self.assertEqual(account_row["login_last4"], "6655")
+
+        job_row = await pool.fetchrow(
+            "select id, status, mt5_account_id from portal.execution_jobs where mt5_account_id = $1",
+            account_row["id"],
+        )
+        self.assertIsNotNone(job_row)
+        self.assertEqual(job_row["status"], "succeeded")
+
+        order_count = await pool.fetchval(
+            "select count(*) from portal.execution_job_orders where execution_job_id = $1", job_row["id"]
+        )
+        self.assertEqual(order_count, 2)
+
+    async def test_mirror_de_execucao_antes_do_sinal_drenar_falha_e_e_retentavel(self) -> None:
+        await self._upsert_registry()
+        signal = self._make_signal(711)
+        # NAO drena o sinal ainda -- so o enqueue local, simula o item de
+        # execucao chegando antes do de sinal ser drenado (ambos sao itens
+        # separados do mesmo outbox, drenados um de cada vez).
+        self.outbox.enqueue_signal_shadow_write(signal, "mensagem formatada", 8711)
+        group = make_execution_group(2, self.account, signal)
+        orders = (make_execution_order(group.id, 1),)
+        self.outbox.enqueue_execution_job_shadow_write(
+            signal, self.account, group, orders, rejected_reason=None, local_group_id=group.id
+        )
+
+        rows = self.outbox.claim_batch(10)
+        execution_row = next(r for r in rows if r.kind == "execution_job_shadow_write")
+        signal_row = next(r for r in rows if r.kind == "signal_shadow_write")
+
+        with self.assertRaises(ValueError):
+            await _drain_one(self.client, self.config, execution_row)
+
+        # Agora drena o sinal, depois retenta a execucao -- deve funcionar.
+        await _drain_one(self.client, self.config, signal_row)
+        self.outbox.mark_done(signal_row.id)
+        await _drain_one(self.client, self.config, execution_row)
+        self.outbox.mark_done(execution_row.id)
+
+        pool = self.client._pool
+        job_count = await pool.fetchval(
+            "select count(*) from portal.execution_jobs j "
+            "join portal.mt5_accounts a on a.id = j.mt5_account_id where a.instance_id = $1",
+            TEST_INSTANCE_ID,
+        )
+        self.assertEqual(job_count, 1)
+
+    async def test_duas_contas_diferentes_mesmo_sinal_mesmo_tp_nao_colidem_em_execution_key(self) -> None:
+        # Regressao do bug real de schema encontrado nesta revisao:
+        # execution_key e derivado SO do sinal (group.signal_id), entao e
+        # IGUAL pra qualquer conta que copie o mesmo sinal no mesmo TP -- a
+        # antiga unique GLOBAL em execution_key quebraria aqui na segunda
+        # gravacao. A migration 20260924020000 remove essa unique global,
+        # mantendo so unique(execution_job_id, tp_index) (suficiente).
+        await self._upsert_registry()
+        signal = self._make_signal(712)
+        self.outbox.enqueue_signal_shadow_write(signal, "mensagem formatada", 8712)
+        rows = self.outbox.claim_batch(10)
+        await _drain_one(self.client, self.config, rows[0])
+        self.outbox.mark_done(rows[0].id)
+
+        user_b, account_b_id = seed_customer_and_account(
+            self.database_path, telegram_user_id=777002, login="1122334455"
+        )
+        account_b = make_mt5_account(account_b_id, user_b, login="1122334455")
+
+        group_a = make_execution_group(3, self.account, signal)
+        group_b = make_execution_group(4, account_b, signal)
+        self.assertEqual(group_a.signal_id, group_b.signal_id)  # mesmo sinal -> mesmo execution_key
+
+        self.outbox.enqueue_execution_job_shadow_write(
+            signal, self.account, group_a, (make_execution_order(group_a.id, 1),),
+            rejected_reason=None, local_group_id=group_a.id,
+        )
+        self.outbox.enqueue_execution_job_shadow_write(
+            signal, account_b, group_b, (make_execution_order(group_b.id, 1),),
+            rejected_reason=None, local_group_id=group_b.id,
+        )
+
+        execution_rows = [r for r in self.outbox.claim_batch(10) if r.kind == "execution_job_shadow_write"]
+        self.assertEqual(len(execution_rows), 2)
+        for row in execution_rows:
+            await _drain_one(self.client, self.config, row)
+            self.outbox.mark_done(row.id)
+
+        pool = self.client._pool
+        order_count = await pool.fetchval(
+            "select count(*) from portal.execution_job_orders o "
+            "join portal.execution_jobs j on j.id = o.execution_job_id "
+            "join portal.mt5_accounts a on a.id = j.mt5_account_id "
+            "where a.instance_id = $1",
+            TEST_INSTANCE_ID,
+        )
+        self.assertEqual(order_count, 2)
+
+    async def test_rejeicao_grava_status_rejected_com_error_code(self) -> None:
+        await self._upsert_registry()
+        signal = self._make_signal(713)
+        self.outbox.enqueue_signal_shadow_write(signal, "mensagem formatada", 8713)
+        rows = self.outbox.claim_batch(10)
+        await _drain_one(self.client, self.config, rows[0])
+        self.outbox.mark_done(rows[0].id)
+
+        group = make_execution_group(5, self.account, signal)
+        orders = (
+            make_execution_order(group.id, 1, status="failed", mt5_order_ticket=None, broker_retcode="10004"),
+        )
+        self.outbox.enqueue_execution_job_shadow_write(
+            signal, self.account, group, orders,
+            rejected_reason="order_send_failed:requote", local_group_id=group.id,
+        )
+        execution_row = next(r for r in self.outbox.claim_batch(10) if r.kind == "execution_job_shadow_write")
+        await _drain_one(self.client, self.config, execution_row)
+
+        pool = self.client._pool
+        job_row = await pool.fetchrow(
+            "select status, last_error_code from portal.execution_jobs j "
+            "join portal.mt5_accounts a on a.id = j.mt5_account_id where a.instance_id = $1",
+            TEST_INSTANCE_ID,
+        )
+        self.assertEqual(job_row["status"], "rejected")
+        self.assertEqual(job_row["last_error_code"], "order_send_failed:requote")
+
+        order_row = await pool.fetchrow(
+            "select o.status, o.mt5_order_ticket from portal.execution_job_orders o "
+            "join portal.execution_jobs j on j.id = o.execution_job_id "
+            "join portal.mt5_accounts a on a.id = j.mt5_account_id where a.instance_id = $1",
+            TEST_INSTANCE_ID,
+        )
+        self.assertEqual(order_row["status"], "failed")
+        self.assertIsNone(order_row["mt5_order_ticket"])
 
 
 if __name__ == "__main__":

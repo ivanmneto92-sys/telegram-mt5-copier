@@ -360,6 +360,47 @@ class ExecutionRepository:
             )
             cursor.close()
 
+    def orders_for_group(self, group_id: int) -> tuple[ExecutionOrder, ...]:
+        """Estado REAL e atual das ordens de um grupo, direto do banco -- ao
+        contrario do que create_group_with_orders devolve em memoria (que fica
+        congelado no momento da criacao, antes de qualquer order_send), esta
+        leitura reflete ticket/retcode/status pos-execucao."""
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                """
+                SELECT id, execution_group_id, tp_index, requested_volume, normalized_volume,
+                       entry_price, stop_loss, take_profit, order_type, status,
+                       mt5_order_ticket, mt5_position_ticket, broker_retcode, broker_message
+                FROM execution_orders
+                WHERE execution_group_id = ?
+                ORDER BY tp_index
+                """,
+                (group_id,),
+            )
+            try:
+                rows = cursor.fetchall()
+            finally:
+                cursor.close()
+        return tuple(
+            ExecutionOrder(
+                id=row[0],
+                execution_group_id=row[1],
+                tp_index=row[2],
+                requested_volume=decimal_from_text(row[3]),
+                normalized_volume=decimal_from_text(row[4]),
+                entry_price=decimal_from_text(row[5]),
+                stop_loss=decimal_from_text(row[6]),
+                take_profit=decimal_from_text(row[7]),
+                order_type=row[8],
+                status=row[9],
+                mt5_order_ticket=row[10],
+                mt5_position_ticket=row[11],
+                broker_retcode=row[12],
+                broker_message=row[13],
+            )
+            for row in rows
+        )
+
     def mark_group_failed(self, group_id: int, reason: str) -> None:
         now = utc_now()
         with connect_database(self.database_path) as connection:

@@ -163,6 +163,30 @@ class SignalProcessor:
                 self.logger.info("pending_order_execution:\n%s", result.message)
                 if self.execution_notifier is not None and result.message:
                     await self.execution_notifier(result)
+                if (
+                    self.central_sync_outbox is not None
+                    and self.pending_order_executor.execution_mode in {"demo_execution", "live_execution"}
+                    and result.group_result.group is not None
+                ):
+                    try:
+                        group = result.group_result.group
+                        # Reconsulta as ordens no banco local em vez de usar
+                        # result.group_result.orders -- esse objeto vem
+                        # congelado no momento da criacao do grupo, ANTES de
+                        # qualquer order_send (mark_order_submitted so
+                        # atualiza a linha no SQLite, nunca esses objetos em
+                        # memoria).
+                        orders = self.pending_order_executor.repository.orders_for_group(group.id)
+                        self.central_sync_outbox.enqueue_execution_job_shadow_write(
+                            signal,
+                            result.account,
+                            group,
+                            orders,
+                            rejected_reason=result.group_result.rejected_reason,
+                            local_group_id=group.id,
+                        )
+                    except Exception:
+                        self.logger.exception("central_sync_outbox_execution_enqueue_failed")
         accepted_decision = ProcessingDecision(
             DecisionStatus.ACCEPTED,
             "accepted",
