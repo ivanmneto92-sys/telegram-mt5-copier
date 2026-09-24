@@ -167,6 +167,21 @@ class FakeMultipleSourceClient:
         return [type("Message", (), {"id": limit})()]
 
 
+class FakePartiallyUnavailableSourceClient(FakeMultipleSourceClient):
+    def __init__(self, unavailable_ids: set[int]) -> None:
+        super().__init__()
+        self.unavailable_ids = unavailable_ids
+
+    async def get_entity(self, chat_id: int):
+        self.requested_ids.append(chat_id)
+        if chat_id in self.unavailable_ids:
+            raise ValueError("unknown channel")
+        entity = FakeSourceEntity()
+        entity.id = abs(chat_id)
+        entity.title = f"Canal {abs(chat_id)}"
+        return entity
+
+
 class CaptureLogger:
     def __init__(self) -> None:
         self.messages: list[str] = []
@@ -223,15 +238,63 @@ class SourceChannelValidationTests(unittest.IsolatedAsyncioTestCase):
         client = FakeMultipleSourceClient()
         logger = CaptureLogger()
 
-        entities = await resolve_source_chats(
+        source_chats = await resolve_source_chats(
             client,
             ("-1001111111111", "-1002222222222"),
             logger,
         )
 
-        self.assertEqual(len(entities), 2)
+        self.assertEqual(len(source_chats), 2)
+        self.assertEqual(
+            [source_chat_id for source_chat_id, _entity in source_chats],
+            ["-1001111111111", "-1002222222222"],
+        )
         self.assertEqual(client.requested_ids, [-1001111111111, -1002222222222])
-        self.assertIn("total=2", logger.messages[-1])
+        self.assertIn("ativos=2", logger.messages[-1])
+        self.assertIn("indisponiveis=0", logger.messages[-1])
+
+    async def test_canal_indisponivel_nao_interrompe_os_demais(self) -> None:
+        client = FakePartiallyUnavailableSourceClient({-1002222222222})
+        logger = CaptureLogger()
+
+        source_chats = await resolve_source_chats(
+            client,
+            ("-1001111111111", "-1002222222222", "-1003333333333"),
+            logger,
+        )
+
+        self.assertEqual(
+            [source_chat_id for source_chat_id, _entity in source_chats],
+            ["-1001111111111", "-1003333333333"],
+        )
+        self.assertEqual(
+            client.requested_ids,
+            [-1001111111111, -1002222222222, -1003333333333],
+        )
+        self.assertTrue(
+            any(
+                "monitoramento dos demais canais continuara" in message
+                and "id=-1002222222222" in message
+                for message in logger.messages
+            )
+        )
+        self.assertIn("ativos=2", logger.messages[-1])
+        self.assertIn("indisponiveis=1", logger.messages[-1])
+
+    async def test_todos_os_canais_indisponiveis_interrompem_o_monitor(self) -> None:
+        client = FakePartiallyUnavailableSourceClient(
+            {-1001111111111, -1002222222222}
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "Nenhum canal de origem configurado esta acessivel",
+        ):
+            await resolve_source_chats(
+                client,
+                ("-1001111111111", "-1002222222222"),
+                CaptureLogger(),
+            )
 
     async def test_lista_de_canais_vazia_e_rejeitada(self) -> None:
         with self.assertRaisesRegex(ValueError, "SOURCE_CHAT_IDS"):
