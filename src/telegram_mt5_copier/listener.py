@@ -307,8 +307,8 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
             logger.error("Sessao Telegram nao autenticada. Execute telegram-login uma vez antes do monitoramento.")
             return 2
 
-        source_entities = await resolve_source_chats(client, config.source_chat_ids, logger)
-        for source_chat_id, entity in zip(config.source_chat_ids, source_entities):
+        source_chats = await resolve_source_chats(client, config.source_chat_ids, logger)
+        for source_chat_id, entity in source_chats:
             snapshot = await inspect_source_entity(client, entity)
             channel_catalog.register_configured_channel(
                 telegram_chat_id=source_chat_id,
@@ -459,16 +459,40 @@ async def resolve_source_chats(
     client: Any,
     source_chat_ids: tuple[str, ...],
     logger: logging.Logger,
-) -> list[Any]:
+) -> list[tuple[str, Any]]:
     if not source_chat_ids:
         raise ValueError("SOURCE_CHAT_IDS nao configurado.")
 
-    entities = [
-        await resolve_source_chat(client, source_chat_id, logger)
-        for source_chat_id in source_chat_ids
-    ]
-    logger.info("Canais de origem prontos. total=%s", len(entities))
-    return entities
+    resolved: list[tuple[str, Any]] = []
+    unavailable: list[str] = []
+    for source_chat_id in source_chat_ids:
+        try:
+            entity = await resolve_source_chat(client, source_chat_id, logger)
+        except Exception as exc:
+            unavailable.append(str(source_chat_id))
+            logger.error(
+                "Canal de origem indisponivel; monitoramento dos demais canais continuara. "
+                "id=%s erro=%s",
+                source_chat_id,
+                exc,
+            )
+            continue
+        resolved.append((str(source_chat_id), entity))
+
+    if not resolved:
+        failed_ids = ",".join(unavailable)
+        raise RuntimeError(
+            "Nenhum canal de origem configurado esta acessivel. "
+            f"canais_indisponiveis={failed_ids}"
+        )
+
+    logger.info(
+        "Canais de origem prontos. ativos=%s indisponiveis=%s total_configurados=%s",
+        len(resolved),
+        len(unavailable),
+        len(source_chat_ids),
+    )
+    return resolved
 
 
 def telegram_entity_title(entity: Any) -> str:
