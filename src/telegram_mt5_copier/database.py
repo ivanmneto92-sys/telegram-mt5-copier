@@ -319,6 +319,7 @@ def initialize_database(database_path: Path) -> None:
                 kind TEXT NOT NULL,
                 source_signal_id INTEGER,
                 source_execution_group_id INTEGER,
+                source_account_id INTEGER,
                 payload TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'pending',
                 attempts INTEGER NOT NULL DEFAULT 0,
@@ -1116,11 +1117,18 @@ def run_schema_migrations(connection: sqlite3.Connection) -> None:
     # So depois do ensure_column acima: numa instalacao que ja tinha
     # central_sync_outbox antes desta coluna existir, criar o indice antes
     # falharia com "no such column: source_signal_id".
+    # Escopado a kind='signal_shadow_write' (nao a qualquer kind) -- a Etapa
+    # 5d introduziu outro kind (execution_job_pilot_pending) que tambem grava
+    # source_signal_id, mas la o mesmo sinal PRECISA poder gerar mais de uma
+    # linha (uma por conta piloto); sem esse escopo, este indice bloquearia
+    # isso incorretamente. Drop+recreate porque "IF NOT EXISTS" nao alteraria
+    # a definicao de um indice ja criado por uma instalacao anterior.
+    connection.execute("DROP INDEX IF EXISTS central_sync_outbox_source_signal_idx").close()
     connection.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS central_sync_outbox_source_signal_idx
             ON central_sync_outbox (kind, source_signal_id)
-            WHERE source_signal_id IS NOT NULL
+            WHERE source_signal_id IS NOT NULL AND kind = 'signal_shadow_write'
         """
     ).close()
     ensure_column(connection, "central_sync_outbox", "source_execution_group_id", "INTEGER")
@@ -1130,6 +1138,19 @@ def run_schema_migrations(connection: sqlite3.Connection) -> None:
         CREATE UNIQUE INDEX IF NOT EXISTS central_sync_outbox_source_execution_group_idx
             ON central_sync_outbox (kind, source_execution_group_id)
             WHERE source_execution_group_id IS NOT NULL
+        """
+    ).close()
+    ensure_column(connection, "central_sync_outbox", "source_account_id", "INTEGER")
+    # Etapa 5d: produtor pra conta(s) piloteada(s) pela fila -- nao existe
+    # execution_group local nenhum pra ancorar (a conta nunca executa
+    # localmente), entao a idempotencia usa (kind, source_signal_id,
+    # source_account_id) -- o mesmo sinal pra contas piloto diferentes nao
+    # pode colidir num indice que so olhasse (kind, source_signal_id).
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS central_sync_outbox_pilot_signal_account_idx
+            ON central_sync_outbox (kind, source_signal_id, source_account_id)
+            WHERE source_signal_id IS NOT NULL AND source_account_id IS NOT NULL
         """
     ).close()
     migrate_channel_subscriptions_to_explicit_opt_in(connection)

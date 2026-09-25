@@ -35,6 +35,7 @@ except ImportError:  # pragma: no cover - so acontece se a dependencia nao foi i
 OUTBOX_KIND_SIGNAL_SHADOW_WRITE = "signal_shadow_write"
 OUTBOX_KIND_EXECUTION_JOB_SHADOW_WRITE = "execution_job_shadow_write"
 OUTBOX_KIND_EXECUTION_JOB_PENDING = "execution_job_pending"
+OUTBOX_KIND_EXECUTION_JOB_PILOT_PENDING = "execution_job_pilot_pending"
 _BACKOFF_SECONDS = (1, 2, 5, 10, 30, 60, 120, 300)
 
 
@@ -323,6 +324,45 @@ def build_execution_job_pending_payload(
     )
 
 
+def build_execution_job_pilot_pending_payload(
+    signal: TradeSignal,
+    channel: ChannelRow,
+    customer_account: CustomerAccountRow,
+) -> dict[str, Any]:
+    """Etapa 5d: produtor pra conta(s) piloteada(s) pela fila central -- ao
+    contrario dos outros dois payloads de execution_job (que carregam um
+    plano ja calculado, local ou central), este carrega so o SINAL BRUTO,
+    sem nenhuma ordem: a conta piloto nunca passa pelo caminho de execucao
+    local (execution_profiles.enabled=0 pra ela, por design), entao nao ha
+    nenhum plano ja calculado pra espelhar. Quem planeja de verdade, com
+    dado de terminal fresco, e o agente (RealExecutionBackend, Etapa 5c), no
+    momento em que reivindicar o job."""
+    payload = _build_execution_job_payload_common(
+        signal,
+        channel,
+        customer_account,
+        status="pending",
+        last_error_code=None,
+        last_error_message=None,
+        orders=[],
+    )
+    payload.update(
+        {
+            "symbol": signal.symbol,
+            "direction": signal.direction.value,
+            "entry_low": decimal_to_text(signal.entry_low),
+            "entry_high": decimal_to_text(signal.entry_high),
+            "stop_loss": decimal_to_text(signal.stop_loss),
+            "take_profits": [decimal_to_text(value) for value in signal.take_profits],
+            "raw_text": signal.raw_text,
+            "source_chat_id": as_text(signal.source_chat_id),
+            "local_user_id": customer_account.source_user_id,
+            "local_account_id": customer_account.source_account_id,
+        }
+    )
+    return payload
+
+
 class CentralSyncOutbox:
     """Fila local (SQLite) de eventos a replicar no Supabase. Escrita sincrona,
     barata (mesmo arquivo/conexao do banco de sinais) -- drenada de forma
@@ -483,6 +523,60 @@ class CentralSyncOutbox:
                 (
                     OUTBOX_KIND_EXECUTION_JOB_PENDING,
                     group.id,
+                    json.dumps(payload),
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            cursor.close()
+
+    def enqueue_execution_job_pilot_pending(
+        self,
+        signal: TradeSignal,
+        account: MT5Account,
+        local_signal_id: int,
+    ) -> None:
+        """Etapa 5d: produtor pra conta(s) piloteada(s) pela fila central --
+        ao contrario de enqueue_execution_job_pending (que ancora no
+        execution_groups local, ja que a execucao local aconteceu), a conta
+        piloto nunca executa localmente, entao nao ha nenhum group.id pra
+        usar como identidade. Usa (kind, source_signal_id, source_account_id)
+        -- o mesmo sinal pode ir pra mais de uma conta piloto, cada uma
+        precisa da sua propria linha."""
+        channel = resolve_local_channel(self.database_path, signal.source_chat_id)
+        if channel is None:
+            if self.logger is not None:
+                self.logger.info(
+                    "central_sync_execution_pilot_enqueue_skipped: canal nao registrado signal_id=%s account_id=%s",
+                    local_signal_id,
+                    account.id,
+                )
+            return
+        customer_account = resolve_local_customer_and_account(self.database_path, account.id)
+        if customer_account is None:
+            if self.logger is not None:
+                self.logger.info(
+                    "central_sync_execution_pilot_enqueue_skipped: conta/cliente local nao encontrado signal_id=%s account_id=%s",
+                    local_signal_id,
+                    account.id,
+                )
+            return
+        payload = build_execution_job_pilot_pending_payload(signal, channel, customer_account)
+        now = utc_now()
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO central_sync_outbox (
+                    kind, source_signal_id, source_account_id, payload,
+                    status, attempts, created_at, updated_at, next_attempt_at
+                )
+                VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, ?)
+                """,
+                (
+                    OUTBOX_KIND_EXECUTION_JOB_PILOT_PENDING,
+                    local_signal_id,
+                    account.id,
                     json.dumps(payload),
                     now,
                     now,
@@ -909,13 +1003,19 @@ async def _drain_one(client: CentralSyncClient, config: AppConfig, row: OutboxRo
         await client.append_signal_revision(signal_id, payload["content_signature"], payload)
         return
 
-    if row.kind in (OUTBOX_KIND_EXECUTION_JOB_SHADOW_WRITE, OUTBOX_KIND_EXECUTION_JOB_PENDING):
-        # Os dois kinds levam o MESMO formato de payload (via
+    if row.kind in (
+        OUTBOX_KIND_EXECUTION_JOB_SHADOW_WRITE,
+        OUTBOX_KIND_EXECUTION_JOB_PENDING,
+        OUTBOX_KIND_EXECUTION_JOB_PILOT_PENDING,
+    ):
+        # Os tres kinds levam o MESMO formato de payload (via
         # _build_execution_job_payload_common) e a mesma sequencia de
-        # upserts -- so o "status"/"orders" dentro do payload diferem (um
-        # carrega a intencao antes do order_send, Etapa 5a; o outro carrega o
-        # resultado real, Etapa 2). Os dois convergem pra mesma linha central
-        # via on conflict (mt5_account_id, signal_id)/(execution_job_id, tp_index).
+        # upserts -- so o "status"/"orders" dentro do payload diferem (Etapa
+        # 2 carrega o resultado real depois do order_send local; Etapa 5a
+        # carrega a intencao ja planejada, antes do order_send local; Etapa
+        # 5d carrega so o sinal bruto, sem plano nenhum, ja que a conta
+        # piloto nunca executa localmente). Todos convergem pra mesma linha
+        # central via on conflict (mt5_account_id, signal_id)/(execution_job_id, tp_index).
         payload = row.payload
         customer_id = await client.upsert_customer(config.instance_id, payload["customer"])
         account_id = await client.upsert_account(

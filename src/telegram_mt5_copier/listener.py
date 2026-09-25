@@ -55,6 +55,7 @@ class SignalProcessor:
         execution_notifier: Callable[[PendingExecutionResult], Awaitable[None]] | None = None,
         publication_scope: str | None = None,
         central_sync_outbox: CentralSyncOutbox | None = None,
+        queue_pilot_accounts: tuple[MT5Account, ...] = (),
     ) -> None:
         self.database = database
         self.publisher = publisher
@@ -63,6 +64,12 @@ class SignalProcessor:
         self.execution_notifier = execution_notifier
         self.publication_scope = publication_scope
         self.central_sync_outbox = central_sync_outbox
+        # Etapa 5d: conta(s) demo dedicada(s), isolada(s) do caminho de
+        # execucao local (execution_profiles.enabled=0 pra elas) -- toda
+        # sinal aceito tambem vira um job pending de verdade na fila central
+        # pra cada uma, sem passar pelo pending_order_executor. Vazio por
+        # padrao (nada muda sem configurar QUEUE_PILOT_ACCOUNT_IDS).
+        self.queue_pilot_accounts = queue_pilot_accounts
         self._closed = False
 
     def close(self) -> None:
@@ -189,6 +196,18 @@ class SignalProcessor:
                         )
                     except Exception:
                         self.logger.exception("central_sync_outbox_execution_enqueue_failed")
+        if self.central_sync_outbox is not None and self.queue_pilot_accounts:
+            # Etapa 5d: independente do pending_order_executor (a conta
+            # piloto nunca passa por ele -- execution_profiles.enabled=0
+            # pra ela, por design) -- todo sinal aceito tambem vira um job
+            # pending de verdade na fila central, pra cada conta piloto.
+            for pilot_account in self.queue_pilot_accounts:
+                try:
+                    self.central_sync_outbox.enqueue_execution_job_pilot_pending(
+                        signal, pilot_account, local_signal_id
+                    )
+                except Exception:
+                    self.logger.exception("central_sync_outbox_pilot_enqueue_failed")
         accepted_decision = ProcessingDecision(
             DecisionStatus.ACCEPTED,
             "accepted",
@@ -312,6 +331,24 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
                 result.message,
                 logger,
             )
+
+    # Etapa 5d: resolve as contas demo piloteadas pela fila central (se
+    # configuradas) -- so leitura, nao precisa de credential_service (essas
+    # contas nunca sao inicializadas por aqui, so referenciadas no payload).
+    queue_pilot_accounts: tuple[MT5Account, ...] = ()
+    if config.queue_pilot_account_ids:
+        pilot_account_service = mt5_accounts if pending_order_executor is not None else MT5AccountService(
+            config.database_path
+        )
+        resolved_pilot_accounts = []
+        for pilot_account_id in config.queue_pilot_account_ids:
+            pilot_account = pilot_account_service.get_account_by_id(pilot_account_id)
+            if pilot_account is None:
+                logger.warning("queue_pilot_account_nao_encontrada id=%s", pilot_account_id)
+                continue
+            resolved_pilot_accounts.append(pilot_account)
+        queue_pilot_accounts = tuple(resolved_pilot_accounts)
+
     processor = SignalProcessor(
         database,
         publisher,
@@ -320,6 +357,7 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
         execution_notifier=execution_notifier,
         publication_scope=config.destination_chat_id,
         central_sync_outbox=central_sync_outbox,
+        queue_pilot_accounts=queue_pilot_accounts,
     )
 
     client = TelegramClient(

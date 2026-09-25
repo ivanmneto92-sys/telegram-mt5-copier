@@ -184,6 +184,16 @@ class PendingOrderTests(unittest.TestCase):
             now=datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc),
         )
 
+    def test_get_account_by_id_encontra_sem_precisar_do_user_id(self) -> None:
+        found = self.accounts.get_account_by_id(self.account.id)
+
+        self.assertIsNotNone(found)
+        self.assertEqual(found.id, self.account.id)
+        self.assertEqual(found.user_id, self.user.id)
+
+    def test_get_account_by_id_devolve_none_quando_nao_encontra(self) -> None:
+        self.assertIsNone(self.accounts.get_account_by_id(999999))
+
     def test_buy_abaixo_do_mercado_gera_buy_limit(self) -> None:
         plan = self.plan_buy(TickInfo(bid=Decimal("4062"), ask=Decimal("4062")))
 

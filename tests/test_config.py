@@ -68,6 +68,32 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.central_sync_poll_seconds, 10)
             self.assertEqual(config.central_sync_max_batch, 50)
 
+    def test_queue_pilot_account_ids_vazio_por_padrao(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = AppConfig.load(project_root=Path(tmp), env={}, create_dirs=True)
+
+            self.assertEqual(config.queue_pilot_account_ids, ())
+
+    def test_queue_pilot_account_ids_le_lista_separada_por_virgula(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = AppConfig.load(
+                project_root=Path(tmp),
+                env={"QUEUE_PILOT_ACCOUNT_IDS": "7, 12,99"},
+                create_dirs=True,
+            )
+
+            self.assertEqual(config.queue_pilot_account_ids, (7, 12, 99))
+
+    def test_queue_pilot_account_ids_invalido_levanta_erro_claro(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError) as ctx:
+                AppConfig.load(
+                    project_root=Path(tmp),
+                    env={"QUEUE_PILOT_ACCOUNT_IDS": "7,abc"},
+                    create_dirs=True,
+                )
+            self.assertIn("QUEUE_PILOT_ACCOUNT_IDS", str(ctx.exception))
+
     def test_config_combinado_backup_e_central_sync_nao_se_contaminam(self) -> None:
         """Reconciliacao com main: backup (Backblaze B2) e central_sync (Etapa
         2/3) sao dois blocos de config totalmente independentes, adicionados

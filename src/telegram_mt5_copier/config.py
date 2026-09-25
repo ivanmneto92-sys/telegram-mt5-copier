@@ -124,6 +124,7 @@ class AppConfig:
     execution_agent_poll_seconds: int
     execution_agent_claim_limit: int
     execution_agent_lease_seconds: int
+    queue_pilot_account_ids: tuple[int, ...]
     backup_encryption_key: str | None = field(repr=False)
     backup_retention_days: int
     b2_key_id: str | None = field(repr=False)
@@ -321,6 +322,10 @@ class AppConfig:
                 _value("EXECUTION_AGENT_LEASE_SECONDS", file_values, runtime_env, "60"),
                 "EXECUTION_AGENT_LEASE_SECONDS",
             ),
+            queue_pilot_account_ids=parse_int_id_list(
+                _optional_value("QUEUE_PILOT_ACCOUNT_IDS", file_values, runtime_env),
+                "QUEUE_PILOT_ACCOUNT_IDS",
+            ),
             backup_encryption_key=_optional_value(
                 "BACKUP_ENCRYPTION_KEY", file_values, runtime_env
             ),
@@ -381,20 +386,24 @@ class AppConfig:
 
 
 def parse_admin_ids(value: str | None) -> tuple[int, ...]:
+    return parse_int_id_list(value, "BOT_ADMIN_IDS")
+
+
+def parse_int_id_list(value: str | None, field_name: str) -> tuple[int, ...]:
     if not value:
         return ()
 
-    admin_ids: list[int] = []
+    ids: list[int] = []
     for raw_item in value.split(","):
         item = raw_item.strip()
         if not item:
             continue
         try:
-            admin_ids.append(int(item))
+            ids.append(int(item))
         except ValueError as exc:
-            raise ValueError("BOT_ADMIN_IDS deve conter apenas IDs numericos separados por virgula.") from exc
+            raise ValueError(f"{field_name} deve conter apenas IDs numericos separados por virgula.") from exc
 
-    return tuple(admin_ids)
+    return tuple(ids)
 
 
 def parse_instance_id(value: str) -> str:
