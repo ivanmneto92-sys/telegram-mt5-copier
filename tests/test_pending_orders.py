@@ -21,6 +21,7 @@ from telegram_mt5_copier.mt5.models import (
     ENTRY_EXECUTION_MARKET_IMMEDIATE,
     ENTRY_PRICE_DISTRIBUTED,
     ENTRY_PRICE_MIDDLE,
+    LatencyMetrics,
     PendingOrderType,
     SymbolInfo,
     TickInfo,
@@ -930,6 +931,40 @@ class PendingOrderTests(unittest.TestCase):
         ).execute_for_account(parse_signal_text(BUY_SIGNAL).signal, self.account, self.profile())
 
         self.assertEqual(calls, [])
+
+    def test_execute_plan_chamado_isoladamente_sem_passar_por_execute_for_account(self) -> None:
+        # Etapa 5b: prova que execute_plan e realmente auto-contido -- monta
+        # o plano na mao (do jeito que o agente da Etapa 5c vai fazer, a
+        # partir de um job da fila central) e chama o metodo direto, sem
+        # passar por execute_for_account nem por execute_for_signal.
+        signal = parse_signal_text(BUY_SIGNAL).signal
+        tick = TickInfo(bid=Decimal("4062"), ask=Decimal("4062"))
+        symbol_info = SymbolInfo(name="XAUUSD")
+        client = SimulatedMT5Client(tick=tick, symbol_info=symbol_info)
+        plan = PendingOrderPlanner().plan(
+            signal=signal,
+            account=self.account,
+            profile=self.profile(),
+            symbol_info=symbol_info,
+            tick=tick,
+            execution_mode="demo_execution",
+            now=datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc),
+        )
+        executor = self.executor(client=client, execution_mode="demo_execution", global_kill_switch=False)
+
+        result = executor.execute_plan(
+            signal=signal,
+            plan=plan,
+            account=self.account,
+            profile=self.profile(),
+            client=client,
+            symbol_info=symbol_info,
+            metrics=LatencyMetrics(),
+        )
+
+        self.assertIsNone(result.group_result.rejected_reason)
+        self.assertEqual(len(client.order_send_requests), 4)
+        self.assertEqual(group_status(self.database_path, result.group_result.group.id), "pending_active")
 
     def test_corretora_com_gtc_nao_recebe_expiration(self) -> None:
         client = SimulatedMT5Client(

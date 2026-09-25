@@ -288,7 +288,7 @@ class PendingOrderExecutor:
 
         if self.execution_mode in {"demo_execution", "live_execution"}:
             try:
-                return self._execute_demo_plan(
+                return self.execute_plan(
                     signal=signal,
                     plan=plan,
                     account=account,
@@ -368,7 +368,7 @@ class PendingOrderExecutor:
         finally:
             password = None
 
-    def _execute_demo_plan(
+    def execute_plan(
         self,
         *,
         signal: TradeSignal,
@@ -379,6 +379,16 @@ class PendingOrderExecutor:
         symbol_info: SymbolInfo,
         metrics: object,
     ) -> PendingExecutionResult:
+        """Etapa 5b: parte de EXECUCAO isolada da parte de PLANEJAMENTO
+        (symbol resolve, tick, PendingOrderPlanner.plan(), validacao de
+        risco/noticia -- tudo isso continua em execute_for_account, antes
+        deste metodo ser chamado). Recebe um plano ja pronto e validado
+        contra o terminal (client/symbol_info reais) e roda order_check/
+        order_send/rollback/registro -- publico e auto-contido de proposito,
+        pra poder ser chamado tanto pelo fluxo local (como ja e hoje, via
+        execute_for_account) quanto pelo agente da Etapa 4 em modo
+        demo_execution (Etapa 5c), que monta seu proprio plano fresco a
+        partir de um job da fila central em vez de um sinal local."""
         if self.repository.has_execution_group(plan.signal_id, plan.user_id, plan.mt5_account_id):
             return PendingExecutionResult(
                 account=account,
