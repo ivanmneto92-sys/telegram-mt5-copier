@@ -16,10 +16,10 @@ from tests.central_sync_execution_helpers import (
     make_mt5_account,
     seed_customer_and_account,
 )
-from telegram_mt5_copier.central_sync import CentralSyncClient, CentralSyncOutbox, _drain_one
+from telegram_mt5_copier.central_sync import CentralSyncClient, CentralSyncOutbox, _drain_one, _run_audit_cycle
 from telegram_mt5_copier.channel_catalog import ChannelCatalogService
 from telegram_mt5_copier.config import AppConfig
-from telegram_mt5_copier.database import SignalDatabase
+from telegram_mt5_copier.database import SignalDatabase, connect_database
 from telegram_mt5_copier.models import Direction, TradeSignal
 
 LOCAL_DB_HOST = "127.0.0.1"
@@ -90,6 +90,8 @@ def _fake_config(node_id: str = "dev-local") -> AppConfig:
         central_sync_poll_seconds=5,
         central_sync_max_batch=20,
         central_sync_delivery_lag_seconds=600,
+        central_sync_audit_sample_size=5,
+        central_sync_audit_interval_seconds=1800,
         backup_encryption_key=None,
         backup_retention_days=14,
         b2_key_id=None,
@@ -528,6 +530,145 @@ class ExecutionJobShadowWriteIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(order_row["status"], "failed")
         self.assertIsNone(order_row["mt5_order_ticket"])
+
+
+@unittest.skipUnless(_local_postgres_reachable(), "Postgres local (supabase start) nao esta rodando")
+class ContentAuditIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    """Etapa 3B: auditoria por amostragem contra o Postgres local real -- prova
+    que um drift REAL no Supabase (nao so no SQLite local) e detectado, e que
+    uma correcao subsequente limpa o achado."""
+
+    async def asyncSetUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.database_path = Path(self.temp_dir.name) / "signals.sqlite3"
+        self.database = SignalDatabase(self.database_path)
+        self.database.initialize()
+        self.catalog = ChannelCatalogService(self.database_path)
+        self.catalog.register_configured_channel(
+            telegram_chat_id="987654321",
+            title="Canal Auditoria",
+            username=None,
+            content_protected=False,
+            history_accessible=True,
+            last_message_id=None,
+        )
+        self.outbox = CentralSyncOutbox(self.database_path)
+        self.config = _fake_config()
+        self.client = CentralSyncClient(LOCAL_DATABASE_URL)
+        await self.client.connect()
+        await self._cleanup_rows()
+
+    async def asyncTearDown(self) -> None:
+        await self._cleanup_rows()
+        await self.client.close()
+        self.database.close()
+        self.temp_dir.cleanup()
+
+    async def _cleanup_rows(self) -> None:
+        pool = self.client._pool
+        await pool.execute(
+            "delete from portal.signal_revisions where signal_id in (select id from portal.signals where instance_id = $1)",
+            TEST_INSTANCE_ID,
+        )
+        await pool.execute("delete from portal.signals where instance_id = $1", TEST_INSTANCE_ID)
+        await pool.execute("delete from portal.channels where instance_id = $1", TEST_INSTANCE_ID)
+        await pool.execute("delete from portal.instances where id = $1", TEST_INSTANCE_ID)
+        await pool.execute("delete from portal.nodes where id = $1", self.config.node_id)
+
+    async def _upsert_registry(self) -> None:
+        await self.client.upsert_node(self.config.node_id, self.config.node_label)
+        await self.client.upsert_instance(self.config.instance_id, self.config.brand_name, node_id=self.config.node_id)
+
+    def _make_signal(self, source_message_id: int) -> TradeSignal:
+        return TradeSignal(
+            symbol="XAUUSD",
+            direction=Direction.BUY,
+            entry_low=Decimal("4103"),
+            entry_high=Decimal("4105"),
+            stop_loss=Decimal("4090"),
+            take_profits=(Decimal("4110"), Decimal("4115")),
+            raw_text="XAUUSD BUY\nENTRY 4103-4105\nSL 4090\nTP 4110\nTP 4115",
+            source_chat_id="987654321",
+            source_message_id=source_message_id,
+        )
+
+    def _findings(self) -> dict[int, str | None]:
+        with connect_database(self.database_path) as connection:
+            return {
+                row[0]: row[1]
+                for row in connection.execute(
+                    "SELECT signal_id, remote_content_signature FROM central_sync_audit_findings"
+                )
+            }
+
+    async def _drain_signal(self, source_message_id: int) -> tuple[int, str]:
+        signal = self._make_signal(source_message_id)
+        local_signal_id = self.database.record_accepted(signal, "mensagem formatada")
+        self.outbox.enqueue_signal_shadow_write(signal, "mensagem formatada", local_signal_id)
+        rows = self.outbox.claim_batch(10)
+        row = next(r for r in rows if r.payload.get("source_message_id") == str(source_message_id))
+        await _drain_one(self.client, self.config, row)
+        self.outbox.mark_done(row.id)
+        return local_signal_id, signal.content_signature
+
+    async def test_auditoria_nao_encontra_nada_quando_conteudo_bate(self) -> None:
+        await self._upsert_registry()
+        await self._drain_signal(801)
+
+        await _run_audit_cycle(self.client, self.outbox, self.config)
+
+        self.assertEqual(self._findings(), {})
+
+    async def test_auditoria_detecta_drift_real_no_supabase_e_limpa_apos_correcao(self) -> None:
+        await self._upsert_registry()
+        local_id, original_signature = await self._drain_signal(802)
+
+        # Simula um drift REAL no Supabase -- direto via SQL, fora do caminho
+        # normal de escrita (append_signal_revision), pra provar que a
+        # auditoria pega mesmo o que o proprio codigo de replicacao nunca
+        # produziria sozinho.
+        pool = self.client._pool
+        await pool.execute(
+            """
+            update portal.signals set content_signature = 'drift-simulado'
+            where instance_id = $1 and source_message_id = 802
+            """,
+            TEST_INSTANCE_ID,
+        )
+
+        await _run_audit_cycle(self.client, self.outbox, self.config)
+
+        self.assertEqual(self._findings(), {local_id: "drift-simulado"})
+
+        # Reverte a corrupcao -- a proxima auditoria deve fechar o achado.
+        await pool.execute(
+            """
+            update portal.signals set content_signature = $1
+            where instance_id = $2 and source_message_id = 802
+            """,
+            original_signature,
+            TEST_INSTANCE_ID,
+        )
+        await _run_audit_cycle(self.client, self.outbox, self.config)
+
+        self.assertEqual(self._findings(), {})
+
+    async def test_auditoria_detecta_sinal_marcado_done_mas_nunca_replicado(self) -> None:
+        # Situacao hipotetica de bug (done normalmente so acontece apos um
+        # upsert real ter sucesso) -- a auditoria precisa pegar mesmo essa
+        # divergencia extrema (sinal 'done' localmente, mas ausente no
+        # Supabase de verdade).
+        await self._upsert_registry()
+        signal = self._make_signal(803)
+        local_signal_id = self.database.record_accepted(signal, "mensagem formatada")
+        self.outbox.enqueue_signal_shadow_write(signal, "mensagem formatada", local_signal_id)
+        rows = self.outbox.claim_batch(10)
+        row = next(r for r in rows if r.payload.get("source_message_id") == "803")
+        self.outbox.mark_done(row.id)  # marca done sem de fato drenar
+
+        await _run_audit_cycle(self.client, self.outbox, self.config)
+
+        self.assertEqual(self._findings(), {local_signal_id: None})
 
 
 if __name__ == "__main__":

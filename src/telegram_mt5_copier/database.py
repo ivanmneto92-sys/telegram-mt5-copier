@@ -352,6 +352,22 @@ def initialize_database(database_path: Path) -> None:
             CREATE INDEX IF NOT EXISTS central_sync_outbox_pending_idx
                 ON central_sync_outbox (status, next_attempt_at);
 
+            -- Etapa 3B: achados abertos da auditoria de conteudo contra o
+            -- Supabase real -- uma linha por sinal com content_signature
+            -- divergente (ou ausente) no central. Identidade por linha, nao
+            -- um resumo sobrescrito a cada ciclo -- mesmo motivo da correcao
+            -- da Etapa 3 (amostragem e aleatoria, um resumo unico mudaria de
+            -- sinal a cada ciclo e quebraria a supressao de repeticao).
+            -- remote_content_signature NULL distingue "nunca chegou no
+            -- Supabase" de "chegou com conteudo diferente".
+            CREATE TABLE IF NOT EXISTS central_sync_audit_findings (
+                signal_id INTEGER PRIMARY KEY,
+                detected_at TEXT NOT NULL,
+                last_checked_at TEXT NOT NULL,
+                local_content_signature TEXT NOT NULL,
+                remote_content_signature TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 telegram_user_id INTEGER NOT NULL UNIQUE,

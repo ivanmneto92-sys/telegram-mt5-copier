@@ -581,6 +581,32 @@ class CentralSyncClient:
             json.dumps(raw_payload),
         )
 
+    async def find_channel_id(self, instance_id: str, source_channel_id: int) -> Any:
+        # So-leitura, ao contrario de upsert_channel -- usado pela auditoria
+        # da Etapa 3B, que nunca pode escrever no registro central.
+        row = await self._pool.fetchrow(
+            "select id from portal.channels where instance_id = $1 and source_channel_id = $2",
+            instance_id,
+            source_channel_id,
+        )
+        return row["id"] if row is not None else None
+
+    async def fetch_signal_content_signature(
+        self, instance_id: str, channel_id: Any, source_message_id: str | None
+    ) -> str | None:
+        if source_message_id is None:
+            return None
+        row = await self._pool.fetchrow(
+            """
+            select content_signature from portal.signals
+            where instance_id = $1 and channel_id = $2 and source_message_id = $3
+            """,
+            instance_id,
+            channel_id,
+            int(source_message_id),
+        )
+        return row["content_signature"] if row is not None else None
+
     async def find_signal_id(self, instance_id: str, channel_id: Any, source_message_id: str) -> Any:
         row = await self._pool.fetchrow(
             """
@@ -800,12 +826,120 @@ async def _drain_one(client: CentralSyncClient, config: AppConfig, row: OutboxRo
     raise ValueError(f"tipo de outbox desconhecido: {row.kind!r}")
 
 
+@dataclass(frozen=True)
+class SignalAuditRow:
+    id: int
+    source_chat_id: str | None
+    source_message_id: str | None
+    content_signature: str
+
+
+def _sample_signals_to_audit(database_path: Path, sample_size: int) -> list[SignalAuditRow]:
+    """Etapa 3B: monta a amostra de um ciclo de auditoria -- primeiro todo
+    signal_id que ja tem achado aberto (pra poder fechar), depois completa ate
+    sample_size com sinais 'done' aleatorios, nunca repetindo os ja incluidos."""
+    with connect_database(database_path) as connection:
+        open_ids = [
+            row[0] for row in connection.execute("SELECT signal_id FROM central_sync_audit_findings")
+        ]
+        rows: list[tuple] = []
+        if open_ids:
+            placeholders = ",".join("?" for _ in open_ids)
+            rows = connection.execute(
+                f"""
+                SELECT id, source_chat_id, source_message_id, content_signature
+                FROM signals WHERE id IN ({placeholders})
+                """,
+                open_ids,
+            ).fetchall()
+        remaining = max(sample_size - len(rows), 0)
+        if remaining > 0:
+            exclude_clause = ""
+            params: tuple = ()
+            if open_ids:
+                exclude_clause = f"AND s.id NOT IN ({','.join('?' for _ in open_ids)})"
+                params = tuple(open_ids)
+            random_rows = connection.execute(
+                f"""
+                SELECT s.id, s.source_chat_id, s.source_message_id, s.content_signature
+                FROM signals s
+                JOIN central_sync_outbox o ON o.source_signal_id = s.id
+                WHERE o.kind = 'signal_shadow_write' AND o.status = 'done'
+                {exclude_clause}
+                ORDER BY RANDOM()
+                LIMIT ?
+                """,
+                (*params, remaining),
+            ).fetchall()
+            rows = list(rows) + list(random_rows)
+    return [
+        SignalAuditRow(id=row[0], source_chat_id=row[1], source_message_id=row[2], content_signature=row[3])
+        for row in rows
+    ]
+
+
+def _mark_audit_finding_ok(database_path: Path, signal_id: int) -> None:
+    with connect_database(database_path) as connection:
+        connection.execute(
+            "DELETE FROM central_sync_audit_findings WHERE signal_id = ?", (signal_id,)
+        ).close()
+
+
+def _record_audit_mismatch(
+    database_path: Path,
+    signal_id: int,
+    local_content_signature: str,
+    remote_content_signature: str | None,
+) -> None:
+    now = utc_now()
+    with connect_database(database_path) as connection:
+        existing = connection.execute(
+            "SELECT detected_at FROM central_sync_audit_findings WHERE signal_id = ?", (signal_id,)
+        ).fetchone()
+        detected_at = existing[0] if existing is not None else now
+        connection.execute(
+            """
+            INSERT INTO central_sync_audit_findings (
+                signal_id, detected_at, last_checked_at, local_content_signature, remote_content_signature
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(signal_id) DO UPDATE SET
+                last_checked_at = excluded.last_checked_at,
+                local_content_signature = excluded.local_content_signature,
+                remote_content_signature = excluded.remote_content_signature
+            """,
+            (signal_id, detected_at, now, local_content_signature, remote_content_signature),
+        ).close()
+
+
+async def _run_audit_cycle(client: CentralSyncClient, outbox: CentralSyncOutbox, config: AppConfig) -> None:
+    samples = await asyncio.to_thread(
+        _sample_signals_to_audit, outbox.database_path, config.central_sync_audit_sample_size
+    )
+    for row in samples:
+        channel = resolve_local_channel(outbox.database_path, row.source_chat_id)
+        remote_signature: str | None = None
+        if channel is not None:
+            channel_id = await client.find_channel_id(config.instance_id, channel.id)
+            if channel_id is not None:
+                remote_signature = await client.fetch_signal_content_signature(
+                    config.instance_id, channel_id, row.source_message_id
+                )
+        if remote_signature == row.content_signature:
+            await asyncio.to_thread(_mark_audit_finding_ok, outbox.database_path, row.id)
+        else:
+            await asyncio.to_thread(
+                _record_audit_mismatch, outbox.database_path, row.id, row.content_signature, remote_signature
+            )
+
+
 async def run_central_sync_drain_loop(
     outbox: CentralSyncOutbox,
     client: CentralSyncClient,
     config: AppConfig,
     logger: logging.Logger,
 ) -> None:
+    last_audit_at: datetime | None = None
+    audit_interval = timedelta(seconds=config.central_sync_audit_interval_seconds)
     while True:
         try:
             # Heartbeat proprio, sempre, mesmo se o resto do corpo do loop
@@ -828,6 +962,20 @@ async def run_central_sync_drain_loop(
                 except Exception as exc:
                     logger.warning("central_sync_row_failed id=%s erro=%s", row.id, exc)
                     await asyncio.to_thread(outbox.mark_failed, row.id, str(exc))
+
+            # Etapa 3B: auditoria por amostragem, so de vez em quando (nunca a
+            # cada poll de 5s) -- reaproveita a mesma conexao ja resiliente
+            # acima. Erro aqui nunca pode derrubar o loop de drenagem, que e a
+            # prioridade real; so essa auditoria e pulada e retentada no
+            # proximo ciclo (last_audit_at ainda avanca mesmo em erro, pra nao
+            # martelar o Supabase a cada 5s numa falha persistente).
+            now = datetime.now(tz=timezone.utc)
+            if last_audit_at is None or now - last_audit_at >= audit_interval:
+                try:
+                    await _run_audit_cycle(client, outbox, config)
+                except Exception as exc:
+                    logger.warning("central_sync_audit_cycle_failed: %s", exc)
+                last_audit_at = now
         except asyncio.CancelledError:
             raise
         except Exception as exc:

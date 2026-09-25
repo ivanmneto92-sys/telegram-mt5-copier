@@ -113,6 +113,8 @@ class AppConfig:
     central_sync_poll_seconds: int
     central_sync_max_batch: int
     central_sync_delivery_lag_seconds: int
+    central_sync_audit_sample_size: int
+    central_sync_audit_interval_seconds: int
     backup_encryption_key: str | None = field(repr=False)
     backup_retention_days: int
     b2_key_id: str | None = field(repr=False)
@@ -274,6 +276,14 @@ class AppConfig:
             central_sync_delivery_lag_seconds=parse_positive_int(
                 _value("CENTRAL_SYNC_DELIVERY_LAG_SECONDS", file_values, runtime_env, "600"),
                 "CENTRAL_SYNC_DELIVERY_LAG_SECONDS",
+            ),
+            central_sync_audit_sample_size=parse_positive_int(
+                _value("CENTRAL_SYNC_AUDIT_SAMPLE_SIZE", file_values, runtime_env, "5"),
+                "CENTRAL_SYNC_AUDIT_SAMPLE_SIZE",
+            ),
+            central_sync_audit_interval_seconds=parse_positive_int(
+                _value("CENTRAL_SYNC_AUDIT_INTERVAL_SECONDS", file_values, runtime_env, "1800"),
+                "CENTRAL_SYNC_AUDIT_INTERVAL_SECONDS",
             ),
             backup_encryption_key=_optional_value(
                 "BACKUP_ENCRYPTION_KEY", file_values, runtime_env

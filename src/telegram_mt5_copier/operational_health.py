@@ -53,6 +53,7 @@ class OperationalHealthMonitor:
                 *self._account_issues(current_time),
                 *self._signal_monitor_issues(current_time),
                 *self._central_sync_issues(current_time),
+                *self._central_sync_audit_issues(),
             )
         }
         self._synchronize(issues, current_time)
@@ -164,8 +165,8 @@ class OperationalHealthMonitor:
         """Saude da replicacao LOCAL (sinal -> outbox -> drenado) pro backend
         central (Etapa 2/3). So confirma que a tentativa de replicar aconteceu
         e terminou -- nao confere se o conteudo que chegou no Supabase esta
-        correto (isso e uma auditoria por amostragem contra o Postgres central,
-        Etapa 3B, ainda nao implementada)."""
+        correto (isso e a auditoria por amostragem contra o Postgres central,
+        Etapa 3B, ver _central_sync_audit_issues logo abaixo)."""
         if not self.config.central_sync_enabled:
             return []
 
@@ -266,6 +267,47 @@ class OperationalHealthMonitor:
                     )
                 )
 
+        return issues
+
+    def _central_sync_audit_issues(self) -> list[HealthIssue]:
+        """Etapa 3B: le os achados abertos da auditoria por amostragem contra
+        o Supabase real (gravados por central_sync._run_audit_cycle) e emite
+        um HealthIssue por achado -- cada um com sua propria chave estavel
+        (signal_id), nao um resumo unico reescrito a cada ciclo. Isso reusa o
+        _synchronize generico (abre/fecha/repete por chave) sem precisar de
+        nenhuma logica nova de ancora: um achado some da tabela (resolvido) e
+        vira recuperacao automatica; um achado novo abre um alerta novo."""
+        if not self.config.central_sync_enabled:
+            return []
+        with connect_database(self.config.database_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT signal_id, detected_at, local_content_signature, remote_content_signature
+                FROM central_sync_audit_findings
+                ORDER BY signal_id
+                """
+            ).fetchall()
+        issues: list[HealthIssue] = []
+        for row in rows:
+            signal_id = int(row[0])
+            detected_at = row[1]
+            remote_content_signature = row[3]
+            if remote_content_signature is None:
+                summary = f"Sinal local id={signal_id} não foi encontrado no Supabase (detectado em {detected_at})."
+            else:
+                summary = (
+                    f"Sinal local id={signal_id} tem content_signature diferente no Supabase "
+                    f"(detectado em {detected_at})."
+                )
+            issues.append(
+                HealthIssue(
+                    key=f"central_sync:audit_mismatch:{signal_id}",
+                    alert_type="central_sync_audit_mismatch",
+                    entity_id=str(signal_id),
+                    title="Sincronização central",
+                    summary=summary,
+                )
+            )
         return issues
 
     def _silently_resolve_central_sync_alerts(self, current_time: datetime) -> None:
@@ -435,7 +477,12 @@ def alert_title(alert_type: str, entity_id: object) -> str:
         return f"Worker da conta {entity_id}"
     if alert_type == "mt5_connection":
         return f"Conexão MT5 da conta {entity_id}"
-    if alert_type in ("central_sync_enqueue_gap", "central_sync_delivery_lag", "central_sync_drain_stale"):
+    if alert_type in (
+        "central_sync_enqueue_gap",
+        "central_sync_delivery_lag",
+        "central_sync_drain_stale",
+        "central_sync_audit_mismatch",
+    ):
         return "Sincronização central"
     return str(entity_id or "Serviço")
 

@@ -14,7 +14,12 @@ from tests.central_sync_execution_helpers import (
 )
 from telegram_mt5_copier.central_sync import (
     CentralSyncOutbox,
+    SignalAuditRow,
     _drain_one,
+    _mark_audit_finding_ok,
+    _record_audit_mismatch,
+    _run_audit_cycle,
+    _sample_signals_to_audit,
     build_execution_job_outbox_payload,
     build_execution_key,
     build_outbox_payload,
@@ -648,6 +653,123 @@ class UpgradeFromEtapa2Tests(unittest.TestCase):
             temp_dir.cleanup()
 
 
+class AuditSamplingTests(unittest.TestCase):
+    """Etapa 3B: _sample_signals_to_audit precisa (a) so pegar sinais com
+    outbox 'done' (pendente/falho sao alcada da Etapa 3, nao da auditoria) e
+    (b) sempre incluir achados ja abertos, completando o resto com aleatorios."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.database_path = Path(self.temp_dir.name) / "signals.sqlite3"
+        self.database = SignalDatabase(self.database_path)
+        self.database.initialize()
+        ChannelCatalogService(self.database_path).register_configured_channel(
+            telegram_chat_id="123456",
+            title="Canal VIP",
+            username=None,
+            content_protected=False,
+            history_accessible=True,
+            last_message_id=None,
+        )
+        self.outbox = CentralSyncOutbox(self.database_path)
+
+    def tearDown(self) -> None:
+        self.database.close()
+        self.temp_dir.cleanup()
+
+    def _seed_signal_with_status(self, source_message_id: int, *, status: str) -> int:
+        signal = TradeSignal(
+            symbol="XAUUSD",
+            direction=Direction.BUY,
+            entry_low=Decimal("4103"),
+            entry_high=Decimal("4105"),
+            stop_loss=Decimal("4090"),
+            take_profits=(Decimal("4110"), Decimal("4115")),
+            raw_text=BUY_VALID,
+            source_chat_id="123456",
+            source_message_id=source_message_id,
+        )
+        local_signal_id = self.database.record_accepted(signal, "mensagem formatada")
+        self.outbox.enqueue_signal_shadow_write(signal, "mensagem formatada", local_signal_id)
+        if status == "pending":
+            return local_signal_id
+        rows = self.outbox.claim_batch(10)
+        row = next(r for r in rows if r.payload.get("source_message_id") == str(source_message_id))
+        if status == "done":
+            self.outbox.mark_done(row.id)
+        elif status == "failed":
+            self.outbox.mark_failed(row.id, "erro simulado")
+        return local_signal_id
+
+    def test_amostra_so_pega_sinais_com_outbox_done(self) -> None:
+        done_id = self._seed_signal_with_status(101, status="done")
+        pending_id = self._seed_signal_with_status(102, status="pending")
+        failed_id = self._seed_signal_with_status(103, status="failed")
+
+        sample_ids = {row.id for row in _sample_signals_to_audit(self.database_path, 10)}
+
+        self.assertIn(done_id, sample_ids)
+        self.assertNotIn(pending_id, sample_ids)
+        self.assertNotIn(failed_id, sample_ids)
+
+    def test_amostra_inclui_achados_abertos_e_completa_com_aleatorios(self) -> None:
+        ids = [self._seed_signal_with_status(200 + i, status="done") for i in range(5)]
+        _record_audit_mismatch(self.database_path, ids[0], "sig-local", "sig-remoto-diferente")
+
+        sample = _sample_signals_to_audit(self.database_path, sample_size=2)
+
+        sample_ids = [row.id for row in sample]
+        self.assertIn(ids[0], sample_ids)
+        self.assertEqual(len(sample_ids), 2)
+
+    def test_amostra_vazia_quando_nao_ha_sinais_done(self) -> None:
+        self.assertEqual(_sample_signals_to_audit(self.database_path, 5), [])
+
+
+class AuditFindingsLifecycleTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.database_path = Path(self.temp_dir.name) / "signals.sqlite3"
+        SignalDatabase(self.database_path).initialize()
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def _findings(self) -> list[tuple]:
+        with connect_database(self.database_path) as connection:
+            return connection.execute(
+                "SELECT signal_id, remote_content_signature FROM central_sync_audit_findings"
+            ).fetchall()
+
+    def test_record_mismatch_cria_linha_e_mark_ok_remove(self) -> None:
+        _record_audit_mismatch(self.database_path, 1, "sig-local", "sig-remoto")
+        self.assertEqual(len(self._findings()), 1)
+
+        _mark_audit_finding_ok(self.database_path, 1)
+        self.assertEqual(self._findings(), [])
+
+    def test_record_mismatch_repetido_atualiza_sem_duplicar_e_preserva_detected_at(self) -> None:
+        _record_audit_mismatch(self.database_path, 1, "sig-local", None)
+        with connect_database(self.database_path) as connection:
+            (detected_at_1,) = connection.execute(
+                "SELECT detected_at FROM central_sync_audit_findings WHERE signal_id = 1"
+            ).fetchone()
+
+        _record_audit_mismatch(self.database_path, 1, "sig-local", "sig-remoto-agora")
+
+        rows = self._findings()
+        self.assertEqual(rows, [(1, "sig-remoto-agora")])
+        with connect_database(self.database_path) as connection:
+            (detected_at_2,) = connection.execute(
+                "SELECT detected_at FROM central_sync_audit_findings WHERE signal_id = 1"
+            ).fetchone()
+        self.assertEqual(detected_at_1, detected_at_2)
+
+    def test_mark_ok_em_signal_id_sem_achado_e_no_op(self) -> None:
+        _mark_audit_finding_ok(self.database_path, 999)
+        self.assertEqual(self._findings(), [])
+
+
 class DrainOneUnknownKindTests(unittest.IsolatedAsyncioTestCase):
     async def test_kind_desconhecido_levanta_em_vez_de_ser_ignorado(self) -> None:
         from telegram_mt5_copier.central_sync import OutboxRow
@@ -951,6 +1073,105 @@ class ListenerExecutionMirrorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.status, DecisionStatus.ACCEPTED)
 
 
+class FakeAuditClient:
+    """Simula CentralSyncClient so com o que _run_audit_cycle precisa,
+    mapeando source_message_id -> content_signature 'central'."""
+
+    def __init__(self, remote_signatures_by_message_id: dict[int, str]) -> None:
+        self.remote_signatures = remote_signatures_by_message_id
+        self.calls: list[tuple] = []
+
+    async def find_channel_id(self, instance_id, source_channel_id):
+        return source_channel_id  # mapeamento identidade -- suficiente pros testes
+
+    async def fetch_signal_content_signature(self, instance_id, channel_id, source_message_id):
+        self.calls.append((instance_id, channel_id, source_message_id))
+        return self.remote_signatures.get(int(source_message_id))
+
+
+class RunAuditCycleTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.database_path = Path(self.temp_dir.name) / "signals.sqlite3"
+        self.database = SignalDatabase(self.database_path)
+        self.database.initialize()
+        ChannelCatalogService(self.database_path).register_configured_channel(
+            telegram_chat_id="123456",
+            title="Canal VIP",
+            username=None,
+            content_protected=False,
+            history_accessible=True,
+            last_message_id=None,
+        )
+        self.outbox = CentralSyncOutbox(self.database_path)
+        self.config = FakeConfig()
+
+    async def asyncTearDown(self) -> None:
+        self.database.close()
+        self.temp_dir.cleanup()
+
+    def _seed_done_signal(self, source_message_id: int) -> tuple[int, str]:
+        signal = TradeSignal(
+            symbol="XAUUSD",
+            direction=Direction.BUY,
+            entry_low=Decimal("4103"),
+            entry_high=Decimal("4105"),
+            stop_loss=Decimal("4090"),
+            take_profits=(Decimal("4110"), Decimal("4115")),
+            raw_text=BUY_VALID,
+            source_chat_id="123456",
+            source_message_id=source_message_id,
+        )
+        local_signal_id = self.database.record_accepted(signal, "mensagem formatada")
+        self.outbox.enqueue_signal_shadow_write(signal, "mensagem formatada", local_signal_id)
+        rows = self.outbox.claim_batch(10)
+        row = next(r for r in rows if r.payload.get("source_message_id") == str(source_message_id))
+        self.outbox.mark_done(row.id)
+        return local_signal_id, signal.content_signature
+
+    def _findings(self) -> dict[int, str | None]:
+        with connect_database(self.database_path) as connection:
+            return {
+                row[0]: row[1]
+                for row in connection.execute(
+                    "SELECT signal_id, remote_content_signature FROM central_sync_audit_findings"
+                )
+            }
+
+    async def test_conteudo_batendo_nao_cria_achado(self) -> None:
+        local_id, content_signature = self._seed_done_signal(301)
+        client = FakeAuditClient({301: content_signature})
+
+        await _run_audit_cycle(client, self.outbox, self.config)
+
+        self.assertEqual(self._findings(), {})
+
+    async def test_conteudo_diferente_cria_achado(self) -> None:
+        local_id, content_signature = self._seed_done_signal(302)
+        client = FakeAuditClient({302: "outra-assinatura-completamente-diferente"})
+
+        await _run_audit_cycle(client, self.outbox, self.config)
+
+        self.assertEqual(self._findings(), {local_id: "outra-assinatura-completamente-diferente"})
+
+    async def test_sinal_ausente_no_supabase_cria_achado_com_remote_none(self) -> None:
+        local_id, _ = self._seed_done_signal(303)
+        client = FakeAuditClient({})
+
+        await _run_audit_cycle(client, self.outbox, self.config)
+
+        self.assertEqual(self._findings(), {local_id: None})
+
+    async def test_achado_existente_que_agora_bate_e_removido(self) -> None:
+        local_id, content_signature = self._seed_done_signal(304)
+        _record_audit_mismatch(self.database_path, local_id, content_signature, "algo-velho-diferente")
+        client = FakeAuditClient({304: content_signature})
+
+        await _run_audit_cycle(client, self.outbox, self.config)
+
+        self.assertEqual(self._findings(), {})
+
+
 class FakeConfig:
     def __init__(self) -> None:
         self.node_id = "dev-local"
@@ -959,6 +1180,10 @@ class FakeConfig:
         self.brand_name = "Test Brand"
         self.central_sync_max_batch = 20
         self.central_sync_poll_seconds = 0.01
+        self.central_sync_audit_sample_size = 5
+        # Bem maior que a janela do teste de resiliencia -- a auditoria nao
+        # precisa disparar ali, so o drenar/reconectar esta sendo exercitado.
+        self.central_sync_audit_interval_seconds = 999999
 
 
 class FlakyThenHealthyClient:

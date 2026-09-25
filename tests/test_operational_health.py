@@ -263,6 +263,17 @@ class CentralSyncHealthTests(unittest.TestCase):
                 (CENTRAL_SYNC_SERVICE_NAME, heartbeat_at),
             ).close()
 
+    def _insert_audit_finding(self, signal_id: int, *, remote_content_signature: str | None) -> None:
+        with connect_database(self.config.database_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO central_sync_audit_findings (
+                    signal_id, detected_at, last_checked_at, local_content_signature, remote_content_signature
+                ) VALUES (?, ?, ?, 'sig-local', ?)
+                """,
+                (signal_id, self.now.isoformat(), self.now.isoformat(), remote_content_signature),
+            ).close()
+
     def test_gap_alerta_quando_sinal_sem_outbox_apos_baseline(self) -> None:
         self._insert_activation(activation_signal_id=0)
         self._insert_signal(self.now.isoformat(), source_message_id=1)  # sem outbox correspondente
@@ -348,6 +359,103 @@ class CentralSyncHealthTests(unittest.TestCase):
 
         keys = [issue.key for issue in issues]
         self.assertNotIn("central_sync:drain_stale", keys)
+
+    def test_audit_mismatch_alerta_quando_achado_aberto(self) -> None:
+        self._insert_audit_finding(42, remote_content_signature="sig-remoto-diferente")
+
+        issues = self.monitor.check_once()
+
+        keys = [issue.key for issue in issues]
+        self.assertIn("central_sync:audit_mismatch:42", keys)
+
+    def test_audit_mismatch_sem_achado_nao_alerta(self) -> None:
+        issues = self.monitor.check_once()
+
+        keys = [issue.key for issue in issues]
+        self.assertFalse(any(key.startswith("central_sync:audit_mismatch:") for key in keys))
+
+    def test_audit_mismatch_distingue_ausente_de_diferente_no_resumo(self) -> None:
+        self._insert_audit_finding(10, remote_content_signature=None)
+        self._insert_audit_finding(20, remote_content_signature="algo-diferente")
+
+        issues = self.monitor.check_once()
+
+        by_key = {issue.key: issue for issue in issues}
+        self.assertIn("não foi encontrado", by_key["central_sync:audit_mismatch:10"].summary)
+        self.assertIn("diferente", by_key["central_sync:audit_mismatch:20"].summary)
+
+    def test_multiplos_achados_de_auditoria_nao_colidem_cada_um_tem_chave_propria(self) -> None:
+        # Prova o desenho por chave (identidade por achado) -- nao o bug de
+        # ancora unica ja corrigido uma vez nesta mesma etapa 3.
+        self._insert_audit_finding(10, remote_content_signature="a")
+        self._insert_audit_finding(20, remote_content_signature="b")
+
+        issues = self.monitor.check_once()
+
+        keys = {issue.key for issue in issues}
+        self.assertIn("central_sync:audit_mismatch:10", keys)
+        self.assertIn("central_sync:audit_mismatch:20", keys)
+        self.assertEqual(len(self.notifier.messages), 2)
+
+    def test_achado_de_auditoria_resolvido_gera_recuperacao(self) -> None:
+        self._insert_audit_finding(42, remote_content_signature="sig-remoto-diferente")
+        self.monitor.check_once()
+        self.assertEqual(len(self.notifier.messages), 1)
+
+        with connect_database(self.config.database_path) as connection:
+            connection.execute(
+                "DELETE FROM central_sync_audit_findings WHERE signal_id = 42"
+            ).close()
+        self._touch_healthy_heartbeats()
+        self.monitor.check_once()
+
+        self.assertEqual(len(self.notifier.messages), 2)
+        self.assertIn("SERVIÇO RECUPERADO", self.notifier.messages[1])
+
+    def test_central_sync_desabilitado_ignora_achados_de_auditoria(self) -> None:
+        disabled_config = AppConfig.load(
+            project_root=self.root,
+            env={
+                "HEALTH_STALE_AFTER_SECONDS": "90",
+                "OPERATIONAL_ALERT_REPEAT_MINUTES": "360",
+                "CENTRAL_SYNC_ENABLED": "false",
+            },
+            create_dirs=True,
+        )
+        monitor = OperationalHealthMonitor(
+            disabled_config, notifier=self.notifier, logger=_NullLogger(), now=lambda: self.now  # type: ignore[arg-type]
+        )
+        self._insert_audit_finding(42, remote_content_signature="x")
+
+        issues = monitor.check_once()
+
+        self.assertFalse(any(issue.key.startswith("central_sync:audit_mismatch:") for issue in issues))
+
+    def test_desligar_central_sync_com_achado_de_auditoria_ativo_nao_anuncia_falsa_recuperacao(self) -> None:
+        self._insert_audit_finding(42, remote_content_signature="x")
+        self.monitor.check_once()
+        self.assertEqual(len(self.notifier.messages), 1)
+
+        disabled_config = AppConfig.load(
+            project_root=self.root,
+            env={
+                "HEALTH_STALE_AFTER_SECONDS": "90",
+                "OPERATIONAL_ALERT_REPEAT_MINUTES": "360",
+                "CENTRAL_SYNC_ENABLED": "false",
+            },
+            create_dirs=True,
+        )
+        monitor = OperationalHealthMonitor(
+            disabled_config, notifier=self.notifier, logger=_NullLogger(), now=lambda: self.now  # type: ignore[arg-type]
+        )
+        monitor.check_once()
+
+        self.assertEqual(len(self.notifier.messages), 1)
+        with connect_database(self.config.database_path) as connection:
+            row = connection.execute(
+                "SELECT is_active FROM operational_alert_states WHERE alert_key = 'central_sync:audit_mismatch:42'"
+            ).fetchone()
+        self.assertEqual(row, (0,))
 
     def test_central_sync_desabilitado_nao_gera_nenhum_alerta(self) -> None:
         disabled_config = AppConfig.load(

@@ -783,9 +783,21 @@ no mínimo; `verify-full` com o certificado CA quando possível).
 
 O papel de banco usado pelo shadow-write é `central_sync_vps` — privilégio
 mínimo, sem acesso a nada fora de `portal.nodes`/`instances`/`channels`/
-`signals` e a função `portal.append_signal_revision`. A senha desse papel
-nunca deve aparecer em código, commit ou conversa — defina/redefina direto no
-painel do Supabase (Database → Roles) e guarde num gerenciador de senhas.
+`signals`/`customers`/`mt5_accounts`/`execution_jobs`/`execution_job_orders`
+e a função `portal.append_signal_revision`. A senha desse papel nunca deve
+aparecer em código, commit ou conversa — defina/redefina direto no painel do
+Supabase (Database → Roles) e guarde num gerenciador de senhas.
+
+**Auditoria de conteúdo (Etapa 3B)**: o loop de drenagem, de tempos em tempos
+(`CENTRAL_SYNC_AUDIT_INTERVAL_SECONDS`, padrão 30min), amostra
+`CENTRAL_SYNC_AUDIT_SAMPLE_SIZE` sinais já drenados (padrão 5) e compara o
+`content_signature` local contra o que está de fato em `portal.signals` no
+Supabase — não só se a réplica local está íntegra (isso já é o que as três
+checagens da Etapa 3 fazem), mas se o conteúdo que chegou lá está correto de
+verdade. Divergências (ou um sinal que nunca chegou) viram um alerta
+operacional por sinal (`central_sync:audit_mismatch:<id>`), que some sozinho
+quando uma auditoria seguinte confirma que o conteúdo voltou a bater. Só
+leitura — nunca corrige nada automaticamente.
 
 ## Backup
 
