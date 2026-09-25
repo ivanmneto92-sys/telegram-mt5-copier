@@ -782,6 +782,65 @@ SL 4560"""
         )
         self.assertEqual(validate_signal(decision.signal).status, DecisionStatus.ACCEPTED)
 
+    def test_royal_pips_com_todos_os_precos_entre_parenteses(self) -> None:
+        # Raw text from Royal Pips message 21014.  The channel changed from
+        # "Target1) 4416" to "TARGET 1 ( 4365 )"; the old TP expression
+        # mistook the target index for the price and could not read the SL.
+        decision = parse_signal_text(
+            "#XAUUSD\xa0SELL NOW ( 4369 )✅\n\n"
+            "📊 TARGET 1\xa0\xa0( 4365\xa0 )✅\n"
+            "📊 TARGET 2\xa0\xa0( 4361\xa0 )✅\n"
+            "📊 TARGET 3\xa0 ( 4357\xa0 )✅\n"
+            "📊 TARGET 4\xa0\xa0( 4350\xa0 )✅\n\n"
+            "❌STOP LOSS\xa0 \xa0\xa0\xa0(\xa04380 )\n\n"
+            "RISK MANAGEMENT IS IMPORTANT ✅"
+        )
+
+        self.assertEqual(decision.status, DecisionStatus.ACCEPTED)
+        self.assertEqual(decision.signal.symbol, "XAUUSD")
+        self.assertEqual(decision.signal.direction, Direction.SELL)
+        self.assertEqual(decision.signal.entry_low, Decimal("4369"))
+        self.assertEqual(decision.signal.entry_high, Decimal("4369"))
+        self.assertEqual(decision.signal.stop_loss, Decimal("4380"))
+        self.assertEqual(
+            decision.signal.take_profits,
+            (Decimal("4365"), Decimal("4361"), Decimal("4357"), Decimal("4350")),
+        )
+        self.assertEqual(validate_signal(decision.signal).status, DecisionStatus.ACCEPTED)
+
+    def test_royal_pips_foto_com_legenda_e_precos_entre_parenteses(self) -> None:
+        # Raw caption from Royal Pips message 21023.  Media type is
+        # irrelevant once Telegram supplies a caption; it follows the same
+        # parser path as a text message and must preserve every price.
+        decision = parse_signal_text(
+            "📊XAUUSD\xa0SELL NOW ( 4321 )✅\n\n"
+            "📊 TARGET 1\xa0\xa0( 4317\xa0 )✅\n"
+            "📊 TARGET 2\xa0\xa0( 4313\xa0 )✅\n"
+            "📊 TARGET 3\xa0 ( 4309\xa0 )✅\n"
+            "📊 TARGET 4\xa0\xa0( 4300\xa0 )✅\n\n"
+            "❌STOP LOSS\xa0 \xa0\xa0\xa0(\xa04333 )\n\n"
+            "RISK MANAGEMENT IS IMPORTANT ✅"
+        )
+
+        self.assertEqual(decision.status, DecisionStatus.ACCEPTED)
+        self.assertEqual(decision.signal.symbol, "XAUUSD")
+        self.assertEqual(decision.signal.direction, Direction.SELL)
+        self.assertEqual(decision.signal.entry_low, Decimal("4321"))
+        self.assertEqual(decision.signal.entry_high, Decimal("4321"))
+        self.assertEqual(decision.signal.stop_loss, Decimal("4333"))
+        self.assertEqual(
+            decision.signal.take_profits,
+            (Decimal("4317"), Decimal("4313"), Decimal("4309"), Decimal("4300")),
+        )
+        self.assertEqual(validate_signal(decision.signal).status, DecisionStatus.ACCEPTED)
+
+    def test_royal_pips_alerta_sem_precos_continua_rejeitado(self) -> None:
+        decision = parse_signal_text("XAUUSD SELL NOW")
+
+        self.assertEqual(decision.status, DecisionStatus.REJECTED)
+        self.assertEqual(decision.reason, "missing_entry")
+        self.assertIsNone(decision.signal)
+
     def test_forex_gold_com_preco_direto_apos_direcao_e_ativo(self) -> None:
         decision = parse_signal_text(
             "SIGNAL ALERT 💥💥\n\n"
