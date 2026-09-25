@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 from decimal import Decimal
 import json
 from pathlib import Path
@@ -372,6 +373,10 @@ class RealExecutionBackendTests(unittest.IsolatedAsyncioTestCase):
             MT5AccountForm("Broker", "Broker-Demo", "12345678", "secret", "Demo"),
         )
         self.accounts_service.update_execution_profile_fixed_lot(self.user.id, self.account.id, Decimal("0.04"))
+        # RealExecutionBackend so executa contas listadas em QUEUE_PILOT_ACCOUNT_IDS
+        # (trava contra reexecutar por engano o espelho de uma conta real nao-piloto)
+        # -- so da pra saber o id depois de criar a conta acima.
+        self.config = dataclasses.replace(self.config, queue_pilot_account_ids=(self.account.id,))
 
     async def asyncTearDown(self) -> None:
         self.accounts_service.close()
@@ -442,6 +447,22 @@ class RealExecutionBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second.result.get("duplicate"), True)
         self.assertIsNone(second.orders)
         self.assertEqual(len(client.order_send_requests), 2)  # so a primeira chamada enviou de verdade
+
+    async def test_conta_fora_de_queue_pilot_account_ids_e_recusada_sem_executar(self) -> None:
+        # Simula o cenario real de risco encontrado na Etapa 5e: um job
+        # espelho de uma conta NAO-piloto (Etapa 2/5a, qualquer conta
+        # demo/live real) acaba reivindicado por engano -- o backend precisa
+        # recusar sem nunca chamar execute_for_account, mesmo que o payload
+        # seja perfeitamente valido.
+        config_sem_piloto = dataclasses.replace(self.config, queue_pilot_account_ids=())
+        client = SimulatedMT5Client(tick=TickInfo(bid=Decimal("4062"), ask=Decimal("4062")))
+        backend = RealExecutionBackend(config_sem_piloto, client_factory=lambda: client)
+
+        with self.assertRaises(ExecutionBackendError):
+            await backend.execute({"payload": self._payload()})
+
+        self.assertEqual(len(client.order_send_requests), 0)
+        self.assertEqual(len(client.order_check_requests), 0)
 
     async def test_payload_sem_campo_obrigatorio_levanta_execution_backend_error(self) -> None:
         client = SimulatedMT5Client(tick=TickInfo(bid=Decimal("4062"), ask=Decimal("4062")))

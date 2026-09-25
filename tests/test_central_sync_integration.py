@@ -5,6 +5,7 @@ nunca tocam em Supabase remoto nem na VPS."""
 from __future__ import annotations
 
 from decimal import Decimal
+import json
 from pathlib import Path
 import socket
 import tempfile
@@ -809,6 +810,42 @@ class ExecutionJobPilotPendingIntegrationTests(unittest.IsolatedAsyncioTestCase)
             "select status from portal.execution_job_orders where execution_job_id = $1", job_row["id"]
         )
         self.assertEqual(order_rows, [])
+
+    async def test_job_pilot_carrega_sinal_bruto_completo_no_payload_remoto(self) -> None:
+        # Regressao: _drain_one originalmente so gravava {"orders": []} na
+        # coluna payload de portal.execution_jobs pro kind piloto, perdendo
+        # symbol/direction/entry/SL/TPs/local_user_id/local_account_id -- sem
+        # isso o agente (RealExecutionBackend/_signal_from_payload) nao tem
+        # como reconstruir o sinal nem resolver a conta local ao reivindicar
+        # o job de verdade.
+        await self._upsert_registry()
+        signal = self._make_signal(822)
+        self.outbox.enqueue_signal_shadow_write(signal, "mensagem formatada", 8822)
+        signal_row = next(r for r in self.outbox.claim_batch(10) if r.kind == "signal_shadow_write")
+        await _drain_one(self.client, self.config, signal_row)
+        self.outbox.mark_done(signal_row.id)
+
+        self.outbox.enqueue_execution_job_pilot_pending(signal, self.account, 8822)
+        pilot_row = next(r for r in self.outbox.claim_batch(10) if r.kind == "execution_job_pilot_pending")
+        await _drain_one(self.client, self.config, pilot_row)
+        self.outbox.mark_done(pilot_row.id)
+
+        pool = self.client._pool
+        remote_payload = await pool.fetchval(
+            "select j.payload from portal.execution_jobs j "
+            "join portal.mt5_accounts a on a.id = j.mt5_account_id where a.instance_id = $1",
+            TEST_INSTANCE_ID,
+        )
+        payload = json.loads(remote_payload)
+        self.assertEqual(payload["symbol"], "XAUUSD")
+        self.assertEqual(payload["direction"], "BUY")
+        self.assertEqual(payload["entry_low"], "4103")
+        self.assertEqual(payload["entry_high"], "4105")
+        self.assertEqual(payload["stop_loss"], "4090")
+        self.assertEqual(payload["take_profits"], ["4110", "4115"])
+        self.assertEqual(payload["local_user_id"], self.user_id)
+        self.assertEqual(payload["local_account_id"], self.account_id)
+        self.assertEqual(payload["orders"], [])
 
     async def test_job_pilot_sem_sinal_ainda_replicado_e_reentado_depois(self) -> None:
         await self._upsert_registry()

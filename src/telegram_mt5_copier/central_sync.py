@@ -1028,6 +1028,29 @@ async def _drain_one(client: CentralSyncClient, config: AppConfig, row: OutboxRo
             # execucao sao dois itens separados do mesmo outbox) -- levanta pra
             # cair no backoff normal e ser retentado, nao um erro permanente.
             raise ValueError("sinal ainda nao replicado no Supabase -- retentando")
+        if row.kind == OUTBOX_KIND_EXECUTION_JOB_PILOT_PENDING:
+            # So o kind piloto precisa do sinal bruto no payload remoto -- e o
+            # unico que o agente de execucao (RealExecutionBackend) de fato
+            # reivindica e executa de verdade. Os outros dois kinds sao
+            # espelhos informativos de uma execucao LOCAL ja decidida --
+            # nunca devem ser executados de novo remotamente (ver a trava
+            # correspondente em execution_agent.py, que so executa contas em
+            # QUEUE_PILOT_ACCOUNT_IDS).
+            remote_payload = {
+                "orders": payload["orders"],
+                "symbol": payload["symbol"],
+                "direction": payload["direction"],
+                "entry_low": payload["entry_low"],
+                "entry_high": payload["entry_high"],
+                "stop_loss": payload["stop_loss"],
+                "take_profits": payload["take_profits"],
+                "raw_text": payload["raw_text"],
+                "source_chat_id": payload["source_chat_id"],
+                "local_user_id": payload["local_user_id"],
+                "local_account_id": payload["local_account_id"],
+            }
+        else:
+            remote_payload = {"orders": payload["orders"]}
         job_id = await client.upsert_execution_job(
             config.instance_id,
             account_id,
@@ -1037,7 +1060,7 @@ async def _drain_one(client: CentralSyncClient, config: AppConfig, row: OutboxRo
             payload["status"],
             last_error_code=payload["last_error_code"],
             last_error_message=payload["last_error_message"],
-            payload={"orders": payload["orders"]},
+            payload=remote_payload,
         )
         await client.upsert_execution_job_orders(job_id, payload["orders"])
         return
