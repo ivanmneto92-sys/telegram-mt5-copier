@@ -10,10 +10,12 @@ from tests.central_sync_execution_helpers import (
     make_execution_group,
     make_execution_order,
     make_mt5_account,
+    make_pending_order_plan,
     seed_customer_and_account,
 )
 from telegram_mt5_copier.central_sync import (
     CentralSyncOutbox,
+    OUTBOX_KIND_EXECUTION_JOB_PENDING,
     SignalAuditRow,
     _drain_one,
     _mark_audit_finding_ok,
@@ -21,6 +23,7 @@ from telegram_mt5_copier.central_sync import (
     _run_audit_cycle,
     _sample_signals_to_audit,
     build_execution_job_outbox_payload,
+    build_execution_job_pending_payload,
     build_execution_key,
     build_outbox_payload,
     resolve_local_channel,
@@ -309,6 +312,64 @@ class BuildExecutionJobOutboxPayloadTests(unittest.TestCase):
         self.assertNotEqual(expected, build_execution_key(self.signal.content_signature, 1))
 
 
+class BuildExecutionJobPendingPayloadTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.database_path = Path(self.temp_dir.name) / "signals.sqlite3"
+        SignalDatabase(self.database_path).initialize()
+        self.user_id, self.account_id = seed_customer_and_account(self.database_path)
+        self.account = make_mt5_account(self.account_id, self.user_id)
+        self.signal = make_signal()
+        from telegram_mt5_copier.central_sync import ChannelRow
+
+        self.channel = ChannelRow(id=7, telegram_chat_id="123456", title="Canal VIP", status="active", access_status="confirmed")
+        self.customer_account = resolve_local_customer_and_account(self.database_path, self.account_id)
+        self.group = make_execution_group(1, self.account, self.signal)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_status_pending_sem_ticket_nenhum(self) -> None:
+        plan = make_pending_order_plan(self.account, self.signal)
+
+        payload = build_execution_job_pending_payload(self.signal, self.channel, self.customer_account, self.group, plan)
+
+        self.assertEqual(payload["status"], "pending")
+        self.assertIsNone(payload["last_error_code"])
+        self.assertIsNone(payload["last_error_message"])
+        self.assertEqual(len(payload["orders"]), 2)
+        for order_payload in payload["orders"]:
+            self.assertEqual(order_payload["status"], "pending")
+            self.assertIsNone(order_payload["mt5_order_ticket"])
+            self.assertIsNone(order_payload["retcode"])
+
+    def test_execution_key_bate_com_o_payload_de_resultado_do_mesmo_grupo(self) -> None:
+        # Os dois payloads (pending e resultado) precisam concordar no MESMO
+        # execution_key por TP -- e o que permite os dois writes convergirem
+        # pra mesma linha central via on conflict (execution_job_id, tp_index).
+        plan = make_pending_order_plan(self.account, self.signal, tp_indices=(1,))
+        pending_payload = build_execution_job_pending_payload(
+            self.signal, self.channel, self.customer_account, self.group, plan
+        )
+        outcome_orders = (make_execution_order(self.group.id, 1),)
+        outcome_payload = build_execution_job_outbox_payload(
+            self.signal, self.channel, self.customer_account, self.group, outcome_orders, rejected_reason=None
+        )
+
+        self.assertEqual(pending_payload["orders"][0]["execution_key"], outcome_payload["orders"][0]["execution_key"])
+
+    def test_identidade_de_canal_cliente_conta_igual_ao_payload_de_resultado(self) -> None:
+        plan = make_pending_order_plan(self.account, self.signal)
+
+        pending_payload = build_execution_job_pending_payload(
+            self.signal, self.channel, self.customer_account, self.group, plan
+        )
+
+        self.assertEqual(pending_payload["source_channel_id"], self.channel.id)
+        self.assertEqual(pending_payload["customer"]["source_user_id"], self.user_id)
+        self.assertEqual(pending_payload["account"]["source_account_id"], self.account_id)
+
+
 class CentralSyncOutboxTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -555,6 +616,98 @@ class CentralSyncOutboxExecutionJobTests(unittest.TestCase):
         )
 
         self.assertEqual(self._row_count("execution_job_shadow_write"), 0)
+        self.assertTrue(any("conta/cliente local nao encontrado" in msg for msg in logger.info_messages))
+
+
+class CentralSyncOutboxExecutionJobPendingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.database_path = Path(self.temp_dir.name) / "signals.sqlite3"
+        SignalDatabase(self.database_path).initialize()
+        self.catalog = ChannelCatalogService(self.database_path)
+        self.catalog.register_configured_channel(
+            telegram_chat_id="123456",
+            title="Canal VIP",
+            username=None,
+            content_protected=False,
+            history_accessible=True,
+            last_message_id=None,
+        )
+        self.user_id, self.account_id = seed_customer_and_account(self.database_path)
+        self.account = make_mt5_account(self.account_id, self.user_id)
+        self.signal = make_signal()
+        self.group = make_execution_group(1, self.account, self.signal)
+        self.plan = make_pending_order_plan(self.account, self.signal)
+        self.outbox = CentralSyncOutbox(self.database_path)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def _row_count(self, kind: str) -> int:
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                "SELECT COUNT(*) FROM central_sync_outbox WHERE kind = ?", (kind,)
+            )
+            try:
+                return cursor.fetchone()[0]
+            finally:
+                cursor.close()
+
+    def test_enqueue_grava_linha_pending_com_source_execution_group_id(self) -> None:
+        self.outbox.enqueue_execution_job_pending(self.signal, self.account, self.group, self.plan)
+
+        self.assertEqual(self._row_count(OUTBOX_KIND_EXECUTION_JOB_PENDING), 1)
+        rows = self.outbox.claim_batch(10)
+        row = next(r for r in rows if r.kind == OUTBOX_KIND_EXECUTION_JOB_PENDING)
+        self.assertEqual(row.payload["status"], "pending")
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                "SELECT source_execution_group_id FROM central_sync_outbox WHERE id = ?", (row.id,)
+            )
+            try:
+                (source_execution_group_id,) = cursor.fetchone()
+            finally:
+                cursor.close()
+        self.assertEqual(source_execution_group_id, self.group.id)
+
+    def test_pending_e_resultado_do_mesmo_grupo_nao_colidem_no_indice_unico(self) -> None:
+        # kinds diferentes (execution_job_pending vs execution_job_shadow_write)
+        # -- o indice unico e escopado por kind, entao o mesmo group.id em
+        # kinds diferentes nunca colide.
+        self.outbox.enqueue_execution_job_pending(self.signal, self.account, self.group, self.plan)
+        orders = (make_execution_order(self.group.id, 1), make_execution_order(self.group.id, 2))
+
+        self.outbox.enqueue_execution_job_shadow_write(
+            self.signal, self.account, self.group, orders, rejected_reason=None, local_group_id=self.group.id
+        )
+
+        self.assertEqual(self._row_count(OUTBOX_KIND_EXECUTION_JOB_PENDING), 1)
+        self.assertEqual(self._row_count("execution_job_shadow_write"), 1)
+
+    def test_segundo_enqueue_pending_do_mesmo_grupo_e_rejeitado_pelo_indice_unico(self) -> None:
+        self.outbox.enqueue_execution_job_pending(self.signal, self.account, self.group, self.plan)
+
+        with self.assertRaises(Exception):
+            self.outbox.enqueue_execution_job_pending(self.signal, self.account, self.group, self.plan)
+
+    def test_canal_nao_registrado_nao_grava_e_loga(self) -> None:
+        logger = CapturingLogger()
+        outbox = CentralSyncOutbox(self.database_path, logger=logger)
+        sinal_de_canal_desconhecido = make_signal(source_chat_id="999999")
+
+        outbox.enqueue_execution_job_pending(sinal_de_canal_desconhecido, self.account, self.group, self.plan)
+
+        self.assertEqual(self._row_count(OUTBOX_KIND_EXECUTION_JOB_PENDING), 0)
+        self.assertTrue(any("canal nao registrado" in msg for msg in logger.info_messages))
+
+    def test_conta_local_nao_encontrada_nao_grava_e_loga(self) -> None:
+        logger = CapturingLogger()
+        outbox = CentralSyncOutbox(self.database_path, logger=logger)
+        conta_inexistente = make_mt5_account(999999, self.user_id)
+
+        outbox.enqueue_execution_job_pending(self.signal, conta_inexistente, self.group, self.plan)
+
+        self.assertEqual(self._row_count(OUTBOX_KIND_EXECUTION_JOB_PENDING), 0)
         self.assertTrue(any("conta/cliente local nao encontrado" in msg for msg in logger.info_messages))
 
 
@@ -1071,6 +1224,59 @@ class ListenerExecutionMirrorTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(decision.status, DecisionStatus.ACCEPTED)
+
+
+class ReportGroupCreatedToCentralSyncTests(unittest.TestCase):
+    """Etapa 5a: testa a funcao de wiring do listener.py isoladamente --
+    chamada por PendingOrderExecutor.on_group_created, sem precisar do
+    executor real (ja coberto em tests/test_pending_orders.py)."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.database_path = Path(self.temp_dir.name) / "signals.sqlite3"
+        SignalDatabase(self.database_path).initialize()
+        ChannelCatalogService(self.database_path).register_configured_channel(
+            telegram_chat_id="123456",
+            title="Canal VIP",
+            username=None,
+            content_protected=False,
+            history_accessible=True,
+            last_message_id=None,
+        )
+        self.user_id, self.account_id = seed_customer_and_account(self.database_path)
+        self.account = make_mt5_account(self.account_id, self.user_id)
+        self.signal = make_signal()
+        self.group = make_execution_group(1, self.account, self.signal)
+        self.plan = make_pending_order_plan(self.account, self.signal)
+        self.outbox = CentralSyncOutbox(self.database_path)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_enfileira_job_pending_com_sucesso(self) -> None:
+        from telegram_mt5_copier.listener import _report_group_created_to_central_sync
+
+        _report_group_created_to_central_sync(
+            self.outbox, NullLogger(), self.signal, self.account, self.group, self.plan
+        )
+
+        rows = self.outbox.claim_batch(10)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].kind, OUTBOX_KIND_EXECUTION_JOB_PENDING)
+        self.assertEqual(rows[0].payload["status"], "pending")
+
+    def test_falha_no_enqueue_nao_propaga(self) -> None:
+        from telegram_mt5_copier.listener import _report_group_created_to_central_sync
+
+        class RaisingOutboxForPending:
+            def enqueue_execution_job_pending(self, *args, **kwargs) -> None:
+                raise RuntimeError("supabase indisponivel (simulado)")
+
+        # Nao deve levantar -- mesma disciplina de "nunca afeta o real" ja
+        # usada em toda a Etapa 2.
+        _report_group_created_to_central_sync(
+            RaisingOutboxForPending(), NullLogger(), self.signal, self.account, self.group, self.plan
+        )
 
 
 class FakeAuditClient:

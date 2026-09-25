@@ -14,6 +14,7 @@ from tests.central_sync_execution_helpers import (
     make_execution_group,
     make_execution_order,
     make_mt5_account,
+    make_pending_order_plan,
     seed_customer_and_account,
 )
 from telegram_mt5_copier.central_sync import CentralSyncClient, CentralSyncOutbox, _drain_one, _run_audit_cycle
@@ -538,6 +539,176 @@ class ExecutionJobShadowWriteIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(order_row["status"], "failed")
         self.assertIsNone(order_row["mt5_order_ticket"])
+
+
+@unittest.skipUnless(_local_postgres_reachable(), "Postgres local (supabase start) nao esta rodando")
+class ExecutionJobPendingLifecycleIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    """Etapa 5a: prova que o job 'pending' (produtor, enfileirado ANTES do
+    order_send) e o job de resultado (Etapa 2, enfileirado DEPOIS) convergem
+    pra MESMA linha central em portal.execution_jobs/execution_job_orders,
+    transicionando pending -> succeeded de verdade -- inclui a regressao do
+    bug de finished_at encontrado nesta revisao (upsert_execution_job gravava
+    finished_at=now() incondicionalmente, mesmo pra um job ainda pending)."""
+
+    async def asyncSetUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.database_path = Path(self.temp_dir.name) / "signals.sqlite3"
+        SignalDatabase(self.database_path).initialize()
+        self.catalog = ChannelCatalogService(self.database_path)
+        self.catalog.register_configured_channel(
+            telegram_chat_id="987654321",
+            title="Canal Integracao Pending",
+            username=None,
+            content_protected=False,
+            history_accessible=True,
+            last_message_id=None,
+        )
+        self.user_id, self.account_id = seed_customer_and_account(self.database_path, telegram_user_id=778001)
+        self.account = make_mt5_account(self.account_id, self.user_id)
+        self.outbox = CentralSyncOutbox(self.database_path)
+        self.config = _fake_config()
+        self.client = CentralSyncClient(LOCAL_DATABASE_URL)
+        await self.client.connect()
+        await self._cleanup_rows()
+
+    async def asyncTearDown(self) -> None:
+        await self._cleanup_rows()
+        await self.client.close()
+        self.temp_dir.cleanup()
+
+    async def _cleanup_rows(self) -> None:
+        pool = self.client._pool
+        await pool.execute(
+            "delete from portal.execution_job_orders where execution_job_id in "
+            "(select id from portal.execution_jobs where instance_id = $1)",
+            TEST_INSTANCE_ID,
+        )
+        await pool.execute("delete from portal.execution_jobs where instance_id = $1", TEST_INSTANCE_ID)
+        await pool.execute("delete from portal.mt5_accounts where instance_id = $1", TEST_INSTANCE_ID)
+        await pool.execute("delete from portal.customers where instance_id = $1", TEST_INSTANCE_ID)
+        await pool.execute(
+            "delete from portal.signal_revisions where signal_id in (select id from portal.signals where instance_id = $1)",
+            TEST_INSTANCE_ID,
+        )
+        await pool.execute("delete from portal.signals where instance_id = $1", TEST_INSTANCE_ID)
+        await pool.execute("delete from portal.channels where instance_id = $1", TEST_INSTANCE_ID)
+        await pool.execute("delete from portal.instances where id = $1", TEST_INSTANCE_ID)
+        await pool.execute("delete from portal.nodes where id = $1", self.config.node_id)
+
+    async def _upsert_registry(self) -> None:
+        await self.client.upsert_node(self.config.node_id, self.config.node_label)
+        await self.client.upsert_instance(self.config.instance_id, self.config.brand_name, node_id=self.config.node_id)
+
+    def _make_signal(self, source_message_id: int) -> TradeSignal:
+        return TradeSignal(
+            symbol="XAUUSD",
+            direction=Direction.BUY,
+            entry_low=Decimal("4103"),
+            entry_high=Decimal("4105"),
+            stop_loss=Decimal("4090"),
+            take_profits=(Decimal("4110"), Decimal("4115")),
+            raw_text="XAUUSD BUY\nENTRY 4103-4105\nSL 4090\nTP 4110\nTP 4115",
+            source_chat_id="987654321",
+            source_message_id=source_message_id,
+        )
+
+    async def test_pending_depois_resultado_transiciona_a_mesma_linha_central(self) -> None:
+        await self._upsert_registry()
+        signal = self._make_signal(720)
+        self.outbox.enqueue_signal_shadow_write(signal, "mensagem formatada", 8720)
+        group = make_execution_group(1, self.account, signal)
+        plan = make_pending_order_plan(self.account, signal)
+
+        signal_row = next(r for r in self.outbox.claim_batch(10) if r.kind == "signal_shadow_write")
+        await _drain_one(self.client, self.config, signal_row)
+        self.outbox.mark_done(signal_row.id)
+
+        # 1) Produtor: job nasce pending, ANTES de qualquer order_send.
+        self.outbox.enqueue_execution_job_pending(signal, self.account, group, plan)
+        pending_row = next(r for r in self.outbox.claim_batch(10) if r.kind == "execution_job_pending")
+        await _drain_one(self.client, self.config, pending_row)
+        self.outbox.mark_done(pending_row.id)
+
+        pool = self.client._pool
+        job_row = await pool.fetchrow(
+            "select j.id, j.status, j.finished_at from portal.execution_jobs j "
+            "join portal.mt5_accounts a on a.id = j.mt5_account_id where a.instance_id = $1",
+            TEST_INSTANCE_ID,
+        )
+        self.assertEqual(job_row["status"], "pending")
+        self.assertIsNone(job_row["finished_at"])  # regressao do bug do finished_at
+        job_id = job_row["id"]
+
+        order_rows = await pool.fetch(
+            "select status, mt5_order_ticket from portal.execution_job_orders where execution_job_id = $1",
+            job_id,
+        )
+        self.assertEqual(len(order_rows), 2)
+        self.assertTrue(all(row["status"] == "pending" for row in order_rows))
+        self.assertTrue(all(row["mt5_order_ticket"] is None for row in order_rows))
+
+        # 2) Etapa 2 (ja existente): job de resultado, DEPOIS do order_send real.
+        orders = (make_execution_order(group.id, 1), make_execution_order(group.id, 2))
+        self.outbox.enqueue_execution_job_shadow_write(
+            signal, self.account, group, orders, rejected_reason=None, local_group_id=group.id
+        )
+        outcome_row = next(r for r in self.outbox.claim_batch(10) if r.kind == "execution_job_shadow_write")
+        await _drain_one(self.client, self.config, outcome_row)
+        self.outbox.mark_done(outcome_row.id)
+
+        job_row_after = await pool.fetchrow(
+            "select id, status, finished_at from portal.execution_jobs where id = $1", job_id
+        )
+        self.assertEqual(job_row_after["id"], job_id)  # mesma linha, transicionou de verdade
+        self.assertEqual(job_row_after["status"], "succeeded")
+        self.assertIsNotNone(job_row_after["finished_at"])
+
+        order_rows_after = await pool.fetch(
+            "select status, mt5_order_ticket from portal.execution_job_orders where execution_job_id = $1",
+            job_id,
+        )
+        self.assertEqual(len(order_rows_after), 2)
+        self.assertTrue(all(row["status"] == "sent" for row in order_rows_after))
+        self.assertTrue(all(row["mt5_order_ticket"] == 123456 for row in order_rows_after))
+
+    async def test_execution_key_do_pending_bate_com_o_do_resultado(self) -> None:
+        await self._upsert_registry()
+        signal = self._make_signal(721)
+        self.outbox.enqueue_signal_shadow_write(signal, "mensagem formatada", 8721)
+        signal_row = next(r for r in self.outbox.claim_batch(10) if r.kind == "signal_shadow_write")
+        await _drain_one(self.client, self.config, signal_row)
+        self.outbox.mark_done(signal_row.id)
+
+        group = make_execution_group(2, self.account, signal)
+        plan = make_pending_order_plan(self.account, signal, tp_indices=(1,))
+        self.outbox.enqueue_execution_job_pending(signal, self.account, group, plan)
+        pending_row = next(r for r in self.outbox.claim_batch(10) if r.kind == "execution_job_pending")
+        await _drain_one(self.client, self.config, pending_row)
+        self.outbox.mark_done(pending_row.id)
+
+        pool = self.client._pool
+        execution_key_before = await pool.fetchval(
+            "select o.execution_key from portal.execution_job_orders o "
+            "join portal.execution_jobs j on j.id = o.execution_job_id "
+            "join portal.mt5_accounts a on a.id = j.mt5_account_id where a.instance_id = $1",
+            TEST_INSTANCE_ID,
+        )
+
+        orders = (make_execution_order(group.id, 1),)
+        self.outbox.enqueue_execution_job_shadow_write(
+            signal, self.account, group, orders, rejected_reason=None, local_group_id=group.id
+        )
+        outcome_row = next(r for r in self.outbox.claim_batch(10) if r.kind == "execution_job_shadow_write")
+        await _drain_one(self.client, self.config, outcome_row)
+        self.outbox.mark_done(outcome_row.id)
+
+        execution_key_after = await pool.fetchval(
+            "select o.execution_key from portal.execution_job_orders o "
+            "join portal.execution_jobs j on j.id = o.execution_job_id "
+            "join portal.mt5_accounts a on a.id = j.mt5_account_id where a.instance_id = $1",
+            TEST_INSTANCE_ID,
+        )
+        self.assertEqual(execution_key_before, execution_key_after)
 
 
 @unittest.skipUnless(_local_postgres_reachable(), "Postgres local (supabase start) nao esta rodando")

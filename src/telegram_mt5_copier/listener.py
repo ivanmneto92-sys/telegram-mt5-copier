@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+import functools
 import json
 import logging
 from pathlib import Path
@@ -18,7 +19,7 @@ from .database import (
     connect_database,
     update_service_heartbeat,
 )
-from .models import DecisionStatus, IncomingMessage, ProcessingDecision
+from .models import DecisionStatus, IncomingMessage, ProcessingDecision, TradeSignal
 from .market_news import MarketNewsService
 from .image_ocr import (
     extract_image_text,
@@ -33,6 +34,7 @@ from .validator import validate_signal
 from .credential_service import CredentialService
 from .mt5.account_service import MT5AccountService
 from .mt5.client import MT5Client, SimulatedMT5Client
+from .mt5.models import ExecutionGroup, MT5Account, PendingOrderPlan
 from .mt5.pending_order_executor import PendingOrderExecutor
 from .mt5.pending_order_executor import PendingExecutionResult
 
@@ -217,6 +219,27 @@ def text_for_analysis(incoming: IncomingMessage) -> ProcessingDecision:
     return ProcessingDecision(DecisionStatus.ACCEPTED, "text", formatted_message=incoming.text.strip())
 
 
+def _report_group_created_to_central_sync(
+    outbox: CentralSyncOutbox,
+    logger: logging.Logger,
+    signal: TradeSignal,
+    account: MT5Account,
+    group: ExecutionGroup,
+    plan: PendingOrderPlan,
+) -> None:
+    """Etapa 5a: chamado por PendingOrderExecutor logo apos o grupo local ser
+    criado, ANTES de qualquer order_send -- enfileira a "intencao" de
+    execucao central (job pending), sem nenhum consumidor real reivindicando
+    ainda. Segunda rede de seguranca alem do try/except ja existente dentro
+    de pending_order_executor.py -- uma falha aqui nunca pode propagar pro
+    chamador (que continuaria o envio real da ordem normalmente de qualquer
+    jeito, mas testavel isoladamente sem precisar do PendingOrderExecutor real)."""
+    try:
+        outbox.enqueue_execution_job_pending(signal, account, group, plan)
+    except Exception:
+        logger.exception("central_sync_outbox_pending_enqueue_failed")
+
+
 async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> int:
     api_id, api_hash = validate_telegram_credentials(config)
     if not config.source_chat_ids:
@@ -272,6 +295,11 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
                 minutes_before=config.market_news_minutes_before,
                 minutes_after=config.market_news_minutes_after,
                 enabled=config.market_news_enabled,
+            ),
+            on_group_created=(
+                functools.partial(_report_group_created_to_central_sync, central_sync_outbox, logger)
+                if central_sync_outbox is not None
+                else None
             ),
         )
     execution_notifier = None

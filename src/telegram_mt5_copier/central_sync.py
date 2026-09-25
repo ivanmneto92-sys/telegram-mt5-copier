@@ -25,7 +25,7 @@ from .database import (
     utc_now,
 )
 from .models import TradeSignal, decimal_to_text
-from .mt5.models import ExecutionGroup, ExecutionOrder, MT5Account
+from .mt5.models import ExecutionGroup, ExecutionOrder, MT5Account, PendingOrderPlan
 
 try:
     import asyncpg
@@ -34,6 +34,7 @@ except ImportError:  # pragma: no cover - so acontece se a dependencia nao foi i
 
 OUTBOX_KIND_SIGNAL_SHADOW_WRITE = "signal_shadow_write"
 OUTBOX_KIND_EXECUTION_JOB_SHADOW_WRITE = "execution_job_shadow_write"
+OUTBOX_KIND_EXECUTION_JOB_PENDING = "execution_job_pending"
 _BACKOFF_SECONDS = (1, 2, 5, 10, 30, 60, 120, 300)
 
 
@@ -193,14 +194,15 @@ def build_outbox_payload(
     }
 
 
-def build_execution_job_outbox_payload(
+def _build_execution_job_payload_common(
     signal: TradeSignal,
     channel: ChannelRow,
     customer_account: CustomerAccountRow,
-    group: ExecutionGroup,
-    orders: tuple[ExecutionOrder, ...],
     *,
-    rejected_reason: str | None,
+    status: str,
+    last_error_code: str | None,
+    last_error_message: str | None,
+    orders: list[dict[str, Any]],
 ) -> dict[str, Any]:
     return {
         "source_channel_id": channel.id,
@@ -239,27 +241,86 @@ def build_execution_job_outbox_payload(
             "worker_heartbeat_at": customer_account.worker_heartbeat_at,
             "created_at": customer_account.account_created_at,
         },
-        "status": "rejected" if rejected_reason is not None else "succeeded",
-        "last_error_code": rejected_reason,
-        "last_error_message": rejected_reason,
-        "orders": [
-            {
-                "tp_index": order.tp_index,
-                "execution_key": build_execution_key(group.signal_id, order.tp_index),
-                "requested_volume": decimal_to_text(order.requested_volume),
-                "normalized_volume": decimal_to_text(order.normalized_volume),
-                "entry_price": decimal_to_text(order.entry_price),
-                "stop_loss": decimal_to_text(order.stop_loss),
-                "take_profit": decimal_to_text(order.take_profit),
-                "status": "sent" if order.mt5_order_ticket else "failed",
-                "mt5_order_ticket": order.mt5_order_ticket,
-                "mt5_position_ticket": order.mt5_position_ticket,
-                "retcode": order.broker_retcode,
-                "retcode_message": order.broker_message,
-            }
-            for order in orders
-        ],
+        "status": status,
+        "last_error_code": last_error_code,
+        "last_error_message": last_error_message,
+        "orders": orders,
     }
+
+
+def build_execution_job_outbox_payload(
+    signal: TradeSignal,
+    channel: ChannelRow,
+    customer_account: CustomerAccountRow,
+    group: ExecutionGroup,
+    orders: tuple[ExecutionOrder, ...],
+    *,
+    rejected_reason: str | None,
+) -> dict[str, Any]:
+    order_dicts = [
+        {
+            "tp_index": order.tp_index,
+            "execution_key": build_execution_key(group.signal_id, order.tp_index),
+            "requested_volume": decimal_to_text(order.requested_volume),
+            "normalized_volume": decimal_to_text(order.normalized_volume),
+            "entry_price": decimal_to_text(order.entry_price),
+            "stop_loss": decimal_to_text(order.stop_loss),
+            "take_profit": decimal_to_text(order.take_profit),
+            "status": "sent" if order.mt5_order_ticket else "failed",
+            "mt5_order_ticket": order.mt5_order_ticket,
+            "mt5_position_ticket": order.mt5_position_ticket,
+            "retcode": order.broker_retcode,
+            "retcode_message": order.broker_message,
+        }
+        for order in orders
+    ]
+    return _build_execution_job_payload_common(
+        signal,
+        channel,
+        customer_account,
+        status="rejected" if rejected_reason is not None else "succeeded",
+        last_error_code=rejected_reason,
+        last_error_message=rejected_reason,
+        orders=order_dicts,
+    )
+
+
+def build_execution_job_pending_payload(
+    signal: TradeSignal,
+    channel: ChannelRow,
+    customer_account: CustomerAccountRow,
+    group: ExecutionGroup,
+    plan: PendingOrderPlan,
+) -> dict[str, Any]:
+    """Etapa 5a: payload do job ainda ANTES de qualquer order_send -- nunca
+    tem ticket/retcode (nao existem ainda). status='pending' por TP, mesmo
+    default do CHECK de portal.execution_job_orders."""
+    order_dicts = [
+        {
+            "tp_index": order.tp_index,
+            "execution_key": build_execution_key(group.signal_id, order.tp_index),
+            "requested_volume": decimal_to_text(order.requested_volume),
+            "normalized_volume": decimal_to_text(order.normalized_volume),
+            "entry_price": decimal_to_text(order.entry_price),
+            "stop_loss": decimal_to_text(order.stop_loss),
+            "take_profit": decimal_to_text(order.take_profit),
+            "status": "pending",
+            "mt5_order_ticket": None,
+            "mt5_position_ticket": None,
+            "retcode": None,
+            "retcode_message": None,
+        }
+        for order in plan.orders
+    ]
+    return _build_execution_job_payload_common(
+        signal,
+        channel,
+        customer_account,
+        status="pending",
+        last_error_code=None,
+        last_error_message=None,
+        orders=order_dicts,
+    )
 
 
 class CentralSyncOutbox:
@@ -370,6 +431,58 @@ class CentralSyncOutbox:
                 (
                     OUTBOX_KIND_EXECUTION_JOB_SHADOW_WRITE,
                     local_group_id,
+                    json.dumps(payload),
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            cursor.close()
+
+    def enqueue_execution_job_pending(
+        self,
+        signal: TradeSignal,
+        account: MT5Account,
+        group: ExecutionGroup,
+        plan: PendingOrderPlan,
+    ) -> None:
+        """Etapa 5a: enfileira a "intencao" de execucao ANTES de qualquer
+        order_send -- kind diferente de enqueue_execution_job_shadow_write
+        (que carrega o resultado, escrito depois) de proposito: o indice
+        unico parcial em (kind, source_execution_group_id) e escopado por
+        kind, entao os dois writes pro MESMO group.id nunca colidem, e os
+        dois convergem pra mesma linha central via o mesmo
+        on conflict (mt5_account_id, signal_id) ja usado em _drain_one."""
+        channel = resolve_local_channel(self.database_path, signal.source_chat_id)
+        if channel is None:
+            if self.logger is not None:
+                self.logger.info(
+                    "central_sync_execution_pending_enqueue_skipped: canal nao registrado group_id=%s",
+                    group.id,
+                )
+            return
+        customer_account = resolve_local_customer_and_account(self.database_path, account.id)
+        if customer_account is None:
+            if self.logger is not None:
+                self.logger.info(
+                    "central_sync_execution_pending_enqueue_skipped: conta/cliente local nao encontrado group_id=%s account_id=%s",
+                    group.id,
+                    account.id,
+                )
+            return
+        payload = build_execution_job_pending_payload(signal, channel, customer_account, group, plan)
+        now = utc_now()
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO central_sync_outbox (
+                    kind, source_execution_group_id, payload, status, attempts, created_at, updated_at, next_attempt_at
+                )
+                VALUES (?, ?, ?, 'pending', 0, ?, ?, ?)
+                """,
+                (
+                    OUTBOX_KIND_EXECUTION_JOB_PENDING,
+                    group.id,
                     json.dumps(payload),
                     now,
                     now,
@@ -716,10 +829,14 @@ class CentralSyncClient:
             insert into portal.execution_jobs (
                 instance_id, mt5_account_id, node_id, signal_id, content_signature, status,
                 finished_at, last_error_code, last_error_message, payload
-            ) values ($1, $2, $3, $4, $5, $6, now(), $7, $8, $9::jsonb)
+            ) values (
+                $1, $2, $3, $4, $5, $6,
+                case when $6 in ('succeeded', 'rejected') then now() else null end,
+                $7, $8, $9::jsonb
+            )
             on conflict (mt5_account_id, signal_id) do update set
                 status = excluded.status,
-                finished_at = excluded.finished_at,
+                finished_at = case when excluded.status in ('succeeded', 'rejected') then now() else null end,
                 last_error_code = excluded.last_error_code,
                 last_error_message = excluded.last_error_message,
                 payload = excluded.payload
@@ -792,7 +909,13 @@ async def _drain_one(client: CentralSyncClient, config: AppConfig, row: OutboxRo
         await client.append_signal_revision(signal_id, payload["content_signature"], payload)
         return
 
-    if row.kind == OUTBOX_KIND_EXECUTION_JOB_SHADOW_WRITE:
+    if row.kind in (OUTBOX_KIND_EXECUTION_JOB_SHADOW_WRITE, OUTBOX_KIND_EXECUTION_JOB_PENDING):
+        # Os dois kinds levam o MESMO formato de payload (via
+        # _build_execution_job_payload_common) e a mesma sequencia de
+        # upserts -- so o "status"/"orders" dentro do payload diferem (um
+        # carrega a intencao antes do order_send, Etapa 5a; o outro carrega o
+        # resultado real, Etapa 2). Os dois convergem pra mesma linha central
+        # via on conflict (mt5_account_id, signal_id)/(execution_job_id, tp_index).
         payload = row.payload
         customer_id = await client.upsert_customer(config.instance_id, payload["customer"])
         account_id = await client.upsert_account(

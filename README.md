@@ -820,16 +820,39 @@ reivindica um job, "executa" (monta um resumo a partir do `payload` do job) e
 conclui — sem nenhum estado local persistente, porque o próprio mecanismo de
 `reservation_token`/lease das RPCs (Etapa 1) já garante que um crash no meio
 de um job simplesmente deixa o lease expirar e ser reivindicado de novo.
-Também **não existe ainda nenhum produtor real** de jobs `pending` — a Etapa
-2 só espelha execuções já terminadas — então o agente só foi testado com
-jobs inseridos manualmente (fixture); nada no pipeline real de sinais muda
-nesta etapa.
+Quando esta etapa foi construída, ainda não existia nenhum produtor real de
+jobs `pending` (a Etapa 2 só espelha execuções já terminadas) — isso foi
+resolvido na Etapa 5a, abaixo —, então o agente foi testado com jobs
+inseridos manualmente (fixture); **nenhum agente fica rodando contra jobs
+reais ainda**, por decisão explícita (ver Etapa 5a).
 
 A senha (`EXECUTION_AGENT_PASSWORD`) nunca deve ser gerada nem vista por uma
 IA — defina direto no painel do Supabase (Authentication → Users), mesma
 disciplina do `CENTRAL_SYNC_DATABASE_URL`/`central_sync_vps`. Provisionar o
 `auth.users` de uma VPS real no projeto Supabase real é uma decisão de
 release controlada, feita por você, fora desta automação.
+
+### Produtor real de jobs `pending` (Etapa 5a, só sombra)
+
+O pipeline real de sinais (`pending_order_executor.py`, demo/live) agora
+também enfileira um job **`pending`** de verdade em `portal.execution_jobs`
+— logo após o grupo local ser criado, **antes** de qualquer `order_send`.
+Isso acontece via um callback opcional (`PendingOrderExecutor.on_group_created`,
+`None` por padrão) — a única mudança desta série inteira dentro de
+`pending_order_executor.py`, protegida por `try/except` para nunca atrasar
+ou impedir o envio real da ordem.
+
+Esse job `pending` e o job de resultado (Etapa 2, gravado depois, com o
+resultado real) usam `kind`s diferentes no outbox local
+(`execution_job_pending` vs `execution_job_shadow_write`) mas convergem pra
+**a mesma linha** em `portal.execution_jobs`/`execution_job_orders` — o job
+transiciona `pending → succeeded`/`rejected` de verdade no Supabase.
+
+**Nenhum consumidor real reivindica esses jobs ainda** — por decisão
+explícita, pra não correr o risco de duas fontes de verdade divergentes (o
+agente da Etapa 4, que só simula, nunca deve rodar contra contas reais
+enquanto isso). Os jobs ficam parados na fila, prontos pra quando um
+consumidor de verdade for decidido numa etapa futura, separada.
 
 ## Backup
 

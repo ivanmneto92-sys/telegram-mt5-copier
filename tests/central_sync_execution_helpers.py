@@ -9,7 +9,14 @@ from decimal import Decimal
 from pathlib import Path
 
 from telegram_mt5_copier.database import connect_database
-from telegram_mt5_copier.mt5.models import ExecutionGroup, ExecutionOrder, MT5Account
+from telegram_mt5_copier.mt5.models import (
+    ExecutionGroup,
+    ExecutionOrder,
+    MT5Account,
+    PendingOrderPlan,
+    PendingOrderType,
+    PlannedOrder,
+)
 from telegram_mt5_copier.models import TradeSignal
 
 
@@ -95,6 +102,42 @@ def make_execution_group(group_id: int, account: MT5Account, signal: TradeSignal
         execution_mode="demo_execution",
         error_code=None,
         error_message=None,
+    )
+
+
+def make_pending_order_plan(
+    account: MT5Account, signal: TradeSignal, *, tp_indices: tuple[int, ...] = (1, 2)
+) -> PendingOrderPlan:
+    orders = tuple(
+        PlannedOrder(
+            tp_index=tp_index,
+            requested_volume=Decimal("0.01"),
+            normalized_volume=Decimal("0.01"),
+            entry_price=signal.entry_low,
+            stop_loss=signal.stop_loss,
+            take_profit=signal.take_profits[0],
+            order_type=PendingOrderType.BUY,
+        )
+        for tp_index in tp_indices
+    )
+    return PendingOrderPlan(
+        signal_id=signal.signature,
+        user_id=account.user_id,
+        mt5_account_id=account.id,
+        account_mode="hedging",
+        direction=signal.direction.value,
+        symbol=signal.symbol,
+        entry_low=signal.entry_low,
+        entry_high=signal.entry_high,
+        selected_entry_price=signal.entry_low,
+        order_type=PendingOrderType.BUY,
+        total_volume=Decimal("0.02"),
+        stop_loss=signal.stop_loss,
+        expiration_at="2099-01-01T00:00:00+00:00",
+        execution_mode="demo_execution",
+        orders=orders,
+        signal_received_at="2026-01-01T00:00:00+00:00",
+        pending_created_at="2026-01-01T00:00:00+00:00",
     )
 
 

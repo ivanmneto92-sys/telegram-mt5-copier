@@ -25,6 +25,7 @@ from .models import (
     ACCOUNT_TYPE_DEMO,
     ACCOUNT_TYPE_REAL,
     CONNECTION_STATUS_CONNECTED,
+    ExecutionGroup,
     ExecutionProfile,
     GROUP_STATUS_PENDING_ACTIVE,
     GROUP_STATUS_PENDING_SUBMISSION,
@@ -66,6 +67,7 @@ class PendingOrderExecutor:
         planner: PendingOrderPlanner | None = None,
         repository: ExecutionRepository | None = None,
         news_service: MarketNewsService | None = None,
+        on_group_created: Callable[[TradeSignal, MT5Account, ExecutionGroup, PendingOrderPlan], None] | None = None,
     ) -> None:
         self.database_path = database_path
         self.accounts = accounts
@@ -77,6 +79,13 @@ class PendingOrderExecutor:
         self.repository = repository or ExecutionRepository(database_path)
         self.groups = ExecutionGroupService(self.repository)
         self.news_service = news_service or MarketNewsService(database_path)
+        # Etapa 5a: side-effect opcional, disparado logo apos o grupo local
+        # ser criado (antes de qualquer order_send) -- so pra permitir
+        # espelhar a "intencao" no backend central antes do resultado ser
+        # conhecido. Nunca usado quando None (todo chamador/teste existente
+        # continua identico); sempre protegido por try/except no call site,
+        # nunca pode atrasar/impedir o envio real da ordem.
+        self.on_group_created = on_group_created
         self._closed = False
 
     def close(self) -> None:
@@ -280,6 +289,7 @@ class PendingOrderExecutor:
         if self.execution_mode in {"demo_execution", "live_execution"}:
             try:
                 return self._execute_demo_plan(
+                    signal=signal,
                     plan=plan,
                     account=account,
                     profile=profile,
@@ -361,6 +371,7 @@ class PendingOrderExecutor:
     def _execute_demo_plan(
         self,
         *,
+        signal: TradeSignal,
         plan: PendingOrderPlan,
         account: MT5Account,
         profile: ExecutionProfile,
@@ -417,6 +428,11 @@ class PendingOrderExecutor:
             order_status=ORDER_STATUS_PENDING_SUBMISSION,
             metrics=metrics,
         )
+        if self.on_group_created is not None:
+            try:
+                self.on_group_created(signal, account, group, plan)
+            except Exception:
+                LOGGER.exception("on_group_created_callback_failed")
         send_results = []
         submitted_orders: list[tuple[str, PlannedOrder]] = []
         for database_order, request, planned_order in zip(
