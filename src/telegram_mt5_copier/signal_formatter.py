@@ -76,16 +76,22 @@ SL_LINE_RE = re.compile(
     # word characters -- so a plain \b there silently fails to match once
     # the separator is gone, and the stop loss is never recognized.
     r"\b(?:SL|STOP[ \t]+LOSS)(?![A-Za-z])(?:\s*\(\s*SL\s*\))?\s*\)?\s*[:\-]?\s*"
-    r"(?P<value>\d+(?:[\.,]\d+)?)",
+    # Royal Pips also wraps the actual price in parentheses:
+    # "STOP LOSS ( 4380 )".  This opening parenthesis is not the legacy
+    # "SL)" label punctuation handled just above, so accept it separately.
+    r"(?:\(\s*)?(?P<value>\d+(?:[\.,]\d+)?)\s*\)?",
     re.IGNORECASE,
 )
 TP_LINE_RE = re.compile(
     r"\b(?:"
-    r"TP[ \t]+\d+[ \t]*[\):\-]|TP\d*+(?![ \t]+\d+[ \t]*[\):\-])[ \t]*[\):\-]?"
-    r"|TAKE[ \t]+PROFIT[ \t]+\d+[ \t]*[\):\-]"
-    r"|TAKE[ \t]+PROFIT\d*+(?![ \t]+\d+[ \t]*[\):\-])[ \t]*[\):\-]?"
-    r"|TARGET[ \t]+\d+[ \t]*[\):\-]|TARGET\d*+(?![ \t]+\d+[ \t]*[\):\-])[ \t]*[\):\-]?"
-    r")[ \t]*(?P<value>\d+(?:[\.,]\d+)?)",
+    # An opening parenthesis after a spaced index is a separator too.  It
+    # must be consumed by this indexed alternative; otherwise the generic
+    # alternative below mistakes the index itself (1, 2, 3...) for the TP.
+    r"TP[ \t]+\d+[ \t]*[\(\):\-]|TP\d*+(?![ \t]+\d+[ \t]*[\(\):\-])[ \t]*[\(\):\-]?"
+    r"|TAKE[ \t]+PROFIT[ \t]+\d+[ \t]*[\(\):\-]"
+    r"|TAKE[ \t]+PROFIT\d*+(?![ \t]+\d+[ \t]*[\(\):\-])[ \t]*[\(\):\-]?"
+    r"|TARGET[ \t]+\d+[ \t]*[\(\):\-]|TARGET\d*+(?![ \t]+\d+[ \t]*[\(\):\-])[ \t]*[\(\):\-]?"
+    r")[ \t]*(?P<value>\d+(?:[\.,]\d+)?)\s*\)?",
     re.IGNORECASE,
 )
 
