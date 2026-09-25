@@ -116,6 +116,7 @@ class AppConfig:
     central_sync_audit_sample_size: int
     central_sync_audit_interval_seconds: int
     execution_agent_enabled: bool
+    execution_agent_mode: str
     supabase_url: str | None = field(repr=False)
     supabase_anon_key: str | None = field(repr=False)
     execution_agent_email: str | None = field(repr=False)
@@ -297,6 +298,9 @@ class AppConfig:
                 _value("EXECUTION_AGENT_ENABLED", file_values, runtime_env, "false"),
                 default=False,
             ),
+            execution_agent_mode=_value(
+                "EXECUTION_AGENT_MODE", file_values, runtime_env, "simulation"
+            ).strip().lower(),
             supabase_url=_optional_value("SUPABASE_URL", file_values, runtime_env),
             supabase_anon_key=_optional_value("SUPABASE_ANON_KEY", file_values, runtime_env),
             execution_agent_email=_optional_value(

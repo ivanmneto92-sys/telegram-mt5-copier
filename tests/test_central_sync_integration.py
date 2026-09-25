@@ -94,6 +94,7 @@ def _fake_config(node_id: str = "dev-local") -> AppConfig:
         central_sync_audit_sample_size=5,
         central_sync_audit_interval_seconds=1800,
         execution_agent_enabled=False,
+        execution_agent_mode="simulation",
         supabase_url=None,
         supabase_anon_key=None,
         execution_agent_email=None,

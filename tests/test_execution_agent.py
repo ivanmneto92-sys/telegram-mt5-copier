@@ -1,19 +1,32 @@
 from __future__ import annotations
 
+from decimal import Decimal
 import json
+from pathlib import Path
+import tempfile
 import unittest
 
 import httpx
 
+from telegram_mt5_copier.config import AppConfig
+from telegram_mt5_copier.credential_service import CredentialService
 from telegram_mt5_copier.execution_agent import (
     AgentApiClient,
     AgentApiError,
     ExecutionAgent,
     ExecutionBackendError,
+    ExecutionOutcome,
+    RealExecutionBackend,
     SimulationExecutionBackend,
     SupabaseAuthClient,
     SupabaseAuthError,
 )
+from telegram_mt5_copier.mt5.account_service import MT5AccountForm, MT5AccountService
+from telegram_mt5_copier.mt5.client import SimulatedMT5Client
+from telegram_mt5_copier.mt5.models import SymbolInfo, TickInfo
+from telegram_mt5_copier.mt5.terminal_manager import TerminalManager
+from telegram_mt5_copier.users import UserRepository
+from tests.access_helpers import grant_paid_access
 
 
 class NullLogger:
@@ -305,12 +318,14 @@ class SimulationExecutionBackendTests(unittest.IsolatedAsyncioTestCase):
             }
         }
 
-        result = await backend.execute(job)
+        outcome = await backend.execute(job)
 
-        self.assertEqual(result.summary["mode"], "simulation")
-        self.assertEqual(result.summary["symbol"], "XAUUSD")
-        self.assertEqual(result.summary["direction"], "BUY")
-        self.assertEqual(result.summary["planned_orders"], [{"tp_index": 1, "requested_volume": "0.01"}])
+        self.assertEqual(outcome.status, "succeeded")
+        self.assertIsNone(outcome.orders)
+        self.assertEqual(outcome.result["mode"], "simulation")
+        self.assertEqual(outcome.result["symbol"], "XAUUSD")
+        self.assertEqual(outcome.result["direction"], "BUY")
+        self.assertEqual(outcome.result["planned_orders"], [{"tp_index": 1, "requested_volume": "0.01"}])
 
     async def test_execute_levanta_erro_sem_orders_no_payload(self) -> None:
         backend = SimulationExecutionBackend()
@@ -323,6 +338,127 @@ class SimulationExecutionBackendTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(ExecutionBackendError):
             await backend.execute({})
+
+
+class RealExecutionBackendTests(unittest.IsolatedAsyncioTestCase):
+    """Etapa 5c: RealExecutionBackend reaproveita PendingOrderExecutor de
+    verdade (via execute_for_account) -- testado com SimulatedMT5Client,
+    mesmos cenarios ja provados em test_pending_orders.py (sucesso, rejeicao
+    de order_check, duplicata), so que disparados por um job da fila em vez
+    de um sinal local."""
+
+    async def asyncSetUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.config = AppConfig.load(
+            project_root=self.root,
+            env={
+                "MT5_CREDENTIAL_KEY": CredentialService.generate_key(),
+                "GLOBAL_EXECUTION_KILL_SWITCH": "false",
+            },
+            create_dirs=True,
+        )
+        self.users = UserRepository(self.config.database_path)
+        self.accounts_service = MT5AccountService(
+            self.config.database_path,
+            credential_service=CredentialService(self.config.mt5_credential_key),
+            terminal_manager=TerminalManager(self.root / "mt5"),
+            client_factory=lambda: SimulatedMT5Client(),
+        )
+        self.user = self.users.get_or_create_user(101, "alice")
+        grant_paid_access(self.config.database_path, self.user.id)
+        self.account = self.accounts_service.register_account(
+            self.user.id,
+            MT5AccountForm("Broker", "Broker-Demo", "12345678", "secret", "Demo"),
+        )
+        self.accounts_service.update_execution_profile_fixed_lot(self.user.id, self.account.id, Decimal("0.04"))
+
+    async def asyncTearDown(self) -> None:
+        self.accounts_service.close()
+        self.users.close()
+        self.temp_dir.cleanup()
+
+    def _payload(self, **overrides) -> dict:
+        # Mesmos valores de BUY_SIGNAL (tests/test_pending_orders.py) --
+        # ja provados validos (order_check/send passam de verdade) com tick
+        # bid/ask=4062, evita inventar numeros que colidam com validacao de
+        # risco (ex.: preco ja tendo cruzado o SL antes da entrada).
+        base = {
+            "symbol": "XAUUSD",
+            "direction": "BUY",
+            "entry_low": "4059",
+            "entry_high": "4061",
+            "stop_loss": "4044",
+            "take_profits": ["4066", "4071"],
+            "raw_text": "XAUUSD BUY\nENTRY 4059-61\nSL 4044\nTP 4066\nTP 4071",
+            "source_chat_id": "123456",
+            "source_message_id": 1,
+            "local_user_id": self.user.id,
+            "local_account_id": self.account.id,
+        }
+        base.update(overrides)
+        return base
+
+    async def test_execucao_bem_sucedida_devolve_succeeded_com_orders_reais(self) -> None:
+        client = SimulatedMT5Client(tick=TickInfo(bid=Decimal("4062"), ask=Decimal("4062")))
+        backend = RealExecutionBackend(self.config, client_factory=lambda: client)
+
+        outcome = await backend.execute({"payload": self._payload()})
+
+        self.assertEqual(outcome.status, "succeeded")
+        self.assertIsNotNone(outcome.orders)
+        self.assertEqual(len(outcome.orders), 2)
+        self.assertTrue(all(o["mt5_order_ticket"] is not None for o in outcome.orders))
+        self.assertTrue(all(o["status"] == "sent" for o in outcome.orders))
+        self.assertEqual(len(client.order_send_requests), 2)
+
+    async def test_order_check_falhando_devolve_rejected_sem_levantar(self) -> None:
+        client = SimulatedMT5Client(
+            tick=TickInfo(bid=Decimal("4062"), ask=Decimal("4062")),
+            order_check_results=[
+                {"retcode": 0, "comment": "ok"},
+                {"retcode": 10030, "comment": "invalid stops"},
+            ],
+        )
+        backend = RealExecutionBackend(self.config, client_factory=lambda: client)
+
+        outcome = await backend.execute({"payload": self._payload()})
+
+        self.assertEqual(outcome.status, "rejected")
+        self.assertIn("order_check_failed", outcome.result["rejection_code"])
+        self.assertIsNone(outcome.orders)
+        self.assertEqual(len(client.order_send_requests), 0)
+
+    async def test_mesmo_sinal_duas_vezes_e_idempotente(self) -> None:
+        client = SimulatedMT5Client(tick=TickInfo(bid=Decimal("4062"), ask=Decimal("4062")))
+        backend = RealExecutionBackend(self.config, client_factory=lambda: client)
+        payload = self._payload()
+
+        first = await backend.execute({"payload": payload})
+        second = await backend.execute({"payload": payload})
+
+        self.assertEqual(first.status, "succeeded")
+        self.assertEqual(second.status, "succeeded")
+        self.assertEqual(second.result.get("duplicate"), True)
+        self.assertIsNone(second.orders)
+        self.assertEqual(len(client.order_send_requests), 2)  # so a primeira chamada enviou de verdade
+
+    async def test_payload_sem_campo_obrigatorio_levanta_execution_backend_error(self) -> None:
+        client = SimulatedMT5Client(tick=TickInfo(bid=Decimal("4062"), ask=Decimal("4062")))
+        backend = RealExecutionBackend(self.config, client_factory=lambda: client)
+        payload = self._payload()
+        del payload["stop_loss"]
+
+        with self.assertRaises(ExecutionBackendError):
+            await backend.execute({"payload": payload})
+
+    async def test_conta_local_inexistente_levanta_excecao(self) -> None:
+        client = SimulatedMT5Client(tick=TickInfo(bid=Decimal("4062"), ask=Decimal("4062")))
+        backend = RealExecutionBackend(self.config, client_factory=lambda: client)
+        payload = self._payload(local_account_id=999999)
+
+        with self.assertRaises(Exception):
+            await backend.execute({"payload": payload})
 
 
 class FakeAgentApiClientForAgent:
@@ -378,7 +514,7 @@ class FakeSimulationBackend:
         self.calls.append(job)
         if self.raise_error is not None:
             raise self.raise_error
-        return type("Result", (), {"summary": {"mode": "simulation"}})()
+        return ExecutionOutcome(status="succeeded", result={"mode": "simulation"})
 
 
 def make_job(job_id: str = "job-1", token: str = "reservation-1") -> dict:

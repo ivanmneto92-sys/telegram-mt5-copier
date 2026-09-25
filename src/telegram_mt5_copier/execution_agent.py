@@ -12,10 +12,12 @@ instancia, sem precisar de nenhuma tabela SQLite nova aqui (ao contrario do
 outbox da Etapa 2, que precisa ser duravel porque e a fonte da verdade
 local).
 
-Nesta etapa, nada cria jobs 'pending' de verdade em portal.execution_jobs --
-isso e trabalho de uma etapa futura. Este modulo e testado com jobs
-inseridos manualmente (fixture), provando o ciclo de vida completo
-(claim -> start -> executar -> complete/fail) contra o Postgres/Auth locais.
+Dois backends de execucao: SimulationExecutionBackend (Etapa 4, default,
+nunca fala com corretora nenhuma -- testado com jobs inseridos manualmente,
+fixture) e RealExecutionBackend (Etapa 5c, EXECUTION_AGENT_MODE=demo_execution
+-- executa de verdade numa conta demo dedicada e isolada do caminho local,
+reaproveitando o mesmo PendingOrderExecutor/pipeline de seguranca ja
+validado localmente, nunca duplicando logica de execucao).
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ import argparse
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 import logging
 from logging.handlers import RotatingFileHandler
 import sys
@@ -31,7 +34,9 @@ from typing import Any
 
 import httpx
 
+from .central_sync import build_execution_key
 from .config import AppConfig
+from .models import Direction, TradeSignal, decimal_to_text
 
 _TOKEN_REFRESH_MARGIN_SECONDS = 60
 
@@ -229,30 +234,171 @@ class ExecutionBackendError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class SimulatedExecutionResult:
-    summary: dict[str, Any]
+class ExecutionOutcome:
+    """Resultado de um backend de execucao -- succeeded ou rejected sao os
+    dois unicos status validos de agent_api.complete_execution_job (rejected
+    e desfecho de regra de negocio, ex.: spread/risco/noticia -- diferente de
+    uma excecao, que e sempre falha TECNICA e vira fail_execution_job, nunca
+    isto aqui). orders so e preenchido quando a execucao chegou a tentar
+    enviar ordem de verdade pra um broker (RealExecutionBackend, Etapa 5c) --
+    SimulationExecutionBackend nunca preenche, ja que nunca fala com
+    corretora nenhuma."""
+
+    status: str
+    result: dict[str, Any]
+    orders: list[dict[str, Any]] | None = None
 
 
 class SimulationExecutionBackend:
     """Nunca fala com MT5/corretora nenhuma -- so interpreta o payload do job
     (ver contrato no plano da Etapa 4) e produz um resultado "como se tivesse
-    executado". Ponto de extensao pra um backend real (Etapa 5+) entrar
-    depois sem reestruturar o agente, mesmo padrao de
+    executado". Ponto de extensao pra um backend real (RealExecutionBackend,
+    Etapa 5c) entrar depois sem reestruturar o agente, mesmo padrao de
     PendingOrderExecutor(client_factory=...)."""
 
-    async def execute(self, job: dict[str, Any]) -> SimulatedExecutionResult:
+    async def execute(self, job: dict[str, Any]) -> ExecutionOutcome:
         payload = job.get("payload") or {}
         orders = payload.get("orders")
         if not orders:
             raise ExecutionBackendError("payload sem 'orders' -- nada para simular.")
-        return SimulatedExecutionResult(
-            summary={
+        return ExecutionOutcome(
+            status="succeeded",
+            result={
                 "mode": "simulation",
                 "symbol": payload.get("symbol"),
                 "direction": payload.get("direction"),
                 "planned_orders": orders,
-            }
+            },
         )
+
+
+class RealExecutionBackend:
+    """Etapa 5c: modo demo_execution -- executa de verdade no MT5 (conta
+    demo, sem risco financeiro real, mas ordem de verdade na corretora).
+    Reaproveita o MESMO PendingOrderExecutor/pipeline de seguranca do
+    caminho local (kill switch, conexao, limites de risco, janela de
+    noticia) via execute_for_account -- nunca duplica logica de execucao.
+    Por isso roda NA MESMA maquina/VPS que o terminal MT5 da conta (o
+    MT5Client precisa do terminal local de qualquer jeito, igual ao caminho
+    local hoje)."""
+
+    def __init__(self, config: AppConfig, *, client_factory=None) -> None:
+        # Imports tardios: mt5/* so faz sentido importar quando esse modo
+        # realmente esta em uso (SimulationExecutionBackend nunca precisa
+        # de nenhuma dependencia local -- mantem esse caminho, o default,
+        # livre de qualquer peso extra).
+        from .credential_service import CredentialService
+        from .market_news import MarketNewsService
+        from .mt5.account_service import MT5AccountService
+        from .mt5.client import MT5Client
+        from .mt5.pending_order_executor import PendingOrderExecutor
+
+        credential_service = CredentialService(config.mt5_credential_key) if config.mt5_credential_key else None
+        if credential_service is None:
+            raise ExecutionBackendError("MT5_CREDENTIAL_KEY obrigatoria para EXECUTION_AGENT_MODE=demo_execution.")
+        self.accounts = MT5AccountService(
+            config.database_path,
+            credential_service=credential_service,
+            allow_live_accounts=False,  # nunca real nesta etapa, mesmo se mal configurado
+            max_accounts_per_vps=config.mt5_max_accounts_per_vps,
+            daily_performance_timezone=config.daily_performance_timezone,
+        )
+        self.executor = PendingOrderExecutor(
+            config.database_path,
+            self.accounts,
+            execution_mode="demo_execution",
+            global_kill_switch=config.global_execution_kill_switch,
+            allow_live_accounts=False,
+            # client_factory injetavel pra teste (SimulatedMT5Client), mesmo
+            # padrao ja usado por PendingOrderExecutor/test_pending_orders.py
+            # -- em producao, sempre o MT5Client real (default).
+            client_factory=client_factory or MT5Client,
+            news_service=MarketNewsService(
+                config.database_path,
+                minutes_before=config.market_news_minutes_before,
+                minutes_after=config.market_news_minutes_after,
+                enabled=config.market_news_enabled,
+            ),
+        )
+
+    def close(self) -> None:
+        self.executor.close()
+
+    async def execute(self, job: dict[str, Any]) -> ExecutionOutcome:
+        payload = job.get("payload") or {}
+        try:
+            signal = _signal_from_payload(payload)
+            user_id = int(payload["local_user_id"])
+            account_id = int(payload["local_account_id"])
+        except (KeyError, ValueError, TypeError) as exc:
+            raise ExecutionBackendError(f"payload invalido: {exc}") from exc
+
+        account = self.accounts.get_account(user_id, account_id)
+        profile = self.accounts.get_execution_profile(user_id, account_id)
+        if profile is None:
+            raise ExecutionBackendError(f"perfil de execucao nao encontrado account_id={account_id}")
+
+        result = await asyncio.to_thread(self.executor.execute_for_account, signal, account, profile)
+
+        if result.group_result.duplicate:
+            # Ja foi executado antes (dedupe local, mesma janela de
+            # DUPLICATE_WINDOW_MINUTES do caminho normal) -- nao e erro,
+            # nao e rejeicao de regra de negocio, so nao ha nada novo a
+            # reportar.
+            return ExecutionOutcome(status="succeeded", result={"mode": "demo_execution", "duplicate": True})
+
+        if result.group_result.rejected_reason is not None:
+            return ExecutionOutcome(
+                status="rejected",
+                result={
+                    "mode": "demo_execution",
+                    "rejection_code": result.group_result.rejected_reason,
+                    "message": result.message,
+                },
+            )
+
+        group = result.group_result.group
+        assert group is not None  # sucesso sem duplicate/rejeicao sempre tem grupo
+        # Reconsulta as ordens no banco local -- o objeto que execute_for_account
+        # devolve fica congelado ANTES do order_send (mesma licao da Etapa 2:
+        # nunca confiar no objeto em memoria pra ticket/retcode reais).
+        orders = self.executor.repository.orders_for_group(group.id)
+        order_dicts = [
+            {
+                "tp_index": order.tp_index,
+                "execution_key": build_execution_key(group.signal_id, order.tp_index),
+                "requested_volume": decimal_to_text(order.requested_volume),
+                "normalized_volume": decimal_to_text(order.normalized_volume),
+                "entry_price": decimal_to_text(order.entry_price),
+                "stop_loss": decimal_to_text(order.stop_loss),
+                "take_profit": decimal_to_text(order.take_profit),
+                "status": "sent" if order.mt5_order_ticket else "failed",
+                "mt5_order_ticket": order.mt5_order_ticket,
+                "mt5_position_ticket": order.mt5_position_ticket,
+                "retcode": order.broker_retcode,
+                "retcode_message": order.broker_message,
+            }
+            for order in orders
+        ]
+        return ExecutionOutcome(
+            status="succeeded",
+            result={"mode": "demo_execution", "group_id": group.id},
+            orders=order_dicts,
+        )
+
+
+def _signal_from_payload(payload: dict[str, Any]) -> TradeSignal:
+    return TradeSignal(
+        symbol=payload["symbol"],
+        direction=Direction(payload["direction"]),
+        entry_low=Decimal(payload["entry_low"]),
+        entry_high=Decimal(payload["entry_high"]),
+        stop_loss=Decimal(payload["stop_loss"]),
+        take_profits=tuple(Decimal(value) for value in payload["take_profits"]),
+        raw_text=payload.get("raw_text", ""),
+        source_chat_id=payload.get("source_chat_id"),
+        source_message_id=payload.get("source_message_id"),
+    )
 
 
 class ExecutionAgent:
@@ -297,18 +443,19 @@ class ExecutionAgent:
         reservation_token = job["reservation_token"]
         try:
             await self.client.start_execution_job(job_id, reservation_token)
-            result = await self.backend.execute(job)
+            outcome = await self.backend.execute(job)
             await self.client.complete_execution_job(
-                job_id, reservation_token, status="succeeded", result=result.summary
+                job_id, reservation_token, status=outcome.status, result=outcome.result, orders=outcome.orders
             )
-            self.logger.info("execution_agent_job_succeeded id=%s", job_id)
+            self.logger.info("execution_agent_job_%s id=%s", outcome.status, job_id)
         except Exception as exc:
             # Qualquer falha aqui (start/execute/complete) nunca derruba o
             # loop -- mesma disciplina de run_central_sync_drain_loop.
             # fail_execution_job (nao complete com status='rejected') porque
-            # isso e sempre falha TECNICA neste modo -- nao existe rejeicao
-            # de regra de negocio pra simular ainda (essa logica vive no
-            # PendingOrderExecutor local, nao neste backend).
+            # isso e sempre falha TECNICA -- uma rejeicao de regra de
+            # negocio (spread/risco/noticia) ja volta como
+            # ExecutionOutcome(status="rejected", ...) do backend, nunca
+            # como excecao.
             self.logger.warning("execution_agent_job_failed id=%s erro=%s", job_id, exc)
             try:
                 await self.client.fail_execution_job(
@@ -335,7 +482,10 @@ async def run_execution_agent(config: AppConfig, logger: logging.Logger) -> int:
         config.execution_agent_password,
     )
     client = AgentApiClient(config.supabase_url, config.supabase_anon_key, auth)
-    backend = SimulationExecutionBackend()
+    if config.execution_agent_mode == "demo_execution":
+        backend: SimulationExecutionBackend | RealExecutionBackend = RealExecutionBackend(config)
+    else:
+        backend = SimulationExecutionBackend()
     agent = ExecutionAgent(
         client,
         backend,
@@ -345,12 +495,14 @@ async def run_execution_agent(config: AppConfig, logger: logging.Logger) -> int:
         logger=logger,
     )
     try:
-        logger.info("execution_agent_started modo=simulacao")
+        logger.info("execution_agent_started modo=%s", config.execution_agent_mode)
         await agent.run_forever()
         return 0
     finally:
         await client.close()
         await auth.close()
+        if isinstance(backend, RealExecutionBackend):
+            backend.close()
 
 
 def run(config: AppConfig, logger: logging.Logger) -> int:
