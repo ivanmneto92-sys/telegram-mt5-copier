@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+import functools
 import json
 import logging
 from pathlib import Path
@@ -9,6 +10,7 @@ from dataclasses import replace
 from typing import Any, Awaitable, Callable
 from urllib import parse, request
 
+from .central_sync import CentralSyncClient, CentralSyncOutbox, run_central_sync_drain_loop
 from .config import AppConfig
 from .channel_catalog import ChannelCatalogService
 from .database import (
@@ -17,7 +19,7 @@ from .database import (
     connect_database,
     update_service_heartbeat,
 )
-from .models import DecisionStatus, IncomingMessage, ProcessingDecision
+from .models import DecisionStatus, IncomingMessage, ProcessingDecision, TradeSignal
 from .market_news import MarketNewsService
 from .image_ocr import (
     extract_image_text,
@@ -32,6 +34,7 @@ from .validator import validate_signal
 from .credential_service import CredentialService
 from .mt5.account_service import MT5AccountService
 from .mt5.client import MT5Client, SimulatedMT5Client
+from .mt5.models import ExecutionGroup, MT5Account, PendingOrderPlan
 from .mt5.pending_order_executor import PendingOrderExecutor
 from .mt5.pending_order_executor import PendingExecutionResult
 
@@ -51,6 +54,8 @@ class SignalProcessor:
         pending_order_executor: PendingOrderExecutor | None = None,
         execution_notifier: Callable[[PendingExecutionResult], Awaitable[None]] | None = None,
         publication_scope: str | None = None,
+        central_sync_outbox: CentralSyncOutbox | None = None,
+        queue_pilot_accounts: tuple[MT5Account, ...] = (),
     ) -> None:
         self.database = database
         self.publisher = publisher
@@ -58,6 +63,13 @@ class SignalProcessor:
         self.pending_order_executor = pending_order_executor
         self.execution_notifier = execution_notifier
         self.publication_scope = publication_scope
+        self.central_sync_outbox = central_sync_outbox
+        # Etapa 5d: conta(s) demo dedicada(s), isolada(s) do caminho de
+        # execucao local (execution_profiles.enabled=0 pra elas) -- toda
+        # sinal aceito tambem vira um job pending de verdade na fila central
+        # pra cada uma, sem passar pelo pending_order_executor. Vazio por
+        # padrao (nada muda sem configurar QUEUE_PILOT_ACCOUNT_IDS).
+        self.queue_pilot_accounts = queue_pilot_accounts
         self._closed = False
 
     def close(self) -> None:
@@ -136,7 +148,14 @@ class SignalProcessor:
                 signal.source_chat_id,
                 signal.source_message_id,
             )
-        self.database.record_accepted(signal, formatted_message)
+        local_signal_id = self.database.record_accepted(signal, formatted_message)
+        if self.central_sync_outbox is not None:
+            try:
+                self.central_sync_outbox.enqueue_signal_shadow_write(
+                    signal, formatted_message, local_signal_id
+                )
+            except Exception:
+                self.logger.exception("central_sync_outbox_enqueue_failed")
         if self.pending_order_executor is not None:
             execution_results = await asyncio.to_thread(
                 self.pending_order_executor.execute_for_signal,
@@ -153,6 +172,42 @@ class SignalProcessor:
                 self.logger.info("pending_order_execution:\n%s", result.message)
                 if self.execution_notifier is not None and result.message:
                     await self.execution_notifier(result)
+                if (
+                    self.central_sync_outbox is not None
+                    and self.pending_order_executor.execution_mode in {"demo_execution", "live_execution"}
+                    and result.group_result.group is not None
+                ):
+                    try:
+                        group = result.group_result.group
+                        # Reconsulta as ordens no banco local em vez de usar
+                        # result.group_result.orders -- esse objeto vem
+                        # congelado no momento da criacao do grupo, ANTES de
+                        # qualquer order_send (mark_order_submitted so
+                        # atualiza a linha no SQLite, nunca esses objetos em
+                        # memoria).
+                        orders = self.pending_order_executor.repository.orders_for_group(group.id)
+                        self.central_sync_outbox.enqueue_execution_job_shadow_write(
+                            signal,
+                            result.account,
+                            group,
+                            orders,
+                            rejected_reason=result.group_result.rejected_reason,
+                            local_group_id=group.id,
+                        )
+                    except Exception:
+                        self.logger.exception("central_sync_outbox_execution_enqueue_failed")
+        if self.central_sync_outbox is not None and self.queue_pilot_accounts:
+            # Etapa 5d: independente do pending_order_executor (a conta
+            # piloto nunca passa por ele -- execution_profiles.enabled=0
+            # pra ela, por design) -- todo sinal aceito tambem vira um job
+            # pending de verdade na fila central, pra cada conta piloto.
+            for pilot_account in self.queue_pilot_accounts:
+                try:
+                    self.central_sync_outbox.enqueue_execution_job_pilot_pending(
+                        signal, pilot_account, local_signal_id
+                    )
+                except Exception:
+                    self.logger.exception("central_sync_outbox_pilot_enqueue_failed")
         accepted_decision = ProcessingDecision(
             DecisionStatus.ACCEPTED,
             "accepted",
@@ -183,6 +238,27 @@ def text_for_analysis(incoming: IncomingMessage) -> ProcessingDecision:
     return ProcessingDecision(DecisionStatus.ACCEPTED, "text", formatted_message=incoming.text.strip())
 
 
+def _report_group_created_to_central_sync(
+    outbox: CentralSyncOutbox,
+    logger: logging.Logger,
+    signal: TradeSignal,
+    account: MT5Account,
+    group: ExecutionGroup,
+    plan: PendingOrderPlan,
+) -> None:
+    """Etapa 5a: chamado por PendingOrderExecutor logo apos o grupo local ser
+    criado, ANTES de qualquer order_send -- enfileira a "intencao" de
+    execucao central (job pending), sem nenhum consumidor real reivindicando
+    ainda. Segunda rede de seguranca alem do try/except ja existente dentro
+    de pending_order_executor.py -- uma falha aqui nunca pode propagar pro
+    chamador (que continuaria o envio real da ordem normalmente de qualquer
+    jeito, mas testavel isoladamente sem precisar do PendingOrderExecutor real)."""
+    try:
+        outbox.enqueue_execution_job_pending(signal, account, group, plan)
+    except Exception:
+        logger.exception("central_sync_outbox_pending_enqueue_failed")
+
+
 async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> int:
     api_id, api_hash = validate_telegram_credentials(config)
     if not config.source_chat_ids:
@@ -193,9 +269,22 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
     except ImportError as exc:
         raise RuntimeError("Telethon nao instalado. Execute o setup do ambiente primeiro.") from exc
 
+    if config.central_sync_enabled and not config.node_id:
+        raise ValueError("NODE_ID obrigatorio quando CENTRAL_SYNC_ENABLED=true.")
+    if config.central_sync_enabled and not config.central_sync_database_url:
+        raise ValueError("CENTRAL_SYNC_DATABASE_URL obrigatoria quando CENTRAL_SYNC_ENABLED=true.")
+
     database = SignalDatabase(config.database_path)
     database.initialize()
     channel_catalog = ChannelCatalogService(config.database_path)
+    central_sync_outbox = (
+        CentralSyncOutbox(config.database_path, logger=logger) if config.central_sync_enabled else None
+    )
+    if central_sync_outbox is not None:
+        central_sync_outbox.ensure_activation_baseline()
+    central_sync_client = (
+        CentralSyncClient(config.central_sync_database_url) if config.central_sync_enabled else None
+    )
     publisher = TelegramPublisher(config, logger)
     pending_order_executor = None
     if config.mt5_execution_mode in {"simulation", "demo_execution", "live_execution"}:
@@ -226,6 +315,11 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
                 minutes_after=config.market_news_minutes_after,
                 enabled=config.market_news_enabled,
             ),
+            on_group_created=(
+                functools.partial(_report_group_created_to_central_sync, central_sync_outbox, logger)
+                if central_sync_outbox is not None
+                else None
+            ),
         )
     execution_notifier = None
     if pending_order_executor is not None and config.telegram_bot_token:
@@ -237,6 +331,24 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
                 result.message,
                 logger,
             )
+
+    # Etapa 5d: resolve as contas demo piloteadas pela fila central (se
+    # configuradas) -- so leitura, nao precisa de credential_service (essas
+    # contas nunca sao inicializadas por aqui, so referenciadas no payload).
+    queue_pilot_accounts: tuple[MT5Account, ...] = ()
+    if config.queue_pilot_account_ids:
+        pilot_account_service = mt5_accounts if pending_order_executor is not None else MT5AccountService(
+            config.database_path
+        )
+        resolved_pilot_accounts = []
+        for pilot_account_id in config.queue_pilot_account_ids:
+            pilot_account = pilot_account_service.get_account_by_id(pilot_account_id)
+            if pilot_account is None:
+                logger.warning("queue_pilot_account_nao_encontrada id=%s", pilot_account_id)
+                continue
+            resolved_pilot_accounts.append(pilot_account)
+        queue_pilot_accounts = tuple(resolved_pilot_accounts)
+
     processor = SignalProcessor(
         database,
         publisher,
@@ -244,6 +356,8 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
         pending_order_executor=pending_order_executor,
         execution_notifier=execution_notifier,
         publication_scope=config.destination_chat_id,
+        central_sync_outbox=central_sync_outbox,
+        queue_pilot_accounts=queue_pilot_accounts,
     )
 
     client = TelegramClient(
@@ -325,6 +439,13 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
         validation_task = asyncio.create_task(
             run_channel_validation_loop(client, channel_catalog, logger)
         )
+        central_sync_task = (
+            asyncio.create_task(
+                run_central_sync_drain_loop(central_sync_outbox, central_sync_client, config, logger)
+            )
+            if central_sync_client is not None
+            else None
+        )
         logger.info("Monitoramento Telegram iniciado. DRY_RUN=%s", str(config.dry_run).lower())
         try:
             await client.run_until_disconnected()
@@ -332,6 +453,8 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
         finally:
             heartbeat_task.cancel()
             validation_task.cancel()
+            if central_sync_task is not None:
+                central_sync_task.cancel()
             try:
                 await heartbeat_task
             except asyncio.CancelledError:
@@ -340,6 +463,13 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
                 await validation_task
             except asyncio.CancelledError:
                 pass
+            if central_sync_task is not None:
+                try:
+                    await central_sync_task
+                except asyncio.CancelledError:
+                    pass
+            if central_sync_client is not None:
+                await central_sync_client.close()
     finally:
         processor.close()
         await client.disconnect()

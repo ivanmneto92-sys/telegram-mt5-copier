@@ -25,6 +25,7 @@ from .models import (
     ACCOUNT_TYPE_DEMO,
     ACCOUNT_TYPE_REAL,
     CONNECTION_STATUS_CONNECTED,
+    ExecutionGroup,
     ExecutionProfile,
     GROUP_STATUS_PENDING_ACTIVE,
     GROUP_STATUS_PENDING_SUBMISSION,
@@ -66,6 +67,7 @@ class PendingOrderExecutor:
         planner: PendingOrderPlanner | None = None,
         repository: ExecutionRepository | None = None,
         news_service: MarketNewsService | None = None,
+        on_group_created: Callable[[TradeSignal, MT5Account, ExecutionGroup, PendingOrderPlan], None] | None = None,
     ) -> None:
         self.database_path = database_path
         self.accounts = accounts
@@ -77,6 +79,13 @@ class PendingOrderExecutor:
         self.repository = repository or ExecutionRepository(database_path)
         self.groups = ExecutionGroupService(self.repository)
         self.news_service = news_service or MarketNewsService(database_path)
+        # Etapa 5a: side-effect opcional, disparado logo apos o grupo local
+        # ser criado (antes de qualquer order_send) -- so pra permitir
+        # espelhar a "intencao" no backend central antes do resultado ser
+        # conhecido. Nunca usado quando None (todo chamador/teste existente
+        # continua identico); sempre protegido por try/except no call site,
+        # nunca pode atrasar/impedir o envio real da ordem.
+        self.on_group_created = on_group_created
         self._closed = False
 
     def close(self) -> None:
@@ -279,7 +288,8 @@ class PendingOrderExecutor:
 
         if self.execution_mode in {"demo_execution", "live_execution"}:
             try:
-                return self._execute_demo_plan(
+                return self.execute_plan(
+                    signal=signal,
                     plan=plan,
                     account=account,
                     profile=profile,
@@ -358,9 +368,10 @@ class PendingOrderExecutor:
         finally:
             password = None
 
-    def _execute_demo_plan(
+    def execute_plan(
         self,
         *,
+        signal: TradeSignal,
         plan: PendingOrderPlan,
         account: MT5Account,
         profile: ExecutionProfile,
@@ -368,6 +379,16 @@ class PendingOrderExecutor:
         symbol_info: SymbolInfo,
         metrics: object,
     ) -> PendingExecutionResult:
+        """Etapa 5b: parte de EXECUCAO isolada da parte de PLANEJAMENTO
+        (symbol resolve, tick, PendingOrderPlanner.plan(), validacao de
+        risco/noticia -- tudo isso continua em execute_for_account, antes
+        deste metodo ser chamado). Recebe um plano ja pronto e validado
+        contra o terminal (client/symbol_info reais) e roda order_check/
+        order_send/rollback/registro -- publico e auto-contido de proposito,
+        pra poder ser chamado tanto pelo fluxo local (como ja e hoje, via
+        execute_for_account) quanto pelo agente da Etapa 4 em modo
+        demo_execution (Etapa 5c), que monta seu proprio plano fresco a
+        partir de um job da fila central em vez de um sinal local."""
         if self.repository.has_execution_group(plan.signal_id, plan.user_id, plan.mt5_account_id):
             return PendingExecutionResult(
                 account=account,
@@ -417,6 +438,11 @@ class PendingOrderExecutor:
             order_status=ORDER_STATUS_PENDING_SUBMISSION,
             metrics=metrics,
         )
+        if self.on_group_created is not None:
+            try:
+                self.on_group_created(signal, account, group, plan)
+            except Exception:
+                LOGGER.exception("on_group_created_callback_failed")
         send_results = []
         submitted_orders: list[tuple[str, PlannedOrder]] = []
         for database_order, request, planned_order in zip(
@@ -1009,6 +1035,56 @@ def estimated_plan_loss(
 
 def money_text(value: Decimal) -> str:
     return f"$ {value.quantize(Decimal('0.01'))}"
+
+
+# Traduz os codigos curtos que o executor grava em execution_groups.error_code
+# pra uma frase legivel. O bot mostra os mesmos codigos crus na tela de
+# historico hoje (nenhum lugar traduzia isso antes); o portal do cliente e
+# quem consome este mapa primeiro. Motivos que ja sao uma frase em portugues
+# (por exemplo os dois primeiros de rejection_guidance) passam direto, sem
+# entrada aqui -- o fallback no final cobre esses e qualquer codigo novo que
+# ainda nao tenha sido adicionado a este mapa.
+REJECTION_REASON_LABELS: dict[str, str] = {
+    "live_accounts_not_allowed": "Execução em contas reais está desativada nesta VPS.",
+    "terminal_not_provisioned": "O terminal MT5 desta conta ainda não foi provisionado.",
+    "account_disconnected": "A conta MT5 está desconectada.",
+    "kill_switch_enabled": "Execução de ordens pausada globalmente (kill switch).",
+    "real_account_blocked": "Contas reais não são permitidas neste modo de execução.",
+    "only_demo_accounts_supported": "Somente contas demo são suportadas neste modo.",
+    "terminal_disconnected": "O terminal MT5 perdeu a conexão.",
+    "terminal_trading_not_allowed": "Negociação não permitida no terminal (verifique o AutoTrading).",
+    "account_trading_not_allowed": "Esta conta não tem permissão para negociar nesta corretora.",
+    "mt5_login_mismatch": "O login conectado no terminal não confere com o da conta cadastrada.",
+    "symbol_select_failed": "Não foi possível selecionar o ativo no MetaTrader 5.",
+    "mt5_initialize_failed": "Falha ao iniciar o terminal MetaTrader 5.",
+    "netting_multiple_tps_not_supported": "Conta netting não suporta múltiplos alvos (TPs) neste sinal.",
+    "missing_orders": "Nenhuma ordem foi gerada para este sinal.",
+    "symbol_trade_disabled": "Negociação deste ativo está desabilitada na corretora.",
+    "order_expired": "A ordem pendente expirou antes de ser preenchida.",
+    "price_hit_sl_before_entry": "O preço já atingiu o stop antes da entrada ser alcançada.",
+    "price_hit_tp_before_entry": "O preço já atingiu o alvo antes da entrada ser alcançada.",
+    "buy_stop_loss_not_below_entry": "Stop loss inválido: precisa ficar abaixo da entrada numa compra.",
+    "buy_take_profit_not_above_entry": "Take profit inválido: precisa ficar acima da entrada numa compra.",
+    "sell_stop_loss_not_above_entry": "Stop loss inválido: precisa ficar acima da entrada numa venda.",
+    "sell_take_profit_not_below_entry": "Take profit inválido: precisa ficar abaixo da entrada numa venda.",
+    "stop_loss_inside_broker_stops_level": "Stop loss muito próximo do preço para o mínimo da corretora.",
+    "take_profit_inside_broker_stops_level": "Take profit muito próximo do preço para o mínimo da corretora.",
+    "symbol_point_invalid": "A corretora retornou dados inválidos para o ativo.",
+    "negative_spread": "Spread inválido (negativo) reportado pela corretora.",
+    "max_spread_exceeded": "Spread acima do limite máximo configurado.",
+    "max_open_signals_reached": "Limite de operações simultâneas já foi atingido.",
+    "daily_profit_target_reached": (
+        "Meta de lucro diária já foi atingida — novos sinais ficam bloqueados até a próxima sessão."
+    ),
+    "daily_loss_limit_reached": (
+        "Limite de perda diária já foi atingido — novos sinais ficam bloqueados até a próxima sessão."
+    ),
+    "high_impact_news_window": "Bloqueado pela proteção de notícias de alto impacto.",
+}
+
+
+def rejection_reason_label(reason: str) -> str:
+    return REJECTION_REASON_LABELS.get(reason, reason)
 
 
 def rejection_guidance(

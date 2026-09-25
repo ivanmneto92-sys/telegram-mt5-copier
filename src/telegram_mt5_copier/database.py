@@ -12,6 +12,7 @@ from .models import DecisionStatus, IncomingMessage, TradeSignal, decimal_to_tex
 SQLITE_TIMEOUT_SECONDS = 30.0
 DUPLICATE_WINDOW_MINUTES = 240
 SIGNAL_MONITOR_SERVICE_NAME = "telegram_signal_monitor"
+CENTRAL_SYNC_SERVICE_NAME = "telegram_central_sync"
 
 
 class SignalDatabase:
@@ -152,7 +153,7 @@ class SignalDatabase:
             finally:
                 cursor.close()
 
-    def record_accepted(self, signal: TradeSignal, formatted_message: str) -> None:
+    def record_accepted(self, signal: TradeSignal, formatted_message: str) -> int:
         now = utc_now()
         with connect_database(self.database_path) as connection:
             cursor = connection.execute(
@@ -190,6 +191,7 @@ class SignalDatabase:
                     now,
                 ),
             )
+            signal_id = int(cursor.lastrowid)
             cursor.close()
             cursor = connection.execute(
                 """
@@ -215,6 +217,7 @@ class SignalDatabase:
                 ),
             )
             cursor.close()
+        return signal_id
 
     def record_event(
         self,
@@ -309,6 +312,61 @@ def initialize_database(database_path: Path) -> None:
                 source_message_id TEXT,
                 raw_text TEXT,
                 created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS central_sync_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL,
+                source_signal_id INTEGER,
+                source_execution_group_id INTEGER,
+                source_account_id INTEGER,
+                payload TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                next_attempt_at TEXT NOT NULL
+            );
+
+            -- Indice unico de (kind, source_signal_id) NAO fica aqui -- essa
+            -- coluna so existe de fabrica em banco novo; num banco que ja
+            -- tinha central_sync_outbox antes desta coluna existir (Etapa 2),
+            -- CREATE TABLE IF NOT EXISTS acima e um no-op e a coluna so chega
+            -- via ensure_column() em run_schema_migrations, mais abaixo neste
+            -- arquivo. Criar o indice aqui quebraria esse upgrade com
+            -- "no such column: source_signal_id". O indice e criado logo
+            -- depois do ensure_column correspondente.
+
+            -- Marco de ativacao: qual signals.id existia quando o shadow-write
+            -- comecou a rodar pela primeira vez nesta instalacao. Sinais com id
+            -- menor ou igual a este nunca vao ter linha de outbox (o recurso nao
+            -- existia ainda) -- usado por operational_health.py pra nao gerar
+            -- alerta falso permanente de "sinal nunca enfileirado" sobre
+            -- historico anterior a Etapa 2.
+            CREATE TABLE IF NOT EXISTS central_sync_activation (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                activation_signal_id INTEGER NOT NULL,
+                activated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS central_sync_outbox_pending_idx
+                ON central_sync_outbox (status, next_attempt_at);
+
+            -- Etapa 3B: achados abertos da auditoria de conteudo contra o
+            -- Supabase real -- uma linha por sinal com content_signature
+            -- divergente (ou ausente) no central. Identidade por linha, nao
+            -- um resumo sobrescrito a cada ciclo -- mesmo motivo da correcao
+            -- da Etapa 3 (amostragem e aleatoria, um resumo unico mudaria de
+            -- sinal a cada ciclo e quebraria a supressao de repeticao).
+            -- remote_content_signature NULL distingue "nunca chegou no
+            -- Supabase" de "chegou com conteudo diferente".
+            CREATE TABLE IF NOT EXISTS central_sync_audit_findings (
+                signal_id INTEGER PRIMARY KEY,
+                detected_at TEXT NOT NULL,
+                last_checked_at TEXT NOT NULL,
+                local_content_signature TEXT NOT NULL,
+                remote_content_signature TEXT
             );
 
             CREATE TABLE IF NOT EXISTS users (
@@ -688,9 +746,47 @@ def initialize_database(database_path: Path) -> None:
                 failed_attempts INTEGER NOT NULL DEFAULT 0,
                 locked_until TEXT,
                 password_changed_at TEXT NOT NULL,
+                email_confirmed_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS client_password_reset_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_hash TEXT NOT NULL UNIQUE,
+                user_id INTEGER NOT NULL,
+                expires_at TEXT NOT NULL,
+                used_at TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS client_email_confirmation_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_hash TEXT NOT NULL UNIQUE,
+                user_id INTEGER NOT NULL,
+                email TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                used_at TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            );
+
+            -- Login por e-mail/senha para administradores, no mesmo padrao de
+            -- client_credentials: a identidade continua sendo o Telegram user id
+            -- configurado em BOT_ADMIN_IDS (nunca um conceito de usuario novo),
+            -- e-mail/senha e so um segundo jeito de abrir sessao nessa mesma
+            -- identidade, sem depender do bot para logar toda vez.
+            CREATE TABLE IF NOT EXISTS admin_credentials (
+                admin_telegram_user_id INTEGER PRIMARY KEY,
+                email TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                password_hash TEXT NOT NULL,
+                failed_attempts INTEGER NOT NULL DEFAULT 0,
+                locked_until TEXT,
+                password_changed_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS source_channels (
@@ -1016,6 +1112,47 @@ def run_schema_migrations(connection: sqlite3.Connection) -> None:
         "be_attempts",
         "INTEGER NOT NULL DEFAULT 0",
     )
+    ensure_column(connection, "client_credentials", "email_confirmed_at", "TEXT")
+    ensure_column(connection, "central_sync_outbox", "source_signal_id", "INTEGER")
+    # So depois do ensure_column acima: numa instalacao que ja tinha
+    # central_sync_outbox antes desta coluna existir, criar o indice antes
+    # falharia com "no such column: source_signal_id".
+    # Escopado a kind='signal_shadow_write' (nao a qualquer kind) -- a Etapa
+    # 5d introduziu outro kind (execution_job_pilot_pending) que tambem grava
+    # source_signal_id, mas la o mesmo sinal PRECISA poder gerar mais de uma
+    # linha (uma por conta piloto); sem esse escopo, este indice bloquearia
+    # isso incorretamente. Drop+recreate porque "IF NOT EXISTS" nao alteraria
+    # a definicao de um indice ja criado por uma instalacao anterior.
+    connection.execute("DROP INDEX IF EXISTS central_sync_outbox_source_signal_idx").close()
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS central_sync_outbox_source_signal_idx
+            ON central_sync_outbox (kind, source_signal_id)
+            WHERE source_signal_id IS NOT NULL AND kind = 'signal_shadow_write'
+        """
+    ).close()
+    ensure_column(connection, "central_sync_outbox", "source_execution_group_id", "INTEGER")
+    # Mesmo motivo do indice de source_signal_id acima: so depois do ensure_column.
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS central_sync_outbox_source_execution_group_idx
+            ON central_sync_outbox (kind, source_execution_group_id)
+            WHERE source_execution_group_id IS NOT NULL
+        """
+    ).close()
+    ensure_column(connection, "central_sync_outbox", "source_account_id", "INTEGER")
+    # Etapa 5d: produtor pra conta(s) piloteada(s) pela fila -- nao existe
+    # execution_group local nenhum pra ancorar (a conta nunca executa
+    # localmente), entao a idempotencia usa (kind, source_signal_id,
+    # source_account_id) -- o mesmo sinal pra contas piloto diferentes nao
+    # pode colidir num indice que so olhasse (kind, source_signal_id).
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS central_sync_outbox_pilot_signal_account_idx
+            ON central_sync_outbox (kind, source_signal_id, source_account_id)
+            WHERE source_signal_id IS NOT NULL AND source_account_id IS NOT NULL
+        """
+    ).close()
     migrate_channel_subscriptions_to_explicit_opt_in(connection)
 
 

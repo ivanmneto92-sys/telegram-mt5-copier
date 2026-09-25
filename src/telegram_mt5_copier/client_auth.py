@@ -1,26 +1,26 @@
 from __future__ import annotations
 
-import base64
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-import hashlib
-import hmac
 from pathlib import Path
-import re
 import secrets
 import sqlite3
 from urllib.parse import urlsplit, urlunsplit
 
-from .admin_auth import token_hash
+# Primitivos de e-mail/senha (hash_password, validate_password, normalize_email,
+# etc.) moram em admin_auth.py e sao só reaproveitados aqui — ver o comentário
+# lá para o motivo (evitar import circular com token_hash).
+from .admin_auth import (
+    DUMMY_PASSWORD_HASH,
+    PASSWORD_LOCK_ATTEMPTS,
+    PASSWORD_LOCK_MINUTES,
+    hash_password,
+    normalize_email,
+    token_hash,
+    validate_password,
+    verify_password,
+)
 from .database import connect_database, initialize_database, utc_now
-
-
-PASSWORD_LOCK_ATTEMPTS = 5
-PASSWORD_LOCK_MINUTES = 15
-PASSWORD_SCRYPT_N = 2**14
-PASSWORD_SCRYPT_R = 8
-PASSWORD_SCRYPT_P = 1
-EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 
 @dataclass(frozen=True)
@@ -39,10 +39,14 @@ class ClientBrowserAuthService:
         *,
         login_ttl_minutes: int = 5,
         session_ttl_hours: int = 12,
+        password_reset_ttl_minutes: int = 30,
+        email_confirmation_ttl_hours: int = 48,
     ) -> None:
         self.database_path = database_path
         self.login_ttl_minutes = login_ttl_minutes
         self.session_ttl_hours = session_ttl_hours
+        self.password_reset_ttl_minutes = password_reset_ttl_minutes
+        self.email_confirmation_ttl_hours = email_confirmation_ttl_hours
         initialize_database(database_path)
 
     def create_login_url(self, user_id: int, app_url: str) -> str:
@@ -242,6 +246,157 @@ class ClientBrowserAuthService:
         except sqlite3.IntegrityError as exc:
             raise ValueError("Este e-mail já está em uso.") from exc
 
+    def request_password_reset(self, email: str, app_url: str) -> str | None:
+        """Gera o link de redefinicao se o e-mail existir; None caso contrario.
+
+        Nunca informe ao cliente HTTP se o e-mail existe ou nao (evita que
+        alguem descubra quais e-mails estao cadastrados) — a camada HTTP deve
+        responder {"ok": true} de qualquer forma, com ou sem retorno aqui.
+        """
+        parsed = urlsplit(app_url)
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise ValueError("URL HTTPS do aplicativo do cliente nao configurada.")
+        clean_email = normalize_email(email)
+        now = datetime.now(tz=timezone.utc)
+        with connect_database(self.database_path) as connection:
+            row = connection.execute(
+                "SELECT user_id FROM client_credentials WHERE email = ? COLLATE NOCASE",
+                (clean_email,),
+            ).fetchone()
+            if row is None:
+                return None
+            user_id = int(row[0])
+            raw_token = secrets.token_urlsafe(32)
+            expires_at = now + timedelta(minutes=self.password_reset_ttl_minutes)
+            connection.execute(
+                """
+                INSERT INTO client_password_reset_tokens (
+                    token_hash, user_id, expires_at, used_at, created_at
+                ) VALUES (?, ?, ?, NULL, ?)
+                """,
+                (token_hash(raw_token), user_id, expires_at.isoformat(), now.isoformat()),
+            )
+            connection.execute(
+                "DELETE FROM client_password_reset_tokens WHERE expires_at < ? OR used_at IS NOT NULL",
+                ((now - timedelta(days=1)).isoformat(),),
+            )
+        return urlunsplit(
+            (parsed.scheme, parsed.netloc, parsed.path or "/", parsed.query, f"reset_token={raw_token}")
+        )
+
+    def reset_password(self, raw_token: str, new_password: str) -> int:
+        """Redefine a senha e devolve o user_id afetado.
+
+        O retorno permite que a camada HTTP envie o aviso de seguranca
+        ("sua senha foi alterada") sem precisar decodificar o token de novo.
+        """
+        if not raw_token or len(raw_token) > 256:
+            raise ValueError("Link de redefinição inválido ou expirado.")
+        password_hash = hash_password(validate_password(new_password))
+        now = datetime.now(tz=timezone.utc)
+        with connect_database(self.database_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT id, user_id, expires_at, used_at
+                FROM client_password_reset_tokens WHERE token_hash = ?
+                """,
+                (token_hash(raw_token),),
+            ).fetchone()
+            if row is None or row[3] is not None or datetime.fromisoformat(str(row[2])) <= now:
+                raise ValueError("Link de redefinição inválido ou expirado.")
+            update = connection.execute(
+                "UPDATE client_password_reset_tokens SET used_at = ? WHERE id = ? AND used_at IS NULL",
+                (now.isoformat(), int(row[0])),
+            )
+            if update.rowcount != 1:
+                raise ValueError("Link de redefinição inválido ou expirado.")
+            user_id = int(row[1])
+            connection.execute(
+                """
+                UPDATE client_credentials
+                SET password_hash = ?, failed_attempts = 0, locked_until = NULL,
+                    password_changed_at = ?, updated_at = ?
+                WHERE user_id = ?
+                """,
+                (password_hash, now.isoformat(), now.isoformat(), user_id),
+            )
+            # Redefinir a senha revoga sessoes existentes: se alguem indevido
+            # tinha acesso, perde a sessao no momento em que o dono retoma a conta.
+            connection.execute(
+                """
+                UPDATE client_browser_sessions SET revoked_at = ?
+                WHERE user_id = ? AND revoked_at IS NULL
+                """,
+                (now.isoformat(), user_id),
+            )
+        return user_id
+
+    def request_email_confirmation(self, user_id: int, app_url: str) -> str:
+        parsed = urlsplit(app_url)
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise ValueError("URL HTTPS do aplicativo do cliente nao configurada.")
+        now = datetime.now(tz=timezone.utc)
+        with connect_database(self.database_path) as connection:
+            row = connection.execute(
+                "SELECT email FROM client_credentials WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("Cliente não encontrado.")
+            current_email = str(row[0])
+            raw_token = secrets.token_urlsafe(32)
+            expires_at = now + timedelta(hours=self.email_confirmation_ttl_hours)
+            connection.execute(
+                """
+                INSERT INTO client_email_confirmation_tokens (
+                    token_hash, user_id, email, expires_at, used_at, created_at
+                ) VALUES (?, ?, ?, ?, NULL, ?)
+                """,
+                (token_hash(raw_token), user_id, current_email, expires_at.isoformat(), now.isoformat()),
+            )
+            connection.execute(
+                "DELETE FROM client_email_confirmation_tokens WHERE expires_at < ? OR used_at IS NOT NULL",
+                ((now - timedelta(days=1)).isoformat(),),
+            )
+        return urlunsplit(
+            (parsed.scheme, parsed.netloc, parsed.path or "/", parsed.query, f"confirm_token={raw_token}")
+        )
+
+    def confirm_email(self, raw_token: str) -> None:
+        if not raw_token or len(raw_token) > 256:
+            raise ValueError("Link de confirmação inválido ou expirado.")
+        now = datetime.now(tz=timezone.utc)
+        with connect_database(self.database_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT id, user_id, email, expires_at, used_at
+                FROM client_email_confirmation_tokens WHERE token_hash = ?
+                """,
+                (token_hash(raw_token),),
+            ).fetchone()
+            if row is None or row[4] is not None or datetime.fromisoformat(str(row[3])) <= now:
+                raise ValueError("Link de confirmação inválido ou expirado.")
+            update = connection.execute(
+                "UPDATE client_email_confirmation_tokens SET used_at = ? WHERE id = ? AND used_at IS NULL",
+                (now.isoformat(), int(row[0])),
+            )
+            if update.rowcount != 1:
+                raise ValueError("Link de confirmação inválido ou expirado.")
+            user_id = int(row[1])
+            token_email = str(row[2])
+            # So confirma se o e-mail continuar sendo o mesmo de quando o link
+            # foi emitido — se o cliente trocou de e-mail depois, este link
+            # antigo nao pode confirmar o e-mail novo.
+            connection.execute(
+                """
+                UPDATE client_credentials SET email_confirmed_at = ?, updated_at = ?
+                WHERE user_id = ? AND email = ? COLLATE NOCASE
+                """,
+                (now.isoformat(), now.isoformat(), user_id, token_email),
+            )
+
     def consume_login_token(self, raw_token: str) -> BrowserClientSession:
         if not raw_token or len(raw_token) > 256:
             raise ValueError("Link de acesso invalido.")
@@ -320,13 +475,6 @@ class ClientBrowserAuthService:
         return BrowserClientSession(user_id, session_token, expires_at.isoformat())
 
 
-def normalize_email(value: str) -> str:
-    email = value.strip().casefold()
-    if len(email) > 254 or not EMAIL_PATTERN.fullmatch(email):
-        raise ValueError("Informe um e-mail válido.")
-    return email
-
-
 def validate_customer_name(value: str) -> str:
     name = " ".join(value.strip().split())
     if len(name) < 3 or len(name) > 120:
@@ -340,58 +488,3 @@ def validate_phone(value: str) -> str:
     if len(phone) > 40 or len(digits) < 8:
         raise ValueError("Informe um telefone válido.")
     return phone
-
-
-def validate_password(value: str) -> str:
-    if len(value) < 8 or len(value) > 128:
-        raise ValueError("A senha deve ter entre 8 e 128 caracteres.")
-    if not any(character.isalpha() for character in value) or not any(
-        character.isdigit() for character in value
-    ):
-        raise ValueError("A senha deve conter letras e números.")
-    return value
-
-
-def hash_password(value: str) -> str:
-    salt = secrets.token_bytes(16)
-    digest = hashlib.scrypt(
-        value.encode("utf-8"),
-        salt=salt,
-        n=PASSWORD_SCRYPT_N,
-        r=PASSWORD_SCRYPT_R,
-        p=PASSWORD_SCRYPT_P,
-        dklen=32,
-    )
-    return "$".join(
-        (
-            "scrypt",
-            str(PASSWORD_SCRYPT_N),
-            str(PASSWORD_SCRYPT_R),
-            str(PASSWORD_SCRYPT_P),
-            base64.urlsafe_b64encode(salt).decode("ascii"),
-            base64.urlsafe_b64encode(digest).decode("ascii"),
-        )
-    )
-
-
-def verify_password(value: str, encoded: str) -> bool:
-    try:
-        scheme, raw_n, raw_r, raw_p, raw_salt, raw_digest = encoded.split("$", 5)
-        if scheme != "scrypt":
-            return False
-        salt = base64.urlsafe_b64decode(raw_salt.encode("ascii"))
-        expected = base64.urlsafe_b64decode(raw_digest.encode("ascii"))
-        actual = hashlib.scrypt(
-            value.encode("utf-8"),
-            salt=salt,
-            n=int(raw_n),
-            r=int(raw_r),
-            p=int(raw_p),
-            dklen=len(expected),
-        )
-        return hmac.compare_digest(actual, expected)
-    except (ValueError, TypeError):
-        return False
-
-
-DUMMY_PASSWORD_HASH = hash_password("senha-inexistente-123")

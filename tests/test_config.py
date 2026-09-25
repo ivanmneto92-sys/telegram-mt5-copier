@@ -10,6 +10,7 @@ from telegram_mt5_copier.config import (
     parse_broker_servers,
     parse_bool,
     parse_instance_id,
+    parse_optional_node_id,
     parse_port,
     parse_source_chat_ids,
     project_path,
@@ -35,17 +36,126 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.brand_name, "Instituto Trader")
             self.assertEqual(config.local_onboarding_url, "http://127.0.0.1:8080")
             self.assertEqual(config.peer_channel_sync_database_paths, ())
+            self.assertEqual(config.node_id, "")
+            self.assertEqual(config.central_sync_enabled, False)
+            self.assertIsNone(config.central_sync_database_url)
+
+    def test_central_sync_desligado_por_padrao_nao_exige_node_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = AppConfig.load(project_root=Path(tmp), env={}, create_dirs=True)
+
+            self.assertFalse(config.central_sync_enabled)
+            self.assertEqual(config.node_id, "")
+
+    def test_central_sync_le_variaveis_quando_habilitado(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "NODE_ID": "vps-01",
+                "CENTRAL_SYNC_ENABLED": "true",
+                "CENTRAL_SYNC_DATABASE_URL": "postgresql://postgres:postgres@127.0.0.1:54322/postgres",
+                "CENTRAL_SYNC_POLL_SECONDS": "10",
+                "CENTRAL_SYNC_MAX_BATCH": "50",
+            }
+            config = AppConfig.load(project_root=Path(tmp), env=env, create_dirs=True)
+
+            self.assertTrue(config.central_sync_enabled)
+            self.assertEqual(config.node_id, "vps-01")
+            self.assertEqual(config.node_label, "vps-01")
+            self.assertEqual(
+                config.central_sync_database_url,
+                "postgresql://postgres:postgres@127.0.0.1:54322/postgres",
+            )
+            self.assertEqual(config.central_sync_poll_seconds, 10)
+            self.assertEqual(config.central_sync_max_batch, 50)
+
+    def test_queue_pilot_account_ids_vazio_por_padrao(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = AppConfig.load(project_root=Path(tmp), env={}, create_dirs=True)
+
+            self.assertEqual(config.queue_pilot_account_ids, ())
+
+    def test_queue_pilot_account_ids_le_lista_separada_por_virgula(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = AppConfig.load(
+                project_root=Path(tmp),
+                env={"QUEUE_PILOT_ACCOUNT_IDS": "7, 12,99"},
+                create_dirs=True,
+            )
+
+            self.assertEqual(config.queue_pilot_account_ids, (7, 12, 99))
+
+    def test_queue_pilot_account_ids_invalido_levanta_erro_claro(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError) as ctx:
+                AppConfig.load(
+                    project_root=Path(tmp),
+                    env={"QUEUE_PILOT_ACCOUNT_IDS": "7,abc"},
+                    create_dirs=True,
+                )
+            self.assertIn("QUEUE_PILOT_ACCOUNT_IDS", str(ctx.exception))
+
+    def test_config_combinado_backup_e_central_sync_nao_se_contaminam(self) -> None:
+        """Reconciliacao com main: backup (Backblaze B2) e central_sync (Etapa
+        2/3) sao dois blocos de config totalmente independentes, adicionados
+        cada um do seu lado do merge -- confirma que carregar os dois juntos
+        nao quebra nada, e que CENTRAL_SYNC_ENABLED continua false por padrao
+        (a variavel e OMITIDA aqui de proposito, pra testar o default de
+        verdade, nao um "false" explicito)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "BACKUP_ENCRYPTION_KEY": "chave-teste-123",
+                "BACKUP_RETENTION_DAYS": "30",
+                "B2_KEY_ID": "b2-key-id",
+                "B2_APPLICATION_KEY": "b2-app-key",
+                "B2_BUCKET_NAME": "meu-bucket",
+                "NODE_ID": "vps-homolog",
+                "CENTRAL_SYNC_DATABASE_URL": "postgresql://postgres:postgres@127.0.0.1:54322/postgres",
+                "CENTRAL_SYNC_POLL_SECONDS": "5",
+                "CENTRAL_SYNC_MAX_BATCH": "20",
+                "CENTRAL_SYNC_DELIVERY_LAG_SECONDS": "600",
+            }
+            self.assertNotIn("CENTRAL_SYNC_ENABLED", env)
+
+            config = AppConfig.load(project_root=Path(tmp), env=env, create_dirs=True)
+
+            # Backup carregou certo.
+            self.assertEqual(config.backup_encryption_key, "chave-teste-123")
+            self.assertEqual(config.backup_retention_days, 30)
+            self.assertEqual(config.b2_key_id, "b2-key-id")
+            self.assertEqual(config.b2_application_key, "b2-app-key")
+            self.assertEqual(config.b2_bucket_name, "meu-bucket")
+
+            # Central sync carregou certo, mas continua DESLIGADO por padrao
+            # mesmo com NODE_ID e as outras variaveis presentes.
+            self.assertEqual(config.node_id, "vps-homolog")
+            self.assertIs(config.central_sync_enabled, False)
+
+    def test_node_label_default_para_node_id_quando_vazio(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = AppConfig.load(
+                project_root=Path(tmp), env={"NODE_ID": "vps-02"}, create_dirs=True
+            )
+
+            self.assertEqual(config.node_label, "vps-02")
+
+    def test_node_id_invalido_e_rejeitado(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_optional_node_id("VPS com espaço!")
+
+    def test_node_id_vazio_e_permitido_pelo_parser(self) -> None:
+        self.assertEqual(parse_optional_node_id(""), "")
 
     def test_peer_channel_sync_databases_sao_resolvidos_a_partir_da_raiz(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project_root = Path(tmp)
+            absolute_peer = (project_root / "abs" / "peer.sqlite3").resolve()
 
             config = AppConfig.load(
                 project_root=project_root,
                 env={
                     "PEER_CHANNEL_SYNC_DATABASES": (
                         "../robo_braba/data/telegram_mt5_copier.sqlite3,"
-                        "/abs/peer.sqlite3"
+                        f"{absolute_peer}"
                     )
                 },
                 create_dirs=True,
@@ -55,7 +165,7 @@ class ConfigTests(unittest.TestCase):
                 config.peer_channel_sync_database_paths,
                 (
                     project_root / "../robo_braba/data/telegram_mt5_copier.sqlite3",
-                    Path("/abs/peer.sqlite3"),
+                    absolute_peer,
                 ),
             )
 

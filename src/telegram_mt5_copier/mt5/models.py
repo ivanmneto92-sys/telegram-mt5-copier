@@ -182,6 +182,8 @@ class ExecutionOrder:
     status: str
     mt5_order_ticket: str | None = None
     mt5_position_ticket: str | None = None
+    broker_retcode: str | None = None
+    broker_message: str | None = None
 
 
 @dataclass(frozen=True)

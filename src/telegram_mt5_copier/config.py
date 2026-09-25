@@ -104,6 +104,27 @@ class AppConfig:
     telegram_image_ocr_chat_ids: tuple[str, ...] = field(repr=False)
     tesseract_command: str | None = field(repr=False)
     peer_channel_sync_database_paths: tuple[Path, ...] = field(repr=False)
+    resend_api_key: str | None = field(repr=False)
+    resend_from_email: str | None = field(repr=False)
+    node_id: str
+    node_label: str
+    central_sync_enabled: bool
+    central_sync_database_url: str | None = field(repr=False)
+    central_sync_poll_seconds: int
+    central_sync_max_batch: int
+    central_sync_delivery_lag_seconds: int
+    central_sync_audit_sample_size: int
+    central_sync_audit_interval_seconds: int
+    execution_agent_enabled: bool
+    execution_agent_mode: str
+    supabase_url: str | None = field(repr=False)
+    supabase_anon_key: str | None = field(repr=False)
+    execution_agent_email: str | None = field(repr=False)
+    execution_agent_password: str | None = field(repr=False)
+    execution_agent_poll_seconds: int
+    execution_agent_claim_limit: int
+    execution_agent_lease_seconds: int
+    queue_pilot_account_ids: tuple[int, ...]
     backup_encryption_key: str | None = field(repr=False)
     backup_retention_days: int
     b2_key_id: str | None = field(repr=False)
@@ -136,6 +157,8 @@ class AppConfig:
         ).strip()
         if not onboarding_host:
             raise ValueError("ONBOARDING_HOST nao pode ficar vazio.")
+        node_id = parse_optional_node_id(_value("NODE_ID", file_values, runtime_env, ""))
+        node_label = _value("NODE_LABEL", file_values, runtime_env, "").strip() or node_id
 
         config = cls(
             project_root=root,
@@ -241,6 +264,68 @@ class AppConfig:
                 _optional_value("PEER_CHANNEL_SYNC_DATABASES", file_values, runtime_env),
                 root,
             ),
+            resend_api_key=_optional_value("RESEND_API_KEY", file_values, runtime_env),
+            resend_from_email=_optional_value("RESEND_FROM_EMAIL", file_values, runtime_env),
+            node_id=node_id,
+            node_label=node_label,
+            central_sync_enabled=parse_bool(
+                _value("CENTRAL_SYNC_ENABLED", file_values, runtime_env, "false"),
+                default=False,
+            ),
+            central_sync_database_url=_optional_value(
+                "CENTRAL_SYNC_DATABASE_URL", file_values, runtime_env
+            ),
+            central_sync_poll_seconds=parse_positive_int(
+                _value("CENTRAL_SYNC_POLL_SECONDS", file_values, runtime_env, "5"),
+                "CENTRAL_SYNC_POLL_SECONDS",
+            ),
+            central_sync_max_batch=parse_positive_int(
+                _value("CENTRAL_SYNC_MAX_BATCH", file_values, runtime_env, "20"),
+                "CENTRAL_SYNC_MAX_BATCH",
+            ),
+            central_sync_delivery_lag_seconds=parse_positive_int(
+                _value("CENTRAL_SYNC_DELIVERY_LAG_SECONDS", file_values, runtime_env, "600"),
+                "CENTRAL_SYNC_DELIVERY_LAG_SECONDS",
+            ),
+            central_sync_audit_sample_size=parse_positive_int(
+                _value("CENTRAL_SYNC_AUDIT_SAMPLE_SIZE", file_values, runtime_env, "5"),
+                "CENTRAL_SYNC_AUDIT_SAMPLE_SIZE",
+            ),
+            central_sync_audit_interval_seconds=parse_positive_int(
+                _value("CENTRAL_SYNC_AUDIT_INTERVAL_SECONDS", file_values, runtime_env, "1800"),
+                "CENTRAL_SYNC_AUDIT_INTERVAL_SECONDS",
+            ),
+            execution_agent_enabled=parse_bool(
+                _value("EXECUTION_AGENT_ENABLED", file_values, runtime_env, "false"),
+                default=False,
+            ),
+            execution_agent_mode=_value(
+                "EXECUTION_AGENT_MODE", file_values, runtime_env, "simulation"
+            ).strip().lower(),
+            supabase_url=_optional_value("SUPABASE_URL", file_values, runtime_env),
+            supabase_anon_key=_optional_value("SUPABASE_ANON_KEY", file_values, runtime_env),
+            execution_agent_email=_optional_value(
+                "EXECUTION_AGENT_EMAIL", file_values, runtime_env
+            ),
+            execution_agent_password=_optional_value(
+                "EXECUTION_AGENT_PASSWORD", file_values, runtime_env
+            ),
+            execution_agent_poll_seconds=parse_positive_int(
+                _value("EXECUTION_AGENT_POLL_SECONDS", file_values, runtime_env, "5"),
+                "EXECUTION_AGENT_POLL_SECONDS",
+            ),
+            execution_agent_claim_limit=parse_positive_int(
+                _value("EXECUTION_AGENT_CLAIM_LIMIT", file_values, runtime_env, "5"),
+                "EXECUTION_AGENT_CLAIM_LIMIT",
+            ),
+            execution_agent_lease_seconds=parse_positive_int(
+                _value("EXECUTION_AGENT_LEASE_SECONDS", file_values, runtime_env, "60"),
+                "EXECUTION_AGENT_LEASE_SECONDS",
+            ),
+            queue_pilot_account_ids=parse_int_id_list(
+                _optional_value("QUEUE_PILOT_ACCOUNT_IDS", file_values, runtime_env),
+                "QUEUE_PILOT_ACCOUNT_IDS",
+            ),
             backup_encryption_key=_optional_value(
                 "BACKUP_ENCRYPTION_KEY", file_values, runtime_env
             ),
@@ -301,20 +386,24 @@ class AppConfig:
 
 
 def parse_admin_ids(value: str | None) -> tuple[int, ...]:
+    return parse_int_id_list(value, "BOT_ADMIN_IDS")
+
+
+def parse_int_id_list(value: str | None, field_name: str) -> tuple[int, ...]:
     if not value:
         return ()
 
-    admin_ids: list[int] = []
+    ids: list[int] = []
     for raw_item in value.split(","):
         item = raw_item.strip()
         if not item:
             continue
         try:
-            admin_ids.append(int(item))
+            ids.append(int(item))
         except ValueError as exc:
-            raise ValueError("BOT_ADMIN_IDS deve conter apenas IDs numericos separados por virgula.") from exc
+            raise ValueError(f"{field_name} deve conter apenas IDs numericos separados por virgula.") from exc
 
-    return tuple(admin_ids)
+    return tuple(ids)
 
 
 def parse_instance_id(value: str) -> str:
@@ -322,6 +411,19 @@ def parse_instance_id(value: str) -> str:
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,39}", normalized):
         raise ValueError(
             "INSTANCE_ID deve ter de 1 a 40 caracteres: letras, numeros, _ ou -."
+        )
+    return normalized
+
+
+def parse_optional_node_id(value: str) -> str:
+    """Valida NODE_ID quando presente; vazio fica vazio (checado como obrigatorio
+    so quando CENTRAL_SYNC_ENABLED=true, em run_telegram_listener)."""
+    normalized = value.strip().lower()
+    if not normalized:
+        return ""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,39}", normalized):
+        raise ValueError(
+            "NODE_ID deve ter de 1 a 40 caracteres: letras, numeros, _ ou -."
         )
     return normalized
 

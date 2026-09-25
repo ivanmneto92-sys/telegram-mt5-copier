@@ -7,6 +7,7 @@ import unittest
 
 from telegram_mt5_copier.config import AppConfig
 from telegram_mt5_copier.database import (
+    CENTRAL_SYNC_SERVICE_NAME,
     SIGNAL_MONITOR_SERVICE_NAME,
     connect_database,
     initialize_database,
@@ -155,6 +156,359 @@ class OperationalHealthTests(unittest.TestCase):
         self.assertEqual(len(self.notifier.messages), 1)
         self.assertIn("Atual", self.notifier.messages[0])
         self.assertNotIn("Antiga", self.notifier.messages[0])
+
+
+class CentralSyncHealthTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.now = datetime(2026, 7, 28, 20, 0, tzinfo=timezone.utc)
+        self.config = AppConfig.load(
+            project_root=self.root,
+            env={
+                "HEALTH_STALE_AFTER_SECONDS": "90",
+                "OPERATIONAL_ALERT_REPEAT_MINUTES": "360",
+                "CENTRAL_SYNC_ENABLED": "true",
+                "CENTRAL_SYNC_DATABASE_URL": "postgresql://postgres:postgres@127.0.0.1:54322/postgres",
+                "CENTRAL_SYNC_DELIVERY_LAG_SECONDS": "300",
+            },
+            create_dirs=True,
+        )
+        initialize_database(self.config.database_path)
+        self.notifier = FakeNotifier()
+        self.monitor = OperationalHealthMonitor(
+            self.config,
+            notifier=self.notifier,  # type: ignore[arg-type]
+            logger=_NullLogger(),
+            now=lambda: self.now,
+        )
+        # Passa da janela de graca inicial (_account_issues/_signal_monitor_issues
+        # e drain_stale suprimem tudo logo apos o start).
+        self.now += timedelta(seconds=91)
+        # Heartbeats "saudaveis" por padrao -- os testes de central_sync_*
+        # so devem introduzir o UNICO problema que estao testando, sem que o
+        # heartbeat do monitor de sinais (checagem nao relacionada) ou o
+        # heartbeat do drain loop (quando nao e o alvo do teste) contaminem a
+        # contagem de notificacoes.
+        with connect_database(self.config.database_path) as connection:
+            connection.execute(
+                "INSERT INTO service_heartbeats (service_name, heartbeat_at, details) VALUES (?, ?, NULL)",
+                (SIGNAL_MONITOR_SERVICE_NAME, self.now.isoformat()),
+            ).close()
+        self._set_central_sync_heartbeat(self.now.isoformat())
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def _insert_signal(self, created_at: str, source_message_id: int) -> int:
+        with connect_database(self.config.database_path) as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO signals (
+                    signature, content_signature, symbol, direction, entry_low, entry_high,
+                    stop_loss, take_profits, source_chat_id, source_message_id, raw_text,
+                    formatted_message, created_at
+                ) VALUES (?, ?, 'XAUUSD', 'BUY', '4100', '4105', '4090', '[]', '123456', ?, 'raw', 'fmt', ?)
+                """,
+                (f"sig-{source_message_id}", f"sig-{source_message_id}", str(source_message_id), created_at),
+            )
+            signal_id = int(cursor.lastrowid)
+            cursor.close()
+        return signal_id
+
+    def _insert_activation(self, activation_signal_id: int) -> None:
+        with connect_database(self.config.database_path) as connection:
+            connection.execute(
+                "INSERT INTO central_sync_activation (id, activation_signal_id, activated_at) VALUES (1, ?, ?)",
+                (activation_signal_id, self.now.isoformat()),
+            ).close()
+
+    def _insert_outbox_row(
+        self,
+        *,
+        source_signal_id: int,
+        status: str,
+        created_at: str,
+        next_attempt_at: str | None = None,
+    ) -> int:
+        with connect_database(self.config.database_path) as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO central_sync_outbox (
+                    kind, source_signal_id, payload, status, attempts, created_at, updated_at, next_attempt_at
+                ) VALUES ('signal_shadow_write', ?, '{}', ?, 0, ?, ?, ?)
+                """,
+                (source_signal_id, status, created_at, created_at, next_attempt_at or created_at),
+            )
+            row_id = int(cursor.lastrowid)
+            cursor.close()
+        return row_id
+
+    def _touch_healthy_heartbeats(self) -> None:
+        with connect_database(self.config.database_path) as connection:
+            connection.execute(
+                "UPDATE service_heartbeats SET heartbeat_at = ? WHERE service_name = ?",
+                (self.now.isoformat(), SIGNAL_MONITOR_SERVICE_NAME),
+            ).close()
+        self._set_central_sync_heartbeat(self.now.isoformat())
+
+    def _set_central_sync_heartbeat(self, heartbeat_at: str) -> None:
+        with connect_database(self.config.database_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO service_heartbeats (service_name, heartbeat_at, details)
+                VALUES (?, ?, NULL)
+                ON CONFLICT(service_name) DO UPDATE SET heartbeat_at = excluded.heartbeat_at
+                """,
+                (CENTRAL_SYNC_SERVICE_NAME, heartbeat_at),
+            ).close()
+
+    def _insert_audit_finding(self, signal_id: int, *, remote_content_signature: str | None) -> None:
+        with connect_database(self.config.database_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO central_sync_audit_findings (
+                    signal_id, detected_at, last_checked_at, local_content_signature, remote_content_signature
+                ) VALUES (?, ?, ?, 'sig-local', ?)
+                """,
+                (signal_id, self.now.isoformat(), self.now.isoformat(), remote_content_signature),
+            ).close()
+
+    def test_gap_alerta_quando_sinal_sem_outbox_apos_baseline(self) -> None:
+        self._insert_activation(activation_signal_id=0)
+        self._insert_signal(self.now.isoformat(), source_message_id=1)  # sem outbox correspondente
+
+        issues = self.monitor.check_once()
+
+        keys = [issue.key for issue in issues]
+        self.assertIn("central_sync:enqueue_gap", keys)
+
+    def test_gap_nao_alerta_para_sinal_anterior_ao_baseline(self) -> None:
+        old_signal_id = self._insert_signal(
+            (self.now - timedelta(days=1)).isoformat(), source_message_id=1
+        )
+        self._insert_activation(activation_signal_id=old_signal_id)  # baseline == esse sinal (historico)
+
+        issues = self.monitor.check_once()
+
+        keys = [issue.key for issue in issues]
+        self.assertNotIn("central_sync:enqueue_gap", keys)
+
+    def test_gap_nao_alerta_quando_outbox_existe_no_mesmo_instante_do_sinal(self) -> None:
+        self._insert_activation(activation_signal_id=0)
+        timestamp = self.now.isoformat()
+        signal_id = self._insert_signal(timestamp, source_message_id=1)
+        self._insert_outbox_row(source_signal_id=signal_id, status="pending", created_at=timestamp)
+
+        issues = self.monitor.check_once()
+
+        keys = [issue.key for issue in issues]
+        self.assertNotIn("central_sync:enqueue_gap", keys)
+
+    def test_lag_alerta_mesmo_com_next_attempt_at_no_futuro(self) -> None:
+        self._insert_activation(activation_signal_id=0)
+        old_timestamp = (self.now - timedelta(minutes=20)).isoformat()
+        signal_id = self._insert_signal(old_timestamp, source_message_id=1)
+        future_retry = (self.now + timedelta(minutes=5)).isoformat()
+        self._insert_outbox_row(
+            source_signal_id=signal_id,
+            status="failed",
+            created_at=old_timestamp,
+            next_attempt_at=future_retry,  # retry legitimamente agendado pro futuro
+        )
+
+        issues = self.monitor.check_once()
+
+        lag_issues = [issue for issue in issues if issue.key == "central_sync:delivery_lag"]
+        self.assertEqual(len(lag_issues), 1)
+        self.assertIn("atrasad", lag_issues[0].summary.lower())
+        self.assertNotIn("travad", lag_issues[0].summary.lower())
+
+    def test_lag_resumo_estavel_nao_reenvia_dentro_da_janela_de_repeticao(self) -> None:
+        self._insert_activation(activation_signal_id=0)
+        old_timestamp = (self.now - timedelta(minutes=20)).isoformat()
+        signal_id = self._insert_signal(old_timestamp, source_message_id=1)
+        self._insert_outbox_row(source_signal_id=signal_id, status="failed", created_at=old_timestamp)
+
+        self.monitor.check_once()
+        self.assertEqual(len(self.notifier.messages), 1)
+
+        # Avanca o relogio varias vezes dentro da janela de repeticao (360 min);
+        # o resumo usa timestamp absoluto do item mais antigo, entao nao muda
+        # a cada tick -- nao deve reenviar.
+        for _ in range(5):
+            self.now += timedelta(minutes=1)
+            self._touch_healthy_heartbeats()
+            self.monitor.check_once()
+
+        self.assertEqual(len(self.notifier.messages), 1)
+
+    def test_drain_stale_alerta_quando_heartbeat_parado(self) -> None:
+        stale_heartbeat = (self.now - timedelta(minutes=5)).isoformat()
+        self._set_central_sync_heartbeat(stale_heartbeat)
+
+        issues = self.monitor.check_once()
+
+        keys = [issue.key for issue in issues]
+        self.assertIn("central_sync:drain_stale", keys)
+
+    def test_drain_stale_nao_alerta_quando_heartbeat_recente(self) -> None:
+        self._set_central_sync_heartbeat(self.now.isoformat())
+
+        issues = self.monitor.check_once()
+
+        keys = [issue.key for issue in issues]
+        self.assertNotIn("central_sync:drain_stale", keys)
+
+    def test_audit_mismatch_alerta_quando_achado_aberto(self) -> None:
+        self._insert_audit_finding(42, remote_content_signature="sig-remoto-diferente")
+
+        issues = self.monitor.check_once()
+
+        keys = [issue.key for issue in issues]
+        self.assertIn("central_sync:audit_mismatch:42", keys)
+
+    def test_audit_mismatch_sem_achado_nao_alerta(self) -> None:
+        issues = self.monitor.check_once()
+
+        keys = [issue.key for issue in issues]
+        self.assertFalse(any(key.startswith("central_sync:audit_mismatch:") for key in keys))
+
+    def test_audit_mismatch_distingue_ausente_de_diferente_no_resumo(self) -> None:
+        self._insert_audit_finding(10, remote_content_signature=None)
+        self._insert_audit_finding(20, remote_content_signature="algo-diferente")
+
+        issues = self.monitor.check_once()
+
+        by_key = {issue.key: issue for issue in issues}
+        self.assertIn("não foi encontrado", by_key["central_sync:audit_mismatch:10"].summary)
+        self.assertIn("diferente", by_key["central_sync:audit_mismatch:20"].summary)
+
+    def test_multiplos_achados_de_auditoria_nao_colidem_cada_um_tem_chave_propria(self) -> None:
+        # Prova o desenho por chave (identidade por achado) -- nao o bug de
+        # ancora unica ja corrigido uma vez nesta mesma etapa 3.
+        self._insert_audit_finding(10, remote_content_signature="a")
+        self._insert_audit_finding(20, remote_content_signature="b")
+
+        issues = self.monitor.check_once()
+
+        keys = {issue.key for issue in issues}
+        self.assertIn("central_sync:audit_mismatch:10", keys)
+        self.assertIn("central_sync:audit_mismatch:20", keys)
+        self.assertEqual(len(self.notifier.messages), 2)
+
+    def test_achado_de_auditoria_resolvido_gera_recuperacao(self) -> None:
+        self._insert_audit_finding(42, remote_content_signature="sig-remoto-diferente")
+        self.monitor.check_once()
+        self.assertEqual(len(self.notifier.messages), 1)
+
+        with connect_database(self.config.database_path) as connection:
+            connection.execute(
+                "DELETE FROM central_sync_audit_findings WHERE signal_id = 42"
+            ).close()
+        self._touch_healthy_heartbeats()
+        self.monitor.check_once()
+
+        self.assertEqual(len(self.notifier.messages), 2)
+        self.assertIn("SERVIÇO RECUPERADO", self.notifier.messages[1])
+
+    def test_central_sync_desabilitado_ignora_achados_de_auditoria(self) -> None:
+        disabled_config = AppConfig.load(
+            project_root=self.root,
+            env={
+                "HEALTH_STALE_AFTER_SECONDS": "90",
+                "OPERATIONAL_ALERT_REPEAT_MINUTES": "360",
+                "CENTRAL_SYNC_ENABLED": "false",
+            },
+            create_dirs=True,
+        )
+        monitor = OperationalHealthMonitor(
+            disabled_config, notifier=self.notifier, logger=_NullLogger(), now=lambda: self.now  # type: ignore[arg-type]
+        )
+        self._insert_audit_finding(42, remote_content_signature="x")
+
+        issues = monitor.check_once()
+
+        self.assertFalse(any(issue.key.startswith("central_sync:audit_mismatch:") for issue in issues))
+
+    def test_desligar_central_sync_com_achado_de_auditoria_ativo_nao_anuncia_falsa_recuperacao(self) -> None:
+        self._insert_audit_finding(42, remote_content_signature="x")
+        self.monitor.check_once()
+        self.assertEqual(len(self.notifier.messages), 1)
+
+        disabled_config = AppConfig.load(
+            project_root=self.root,
+            env={
+                "HEALTH_STALE_AFTER_SECONDS": "90",
+                "OPERATIONAL_ALERT_REPEAT_MINUTES": "360",
+                "CENTRAL_SYNC_ENABLED": "false",
+            },
+            create_dirs=True,
+        )
+        monitor = OperationalHealthMonitor(
+            disabled_config, notifier=self.notifier, logger=_NullLogger(), now=lambda: self.now  # type: ignore[arg-type]
+        )
+        monitor.check_once()
+
+        self.assertEqual(len(self.notifier.messages), 1)
+        with connect_database(self.config.database_path) as connection:
+            row = connection.execute(
+                "SELECT is_active FROM operational_alert_states WHERE alert_key = 'central_sync:audit_mismatch:42'"
+            ).fetchone()
+        self.assertEqual(row, (0,))
+
+    def test_central_sync_desabilitado_nao_gera_nenhum_alerta(self) -> None:
+        disabled_config = AppConfig.load(
+            project_root=self.root,
+            env={
+                "HEALTH_STALE_AFTER_SECONDS": "90",
+                "OPERATIONAL_ALERT_REPEAT_MINUTES": "360",
+                "CENTRAL_SYNC_ENABLED": "false",
+            },
+            create_dirs=True,
+        )
+        monitor = OperationalHealthMonitor(
+            disabled_config, notifier=self.notifier, logger=_NullLogger(), now=lambda: self.now  # type: ignore[arg-type]
+        )
+        # Outbox visivelmente quebrado -- mas central_sync_enabled=false.
+        self._insert_activation(activation_signal_id=0)
+        self._insert_signal(self.now.isoformat(), source_message_id=1)
+        self._set_central_sync_heartbeat((self.now - timedelta(hours=1)).isoformat())
+
+        issues = monitor.check_once()
+
+        keys = [issue.key for issue in issues]
+        self.assertNotIn("central_sync:enqueue_gap", keys)
+        self.assertNotIn("central_sync:delivery_lag", keys)
+        self.assertNotIn("central_sync:drain_stale", keys)
+
+    def test_desligar_central_sync_com_alerta_ativo_nao_anuncia_falsa_recuperacao(self) -> None:
+        self._insert_activation(activation_signal_id=0)
+        self._insert_signal(self.now.isoformat(), source_message_id=1)  # gera gap
+        self.monitor.check_once()
+        self.assertEqual(len(self.notifier.messages), 1)  # alerta de problema
+
+        disabled_config = AppConfig.load(
+            project_root=self.root,
+            env={
+                "HEALTH_STALE_AFTER_SECONDS": "90",
+                "OPERATIONAL_ALERT_REPEAT_MINUTES": "360",
+                "CENTRAL_SYNC_ENABLED": "false",
+            },
+            create_dirs=True,
+        )
+        monitor = OperationalHealthMonitor(
+            disabled_config, notifier=self.notifier, logger=_NullLogger(), now=lambda: self.now  # type: ignore[arg-type]
+        )
+        monitor.check_once()
+
+        # Nenhuma mensagem nova -- em especial, nenhuma de "recuperado".
+        self.assertEqual(len(self.notifier.messages), 1)
+        with connect_database(self.config.database_path) as connection:
+            row = connection.execute(
+                "SELECT is_active FROM operational_alert_states WHERE alert_key = 'central_sync:enqueue_gap'"
+            ).fetchone()
+        self.assertEqual(row, (0,))
 
 
 def insert_account(

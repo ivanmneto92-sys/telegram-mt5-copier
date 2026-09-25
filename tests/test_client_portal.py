@@ -3,8 +3,12 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from telegram_mt5_copier.client_auth import ClientBrowserAuthService
-from telegram_mt5_copier.client_portal import ClientPortalService
+from telegram_mt5_copier.client_portal import AccountNotFoundError, ClientPortalService
+from telegram_mt5_copier.credential_service import CredentialService
 from telegram_mt5_copier.database import connect_database, initialize_database, utc_now
+from telegram_mt5_copier.mt5.account_service import MT5AccountService
+from telegram_mt5_copier.mt5.client import SimulatedMT5Client
+from telegram_mt5_copier.mt5.terminal_manager import TerminalManager
 
 
 class ClientPortalTests(unittest.TestCase):
@@ -46,6 +50,100 @@ class ClientPortalTests(unittest.TestCase):
         self.assertEqual("Nome Original", payload["channels"][0]["name"])
         self.assertEqual("custom", payload["selection_mode"])
         self.assertFalse(payload["channels"][0]["enabled"])
+
+    def test_toggle_channel_liga_e_desliga(self) -> None:
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+        channel_id = portal.channels(self.user_id)["channels"][0]["id"]
+
+        first = portal.toggle_channel(self.user_id, channel_id)
+        self.assertEqual({"channel_id": channel_id, "enabled": True}, first)
+        self.assertTrue(portal.channels(self.user_id)["channels"][0]["enabled"])
+
+        second = portal.toggle_channel(self.user_id, channel_id)
+        self.assertEqual({"channel_id": channel_id, "enabled": False}, second)
+        self.assertFalse(portal.channels(self.user_id)["channels"][0]["enabled"])
+
+    def test_toggle_channel_inexistente_e_rejeitado(self) -> None:
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+
+        with self.assertRaisesRegex(ValueError, "Canal indisponível"):
+            portal.toggle_channel(self.user_id, 999999)
+
+    def test_canal_novo_nao_e_seguido_automaticamente_por_quem_ja_tinha_todos(self) -> None:
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+        portal.channels_catalog.set_selection_mode(self.user_id, "all")
+        self.assertTrue(portal.channels(self.user_id)["channels"][0]["enabled"])
+
+        # Assim que um canal novo e de fato registrado (mesmo caminho que o
+        # bot usa ao validar um canal de origem), quem estava em "todos" e
+        # congelado em "custom" -- o novo canal nunca herda a selecao antiga.
+        portal.channels_catalog.register_configured_channel(
+            telegram_chat_id="-1002",
+            title="Canal Novo",
+            username=None,
+            content_protected=False,
+            history_accessible=True,
+            last_message_id=None,
+        )
+
+        channels = portal.channels(self.user_id)["channels"]
+        new_channel = next(c for c in channels if c["name"] == "Canal Novo")
+        self.assertFalse(new_channel["enabled"])
+        self.assertEqual("custom", portal.channels(self.user_id)["selection_mode"])
+
+    def test_toggle_copier_pause_alterna_status_igual_ao_bot(self) -> None:
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+
+        paused = portal.toggle_copier_pause(self.user_id)
+        self.assertEqual({"status": "paused"}, paused)
+        with connect_database(self.database_path) as db:
+            self.assertEqual(
+                "paused",
+                db.execute("SELECT status FROM users WHERE id = ?", (self.user_id,)).fetchone()[0],
+            )
+
+        reactivated = portal.toggle_copier_pause(self.user_id)
+        self.assertEqual({"status": "active"}, reactivated)
+        with connect_database(self.database_path) as db:
+            self.assertEqual(
+                "active",
+                db.execute("SELECT status FROM users WHERE id = ?", (self.user_id,)).fetchone()[0],
+            )
+
+    def test_news_preference_default_e_atualizacao(self) -> None:
+        portal = ClientPortalService(
+            self.database_path,
+            brand_name="Marca",
+            market_news_enabled=True,
+            market_news_minutes_before=15,
+            market_news_minutes_after=10,
+        )
+
+        default = portal.news_preference(self.user_id)
+        self.assertEqual(
+            {
+                "avoid_high_impact_news": False,
+                "market_news_available": True,
+                "minutes_before": 15,
+                "minutes_after": 10,
+            },
+            default,
+        )
+
+        updated = portal.set_news_preference(self.user_id, True)
+        self.assertTrue(updated["avoid_high_impact_news"])
+        self.assertTrue(portal.news_preference(self.user_id)["avoid_high_impact_news"])
+
+        # O mesmo campo que o MarketNewsService le na execucao real -- a troca
+        # pelo portal tem efeito imediato pro bot tambem.
+        with connect_database(self.database_path) as db:
+            self.assertEqual(
+                1,
+                db.execute(
+                    "SELECT avoid_high_impact_news FROM user_settings WHERE user_id = ?",
+                    (self.user_id,),
+                ).fetchone()[0],
+            )
 
     def test_web_registration_creates_pending_customer_and_secure_login(self) -> None:
         auth = ClientBrowserAuthService(self.database_path)
@@ -127,6 +225,456 @@ class ClientPortalTests(unittest.TestCase):
                 phone="11888880000",
                 password="Senha1234",
             )
+
+    def test_profile_can_be_read_and_updated_without_changing_other_users(self) -> None:
+        now = utc_now()
+        with connect_database(self.database_path) as db:
+            db.execute(
+                """
+                INSERT INTO customer_billing (
+                    user_id, customer_name, email, phone, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (self.user_id, "Nome Antigo", "antigo@example.com", "11999990000", now, now),
+            )
+        auth = ClientBrowserAuthService(self.database_path)
+        auth.set_password_for_user(
+            self.user_id, email="antigo@example.com", password="Senha1234"
+        )
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+
+        payload = portal.update_profile(
+            self.user_id,
+            customer_name="Nome Novo",
+            email="novo@example.com",
+            phone="11988887777",
+        )
+
+        self.assertEqual("Nome Novo", payload["profile"]["customer_name"])
+        self.assertEqual("novo@example.com", payload["profile"]["email"])
+        self.assertEqual(
+            self.user_id,
+            auth.login(email="novo@example.com", password="Senha1234").user_id,
+        )
+
+    def test_financial_returns_real_billing_and_payment_history(self) -> None:
+        now = utc_now()
+        with connect_database(self.database_path) as db:
+            db.execute(
+                """
+                INSERT INTO customer_billing (
+                    user_id, customer_name, email, phone, plan_name, monthly_amount,
+                    due_date, billing_status, last_paid_at, created_at, updated_at
+                ) VALUES (?, 'Cliente', 'c@example.com', '11999990000', 'Mensal',
+                          '300.00', '2026-10-10', 'paid', ?, ?, ?)
+                """,
+                (self.user_id, now, now, now),
+            )
+            db.execute(
+                """
+                INSERT INTO customer_payments (
+                    user_id, amount, paid_at, period_start, period_end, method,
+                    status, admin_telegram_user_id, created_at
+                ) VALUES (?, '300.00', ?, '2026-09-10', '2026-10-10', 'PIX',
+                          'paid', 999, ?)
+                """,
+                (self.user_id, now, now),
+            )
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+
+        payload = portal.financial(self.user_id)
+
+        self.assertEqual("300.00", payload["billing"]["monthly_amount"])
+        self.assertEqual("PIX", payload["payments"][0]["method"])
+        self.assertNotIn("reference", payload["payments"][0])
+
+    def test_risk_update_is_scoped_to_authenticated_user_account(self) -> None:
+        now = utc_now()
+        with connect_database(self.database_path) as db:
+            account_id = int(db.execute(
+                """
+                INSERT INTO mt5_accounts (
+                    user_id, account_alias, broker_name, terminal_path, server_name,
+                    login, encrypted_password, account_type, account_mode,
+                    connection_status, created_at, updated_at
+                ) VALUES (?, 'Principal', 'HFM', 'terminal64.exe', 'HFM-Live',
+                          '123456', 'encrypted', 'real', 'hedging', 'connected', ?, ?)
+                """,
+                (self.user_id, now, now),
+            ).lastrowid)
+            db.execute(
+                """
+                INSERT INTO execution_profiles (
+                    user_id, mt5_account_id, enabled, risk_mode, fixed_lot, risk_percent,
+                    max_spread_points, max_slippage_points, daily_profit_target,
+                    daily_loss_limit, max_open_signals, split_tps, breakeven_enabled,
+                    trailing_enabled, updated_at
+                ) VALUES (?, ?, 1, 'fixed_lot', '0.01', '1', 300, 30, '0', '0',
+                          1, 1, 0, 0, ?)
+                """,
+                (self.user_id, account_id, now),
+            )
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+
+        payload = portal.update_risk(
+            self.user_id,
+            {
+                "risk_mode": "risk_percent",
+                "risk_percent": "0,5",
+                "daily_loss_limit": "30",
+                "max_open_signals": "2",
+                "tp1_breakeven_enabled": "true",
+            },
+        )
+
+        self.assertEqual("risk_percent", payload["risk"]["risk_mode"])
+        self.assertEqual("0.5", payload["risk"]["risk_percent"])
+        self.assertEqual("30", payload["risk"]["daily_loss_limit"])
+        self.assertEqual(2, payload["risk"]["max_open_signals"])
+        self.assertTrue(payload["risk"]["tp1_breakeven_enabled"])
+
+    def _add_account(
+        self, user_id: int, alias: str, login: str, status: str = "connected"
+    ) -> int:
+        now = utc_now()
+        with connect_database(self.database_path) as db:
+            account_id = int(db.execute(
+                """
+                INSERT INTO mt5_accounts (
+                    user_id, account_alias, broker_name, terminal_path, server_name,
+                    login, encrypted_password, account_type, account_mode,
+                    connection_status, created_at, updated_at
+                ) VALUES (?, ?, 'HFM', 'terminal64.exe', 'HFM-Live',
+                          ?, 'encrypted', 'real', 'hedging', ?, ?, ?)
+                """,
+                (user_id, alias, login, status, now, now),
+            ).lastrowid)
+            db.execute(
+                """
+                INSERT INTO execution_profiles (
+                    user_id, mt5_account_id, enabled, risk_mode, fixed_lot, risk_percent,
+                    max_spread_points, max_slippage_points, daily_profit_target,
+                    daily_loss_limit, max_open_signals, split_tps, breakeven_enabled,
+                    trailing_enabled, updated_at
+                ) VALUES (?, ?, 1, 'fixed_lot', '0.01', '1', 300, 30, '0', '0',
+                          1, 1, 0, 0, ?)
+                """,
+                (user_id, account_id, now),
+            )
+        return account_id
+
+    def _add_other_user(self) -> int:
+        now = utc_now()
+        with connect_database(self.database_path) as db:
+            return int(db.execute(
+                "INSERT INTO users (telegram_user_id, telegram_username, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (456, "outro", "active", now, now),
+            ).lastrowid)
+
+    def test_accounts_lists_only_own_accounts_with_masked_login(self) -> None:
+        first = self._add_account(self.user_id, "Principal", "111111")
+        second = self._add_account(self.user_id, "Secundaria", "222222", "disconnected")
+        other_user = self._add_other_user()
+        self._add_account(other_user, "Alheia", "999999")
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+
+        accounts = portal.accounts(self.user_id)["accounts"]
+
+        self.assertEqual([first, second], [account["id"] for account in accounts])
+        self.assertEqual("••••1111", accounts[0]["masked_login"])
+        self.assertNotIn("Alheia", str(accounts))
+        self.assertNotIn("encrypted", str(accounts))
+        self.assertNotIn("111111", str(accounts))
+
+    def test_dashboard_and_risk_follow_the_selected_account(self) -> None:
+        first = self._add_account(self.user_id, "Principal", "111111")
+        second = self._add_account(self.user_id, "Secundaria", "222222", "disconnected")
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+
+        self.assertEqual(first, portal.dashboard(self.user_id)["account"]["id"])
+        self.assertEqual(
+            second, portal.dashboard(self.user_id, second)["account"]["id"]
+        )
+        self.assertEqual(second, portal.risk(self.user_id, second)["account"]["id"])
+        self.assertEqual("••••2222", portal.risk(self.user_id, second)["account"]["masked_login"])
+
+    def test_risk_update_changes_only_the_selected_account(self) -> None:
+        first = self._add_account(self.user_id, "Principal", "111111")
+        second = self._add_account(self.user_id, "Secundaria", "222222", "disconnected")
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+
+        portal.update_risk(self.user_id, {"max_open_signals": "5"}, second)
+
+        self.assertEqual(1, portal.risk(self.user_id, first)["risk"]["max_open_signals"])
+        self.assertEqual(5, portal.risk(self.user_id, second)["risk"]["max_open_signals"])
+
+    def test_account_of_another_customer_is_not_found_for_every_scoped_call(self) -> None:
+        other_user = self._add_other_user()
+        foreign = self._add_account(other_user, "Alheia", "999999")
+        self._add_account(self.user_id, "Principal", "111111")
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+
+        with self.assertRaises(AccountNotFoundError):
+            portal.dashboard(self.user_id, foreign)
+        with self.assertRaises(AccountNotFoundError):
+            portal.operations(self.user_id, account_id=foreign)
+        with self.assertRaises(AccountNotFoundError):
+            portal.risk(self.user_id, foreign)
+        with self.assertRaises(AccountNotFoundError):
+            portal.update_risk(self.user_id, {"max_open_signals": "9"}, foreign)
+        with self.assertRaises(AccountNotFoundError):
+            portal.dashboard(self.user_id, 424242)
+        # A conta alheia continua intacta.
+        self.assertEqual(1, portal.risk(other_user, foreign)["risk"]["max_open_signals"])
+
+    def test_operations_can_be_filtered_by_account(self) -> None:
+        first = self._add_account(self.user_id, "Principal", "111111")
+        second = self._add_account(self.user_id, "Secundaria", "222222")
+        now = utc_now()
+        with connect_database(self.database_path) as db:
+            for account_id, symbol in ((first, "XAUUSD"), (second, "EURUSD")):
+                db.execute(
+                    """
+                    INSERT INTO execution_groups (
+                        signal_id, user_id, mt5_account_id, status, direction, symbol,
+                        entry_low, entry_high, selected_entry_price, order_type,
+                        total_volume, stop_loss, expiration_at, execution_mode,
+                        signal_received_at, pending_created_at, created_at, updated_at
+                    ) VALUES ('sig', ?, ?, 'open', 'buy', ?, '1', '1', '1', 'market',
+                              '0.01', '0.5', ?, 'simulation', ?, ?, ?, ?)
+                    """,
+                    (self.user_id, account_id, symbol, now, now, now, now, now),
+                )
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+
+        every = portal.operations(self.user_id)["operations"]
+        only_second = portal.operations(self.user_id, account_id=second)["operations"]
+
+        self.assertEqual({"XAUUSD", "EURUSD"}, {op["symbol"] for op in every})
+        self.assertEqual(["EURUSD"], [op["symbol"] for op in only_second])
+        self.assertEqual(1, portal.dashboard(self.user_id, first)["active_operations"])
+        self.assertEqual(2, portal.dashboard(self.user_id)["active_operations"])
+
+    def test_operations_traduz_o_codigo_de_rejeicao_para_texto_legivel(self) -> None:
+        account_id = self._add_account(self.user_id, "Principal", "111111")
+        now = utc_now()
+        with connect_database(self.database_path) as db:
+            db.execute(
+                """
+                INSERT INTO execution_groups (
+                    signal_id, user_id, mt5_account_id, status, direction, symbol,
+                    entry_low, entry_high, selected_entry_price, order_type,
+                    total_volume, stop_loss, expiration_at, execution_mode, error_code,
+                    signal_received_at, pending_created_at, created_at, updated_at
+                ) VALUES ('sig-rejeitado', ?, ?, 'rejected', 'buy', 'XAUUSD',
+                          '1', '1', '1', 'market', '0.01', '0.5', ?, 'simulation',
+                          'daily_loss_limit_reached', ?, ?, ?, ?)
+                """,
+                (self.user_id, account_id, now, now, now, now, now),
+            )
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+
+        operations = portal.operations(self.user_id)["operations"]
+
+        self.assertEqual("daily_loss_limit_reached", operations[0]["error_code"])
+        self.assertEqual(
+            "Limite de perda diária já foi atingido — novos sinais ficam bloqueados até a próxima sessão.",
+            operations[0]["reason_label"],
+        )
+
+    def test_operations_sem_erro_nao_tem_reason_label(self) -> None:
+        self._add_account(self.user_id, "Principal", "111111")
+        # test_operations_can_be_filtered_by_account ja cobre uma operacao 'open'
+        # sem error_code -- so confirmamos aqui que reason_label fica None.
+        first = self._add_account(self.user_id, "Secundaria", "222222")
+        now = utc_now()
+        with connect_database(self.database_path) as db:
+            db.execute(
+                """
+                INSERT INTO execution_groups (
+                    signal_id, user_id, mt5_account_id, status, direction, symbol,
+                    entry_low, entry_high, selected_entry_price, order_type,
+                    total_volume, stop_loss, expiration_at, execution_mode,
+                    signal_received_at, pending_created_at, created_at, updated_at
+                ) VALUES ('sig-ok', ?, ?, 'open', 'buy', 'XAUUSD',
+                          '1', '1', '1', 'market', '0.01', '0.5', ?, 'simulation',
+                          ?, ?, ?, ?)
+                """,
+                (self.user_id, first, now, now, now, now, now),
+            )
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+
+        operations = portal.operations(self.user_id)["operations"]
+
+        self.assertIsNone(operations[0]["error_code"])
+        self.assertIsNone(operations[0]["reason_label"])
+
+    def test_risk_rejects_unknown_and_out_of_range_values(self) -> None:
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+        with self.assertRaisesRegex(ValueError, "Cadastre uma conta"):
+            portal.update_risk(self.user_id, {"risk_percent": "0.5"})
+
+
+class ClientPortalAccountRegistrationTests(unittest.TestCase):
+    """Cadastro/remoção de conta MT5 pelo site, com o mesmo motor do bot."""
+
+    def setUp(self) -> None:
+        self.temp = TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.database_path = self.root / "portal.sqlite3"
+        initialize_database(self.database_path)
+        now = utc_now()
+        with connect_database(self.database_path) as db:
+            self.user_id = int(db.execute(
+                "INSERT INTO users (telegram_user_id, telegram_username, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (321, "cliente", "active", now, now),
+            ).lastrowid)
+        self.credential_service = CredentialService(CredentialService.generate_key())
+        self.terminal_manager = TerminalManager(self.root / "mt5_accounts")
+        self.accounts = MT5AccountService(
+            self.database_path,
+            credential_service=self.credential_service,
+            terminal_manager=self.terminal_manager,
+            client_factory=SimulatedMT5Client,
+        )
+
+    def tearDown(self) -> None:
+        self.accounts.close()
+        self.temp.cleanup()
+
+    def portal(self, *, broker_servers: dict[str, tuple[str, ...]] | None = None) -> ClientPortalService:
+        return ClientPortalService(
+            self.database_path,
+            brand_name="Marca",
+            mt5_accounts=self.accounts,
+            broker_servers=broker_servers,
+        )
+
+    def test_broker_catalog_reflects_configured_brokers(self) -> None:
+        portal = self.portal(broker_servers={"HFM": ("HFM-Demo", "HFM-Live1")})
+
+        self.assertEqual(
+            {"brokers": [{"name": "HFM", "servers": ["HFM-Demo", "HFM-Live1"]}]},
+            portal.broker_catalog(),
+        )
+
+    def test_add_account_sem_catalogo_aceita_qualquer_corretora(self) -> None:
+        portal = self.portal(broker_servers=None)
+
+        payload = portal.add_account(
+            self.user_id,
+            broker_name="Corretora Livre",
+            server_name="Servidor-Demo",
+            login="12345678",
+            password="mt5-secret-password",
+            account_alias="Minha conta",
+        )
+
+        account = payload["account"]
+        self.assertEqual("Minha conta", account["alias"])
+        self.assertEqual("Corretora Livre", account["broker"])
+        self.assertEqual("••••5678", account["masked_login"])
+        self.assertEqual("connected", account["connection_status"])
+        # A senha nunca aparece na resposta.
+        self.assertNotIn("mt5-secret-password", str(payload))
+
+    def test_add_account_com_catalogo_rejeita_corretora_desconhecida(self) -> None:
+        portal = self.portal(broker_servers={"HFM": ("HFM-Demo",)})
+
+        with self.assertRaisesRegex(ValueError, "Corretora invalida"):
+            portal.add_account(
+                self.user_id,
+                broker_name="Corretora Inventada",
+                server_name="HFM-Demo",
+                login="12345678",
+                password="senha",
+                account_alias="Conta",
+            )
+
+    def test_add_account_com_catalogo_rejeita_servidor_fora_da_lista(self) -> None:
+        portal = self.portal(broker_servers={"HFM": ("HFM-Demo",)})
+
+        with self.assertRaisesRegex(ValueError, "Servidor invalido"):
+            portal.add_account(
+                self.user_id,
+                broker_name="HFM",
+                server_name="Servidor-Inventado",
+                login="12345678",
+                password="senha",
+                account_alias="Conta",
+            )
+
+    def test_add_account_com_catalogo_aceita_servidor_da_lista_ignorando_maiusculas(self) -> None:
+        portal = self.portal(broker_servers={"HFM": ("HFM-Demo",)})
+
+        payload = portal.add_account(
+            self.user_id,
+            broker_name="hfm",
+            server_name="hfm-demo",
+            login="12345678",
+            password="senha",
+            account_alias="Conta",
+        )
+
+        self.assertEqual("HFM", payload["account"]["broker"])
+        self.assertEqual("HFM-Demo", payload["account"]["server"])
+
+    def test_add_account_sem_mt5_accounts_configurado_falha_com_clareza(self) -> None:
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+
+        with self.assertRaisesRegex(ValueError, "indisponivel"):
+            portal.add_account(
+                self.user_id,
+                broker_name="HFM",
+                server_name="HFM-Demo",
+                login="12345678",
+                password="senha",
+                account_alias="Conta",
+            )
+
+    def test_remove_account_apaga_a_propria_conta(self) -> None:
+        portal = self.portal()
+        created = portal.add_account(
+            self.user_id,
+            broker_name="Broker",
+            server_name="Broker-Demo",
+            login="12345678",
+            password="senha",
+            account_alias="Conta",
+        )
+        account_id = created["account"]["id"]
+
+        removed = portal.remove_account(self.user_id, account_id)
+
+        self.assertEqual([], portal.accounts(self.user_id)["accounts"])
+        self.assertEqual(account_id, removed["account"]["id"])
+        self.assertEqual("Broker", removed["account"]["broker"])
+
+    def test_remove_account_de_outro_cliente_nao_encontrada_e_nao_apaga(self) -> None:
+        portal = self.portal()
+        other_user = self._add_other_user()
+        created = portal.add_account(
+            other_user,
+            broker_name="Broker",
+            server_name="Broker-Demo",
+            login="12345678",
+            password="senha",
+            account_alias="Conta alheia",
+        )
+        account_id = created["account"]["id"]
+
+        with self.assertRaises(AccountNotFoundError):
+            portal.remove_account(self.user_id, account_id)
+
+        self.assertEqual(1, len(portal.accounts(other_user)["accounts"]))
+
+    def _add_other_user(self) -> int:
+        now = utc_now()
+        with connect_database(self.database_path) as db:
+            return int(db.execute(
+                "INSERT INTO users (telegram_user_id, telegram_username, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (654, "outro", "active", now, now),
+            ).lastrowid)
 
 
 if __name__ == "__main__":

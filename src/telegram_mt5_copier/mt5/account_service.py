@@ -526,6 +526,30 @@ class MT5AccountService:
             raise ValueError("Conta MT5 nao encontrada para este usuario.")
         return account_from_row(row)
 
+    def get_account_by_id(self, account_id: int) -> MT5Account | None:
+        """Etapa 5d: busca so pelo id, sem exigir o user_id -- usado pra
+        resolver contas piloteadas pela fila central (QUEUE_PILOT_ACCOUNT_IDS
+        so tem o id, nao o par user_id+account_id). Devolve None em vez de
+        levantar quando nao encontra, pra o chamador poder logar e pular uma
+        conta mal configurada sem derrubar nada."""
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                """
+                SELECT id, user_id, broker_name, server_name, login, encrypted_password,
+                       account_alias, terminal_path, account_type, connection_status,
+                       last_error, last_connected_at, account_mode, balance, equity,
+                       worker_heartbeat_at
+                FROM mt5_accounts
+                WHERE id = ?
+                """,
+                (account_id,),
+            )
+            try:
+                row = cursor.fetchone()
+            finally:
+                cursor.close()
+        return account_from_row(row) if row is not None else None
+
     def first_account(self, user_id: int) -> MT5Account | None:
         accounts = self.list_accounts(user_id)
         return accounts[0] if accounts else None

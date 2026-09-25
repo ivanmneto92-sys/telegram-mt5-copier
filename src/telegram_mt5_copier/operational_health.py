@@ -9,6 +9,7 @@ from typing import Callable
 
 from .config import AppConfig
 from .database import (
+    CENTRAL_SYNC_SERVICE_NAME,
     SIGNAL_MONITOR_SERVICE_NAME,
     connect_database,
     initialize_database,
@@ -44,11 +45,15 @@ class OperationalHealthMonitor:
 
     def check_once(self) -> tuple[HealthIssue, ...]:
         current_time = self.now()
+        if not self.config.central_sync_enabled:
+            self._silently_resolve_central_sync_alerts(current_time)
         issues = {
             issue.key: issue
             for issue in (
                 *self._account_issues(current_time),
                 *self._signal_monitor_issues(current_time),
+                *self._central_sync_issues(current_time),
+                *self._central_sync_audit_issues(),
             )
         }
         self._synchronize(issues, current_time)
@@ -155,6 +160,172 @@ class OperationalHealthMonitor:
                 summary=summary,
             )
         ]
+
+    def _central_sync_issues(self, current_time: datetime) -> list[HealthIssue]:
+        """Saude da replicacao LOCAL (sinal -> outbox -> drenado) pro backend
+        central (Etapa 2/3). So confirma que a tentativa de replicar aconteceu
+        e terminou -- nao confere se o conteudo que chegou no Supabase esta
+        correto (isso e a auditoria por amostragem contra o Postgres central,
+        Etapa 3B, ver _central_sync_audit_issues logo abaixo)."""
+        if not self.config.central_sync_enabled:
+            return []
+
+        with connect_database(self.config.database_path) as connection:
+            activation_row = connection.execute(
+                "SELECT activation_signal_id FROM central_sync_activation WHERE id = 1"
+            ).fetchone()
+            gap_first_id: int | None = None
+            if activation_row is not None:
+                gap_row = connection.execute(
+                    """
+                    SELECT MIN(s.id) FROM signals s
+                    WHERE s.id > ?
+                      AND NOT EXISTS (
+                        SELECT 1 FROM central_sync_outbox o
+                        WHERE o.kind = 'signal_shadow_write' AND o.source_signal_id = s.id
+                      )
+                    """,
+                    (int(activation_row[0]),),
+                ).fetchone()
+                gap_first_id = int(gap_row[0]) if gap_row[0] is not None else None
+
+            lag_cutoff = (
+                current_time - timedelta(seconds=self.config.central_sync_delivery_lag_seconds)
+            ).isoformat()
+            lag_row = connection.execute(
+                """
+                SELECT MIN(created_at) FROM central_sync_outbox
+                WHERE kind = 'signal_shadow_write' AND status != 'done' AND created_at < ?
+                """,
+                (lag_cutoff,),
+            ).fetchone()
+            lag_oldest = parse_datetime(lag_row[0]) if lag_row[0] else None
+
+            heartbeat_row = connection.execute(
+                "SELECT heartbeat_at FROM service_heartbeats WHERE service_name = ?",
+                (CENTRAL_SYNC_SERVICE_NAME,),
+            ).fetchone()
+
+        issues: list[HealthIssue] = []
+
+        # Os resumos abaixo usam apenas ancoras ESTAVEIS (id/timestamp do item
+        # mais antigo) -- nunca uma contagem ao vivo. _synchronize (mais
+        # abaixo) reenvia a notificacao sempre que o resumo muda, entao um
+        # resumo com "N sinais" mudaria a cada novo gap/atraso durante um
+        # incidente em andamento e ignoraria a janela de repeticao
+        # (OPERATIONAL_ALERT_REPEAT_MINUTES) -- viraria spam, um alerta por
+        # sinal. O id/timestamp mais antigo so muda quando aquele item
+        # especifico e resolvido, entao o resumo fica estavel enquanto o
+        # problema for essencialmente o mesmo.
+        if gap_first_id is not None:
+            issues.append(
+                HealthIssue(
+                    key="central_sync:enqueue_gap",
+                    alert_type="central_sync_enqueue_gap",
+                    entity_id=self.config.instance_id,
+                    title="Sincronização central",
+                    summary=(
+                        f"Sinal local id={gap_first_id} nunca foi enfileirado para replicação "
+                        "central. Pode haver outros mais recentes na mesma situação."
+                    ),
+                )
+            )
+
+        if lag_oldest is not None:
+            oldest_text = format_timestamp(lag_oldest)
+            issues.append(
+                HealthIssue(
+                    key="central_sync:delivery_lag",
+                    alert_type="central_sync_delivery_lag",
+                    entity_id=self.config.instance_id,
+                    title="Sincronização central",
+                    summary=f"Replicação central atrasada. O item mais antigo está pendente desde {oldest_text}.",
+                )
+            )
+
+        heartbeat_at = parse_datetime(heartbeat_row[0]) if heartbeat_row else None
+        stale_after = timedelta(seconds=self.config.health_stale_after_seconds)
+        if current_time - self.started_at > stale_after:
+            if heartbeat_at is None:
+                issues.append(
+                    HealthIssue(
+                        key="central_sync:drain_stale",
+                        alert_type="central_sync_drain_stale",
+                        entity_id=self.config.instance_id,
+                        title="Sincronização central",
+                        summary="Processo de sincronização central ainda não registrou heartbeat.",
+                    )
+                )
+            elif current_time - heartbeat_at > stale_after:
+                issues.append(
+                    HealthIssue(
+                        key="central_sync:drain_stale",
+                        alert_type="central_sync_drain_stale",
+                        entity_id=self.config.instance_id,
+                        title="Sincronização central",
+                        summary=f"Loop de sincronização central parado desde {format_timestamp(heartbeat_at)}.",
+                    )
+                )
+
+        return issues
+
+    def _central_sync_audit_issues(self) -> list[HealthIssue]:
+        """Etapa 3B: le os achados abertos da auditoria por amostragem contra
+        o Supabase real (gravados por central_sync._run_audit_cycle) e emite
+        um HealthIssue por achado -- cada um com sua propria chave estavel
+        (signal_id), nao um resumo unico reescrito a cada ciclo. Isso reusa o
+        _synchronize generico (abre/fecha/repete por chave) sem precisar de
+        nenhuma logica nova de ancora: um achado some da tabela (resolvido) e
+        vira recuperacao automatica; um achado novo abre um alerta novo."""
+        if not self.config.central_sync_enabled:
+            return []
+        with connect_database(self.config.database_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT signal_id, detected_at, local_content_signature, remote_content_signature
+                FROM central_sync_audit_findings
+                ORDER BY signal_id
+                """
+            ).fetchall()
+        issues: list[HealthIssue] = []
+        for row in rows:
+            signal_id = int(row[0])
+            detected_at = row[1]
+            remote_content_signature = row[3]
+            if remote_content_signature is None:
+                summary = f"Sinal local id={signal_id} não foi encontrado no Supabase (detectado em {detected_at})."
+            else:
+                summary = (
+                    f"Sinal local id={signal_id} tem content_signature diferente no Supabase "
+                    f"(detectado em {detected_at})."
+                )
+            issues.append(
+                HealthIssue(
+                    key=f"central_sync:audit_mismatch:{signal_id}",
+                    alert_type="central_sync_audit_mismatch",
+                    entity_id=str(signal_id),
+                    title="Sincronização central",
+                    summary=summary,
+                )
+            )
+        return issues
+
+    def _silently_resolve_central_sync_alerts(self, current_time: datetime) -> None:
+        """Quando CENTRAL_SYNC_ENABLED e desligado, qualquer alerta de
+        central_sync ainda ativo precisa sumir sem passar por _synchronize --
+        senao o mecanismo generico de recuperacao (linha "key nao esta mais em
+        issues" = "resolvido") manda uma falsa notificacao de "recuperado"
+        quando na verdade o recurso so foi desligado."""
+        timestamp = current_time.isoformat()
+        with connect_database(self.config.database_path) as connection:
+            connection.execute(
+                """
+                UPDATE operational_alert_states
+                SET is_active = 0, resolved_at = ?, last_seen_at = ?
+                WHERE alert_key LIKE 'central_sync:%' AND is_active = 1
+                """,
+                (timestamp, timestamp),
+            ).close()
 
     def _synchronize(
         self,
@@ -306,6 +477,13 @@ def alert_title(alert_type: str, entity_id: object) -> str:
         return f"Worker da conta {entity_id}"
     if alert_type == "mt5_connection":
         return f"Conexão MT5 da conta {entity_id}"
+    if alert_type in (
+        "central_sync_enqueue_gap",
+        "central_sync_delivery_lag",
+        "central_sync_drain_stale",
+        "central_sync_audit_mismatch",
+    ):
+        return "Sincronização central"
     return str(entity_id or "Serviço")
 
 

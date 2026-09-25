@@ -726,6 +726,134 @@ já pertence a um cliente cadastrado pelo Telegram, o portal não cria uma conta
 duplicada: esse cliente deve entrar pelo bot e configurar o acesso web na sua
 sessão autenticada.
 
+## Backend central (Supabase)
+
+O listener grava cada sinal aceito também numa fila local
+(`central_sync_outbox`), drenada em segundo plano pro Supabase — schema
+`portal` (registro de nós/instâncias/canais/sinais) e `agent_api` (RPCs pro
+futuro agente de execução da VPS). Desligado por padrão
+(`CENTRAL_SYNC_ENABLED=false`); nunca afeta o processamento real mesmo se o
+Supabase estiver fora do ar.
+
+**Atenção, confirmado na prática**: existem múltiplas contas Supabase
+acessíveis a partir desta máquina/ferramentas, e elas **não enxergam os
+mesmos projetos**:
+
+- O conector MCP do Claude Code usado neste projeto está autenticado na
+  organização "Projeto Bíblico", que contém o projeto real
+  **"Instituto Trader"** (`ijwhlzkdxsvsdresbler`) — esse é o projeto certo.
+- A CLI `supabase` local (`supabase login` já feito nesta máquina, mas por
+  outra pessoa/sessão) está autenticada numa **conta diferente**, que só
+  enxerga projetos sem relação com este trabalho (`corecripto`,
+  `Forex Golden IA`, `braba trader`, todos inativos).
+- Já apareceu uma terceira visão diferente (`CRM Instituto` + um projeto
+  inativo) numa verificação feita por fora desta sessão.
+
+**Antes de rodar qualquer `supabase link`, `apply_migration` ou comando que
+toque em Supabase remoto, confirme qual conta está autenticada** (via
+`list_organizations`/`list_projects` no conector, ou `supabase projects list`
+na CLI) e se o projeto que aparece é mesmo o `ijwhlzkdxsvsdresbler` — nunca
+assuma que "Supabase" nesta máquina significa uma conta só.
+
+`apply_migration` (a ferramenta MCP) sempre grava sua própria versão
+(timestamp de quando foi chamada) na tabela de controle
+`supabase_migrations.schema_migrations`, **não** o timestamp do nome do
+arquivo local — isso gera uma divergência de numeração a cada migration
+aplicada por essa via (o schema fica correto, só o número da versão registrado
+diverge do arquivo). O jeito certo de corrigir isso é **`supabase migration
+repair`** (com a CLI linkada à conta certa — ver aviso de identidades acima),
+não editar a tabela de controle à mão. Um `UPDATE
+supabase_migrations.schema_migrations` direto é o que `migration repair` faz
+por baixo dos panos, mas só deve ser usado como recuperação excepcional
+(ex.: a CLI local está numa conta sem acesso ao projeto, como aconteceu aqui)
+— e só depois de comparar o conteúdo aplicado remotamente contra o arquivo
+local (confirmar que são equivalentes) e validar o schema/contagens de linha
+antes e depois da correção.
+
+Conexão da VPS pro Postgres remoto: use o **Session Pooler** (porta `5432`,
+não o endpoint direto) — a VPS provavelmente só tem IPv4, e o endpoint direto
+do Supabase geralmente depende de IPv6; o modo sessão é IPv4-compatível e
+suporta prepared statements normalmente. **Não** use o pooler em modo
+transação (mesmo host, porta `6543`) para isto: modo transação não suporta
+prepared statements, que o `asyncpg` usa por padrão — não é uma limitação do
+`asyncpg` em si, é como PgBouncer em modo transação funciona (reaproveita a
+conexão de banco entre clientes diferentes a cada transação, então não pode
+manter um prepared statement vivo entre chamadas). Exija SSL (`sslmode=require`
+no mínimo; `verify-full` com o certificado CA quando possível).
+
+O papel de banco usado pelo shadow-write é `central_sync_vps` — privilégio
+mínimo, sem acesso a nada fora de `portal.nodes`/`instances`/`channels`/
+`signals`/`customers`/`mt5_accounts`/`execution_jobs`/`execution_job_orders`
+e a função `portal.append_signal_revision`. A senha desse papel nunca deve
+aparecer em código, commit ou conversa — defina/redefina direto no painel do
+Supabase (Database → Roles) e guarde num gerenciador de senhas.
+
+**Auditoria de conteúdo (Etapa 3B)**: o loop de drenagem, de tempos em tempos
+(`CENTRAL_SYNC_AUDIT_INTERVAL_SECONDS`, padrão 30min), amostra
+`CENTRAL_SYNC_AUDIT_SAMPLE_SIZE` sinais já drenados (padrão 5) e compara o
+`content_signature` local contra o que está de fato em `portal.signals` no
+Supabase — não só se a réplica local está íntegra (isso já é o que as três
+checagens da Etapa 3 fazem), mas se o conteúdo que chegou lá está correto de
+verdade. Divergências (ou um sinal que nunca chegou) viram um alerta
+operacional por sinal (`central_sync:audit_mismatch:<id>`), que some sozinho
+quando uma auditoria seguinte confirma que o conteúdo voltou a bater. Só
+leitura — nunca corrige nada automaticamente.
+
+### Agente de execução (Etapa 4, só simulação)
+
+`telegram-mt5-execution-agent` (módulo `execution_agent.py`) é um processo
+**separado**, standalone — não faz parte do `run_telegram_listener`, não
+entra no `supervisor.py` nesta etapa. Ele fala com o Supabase de um jeito
+completamente diferente do shadow-write: as RPCs de `agent_api`
+(`claim_execution_jobs`/`start_execution_job`/`complete_execution_job`/
+`fail_execution_job`, schema `agent_api`, exposto na Data API) exigem um JWT
+real do Supabase Auth (`auth.uid()`), não uma conexão Postgres direta — por
+isso o agente faz login via `EXECUTION_AGENT_EMAIL`/`EXECUTION_AGENT_PASSWORD`
+(`POST /auth/v1/token`) e chama as RPCs via HTTP
+(`POST /rest/v1/rpc/<função>`, sempre com os headers `Accept-Profile`/
+`Content-Profile: agent_api` — sem eles o PostgREST tenta rotear pro schema
+`public` e a RPC não é encontrada). Cliente HTTP minimalista (`httpx`), sem
+`supabase-py`.
+
+**Nesta etapa, o agente só simula**: nunca chama MT5/corretora nenhuma. Ele
+reivindica um job, "executa" (monta um resumo a partir do `payload` do job) e
+conclui — sem nenhum estado local persistente, porque o próprio mecanismo de
+`reservation_token`/lease das RPCs (Etapa 1) já garante que um crash no meio
+de um job simplesmente deixa o lease expirar e ser reivindicado de novo.
+Quando esta etapa foi construída, ainda não existia nenhum produtor real de
+jobs `pending` (a Etapa 2 só espelha execuções já terminadas) — isso foi
+resolvido na Etapa 5a, abaixo —, então o agente foi testado com jobs
+inseridos manualmente (fixture); **nenhum agente fica rodando contra jobs
+reais ainda**, por decisão explícita (ver Etapa 5a).
+
+A senha (`EXECUTION_AGENT_PASSWORD`) nunca deve ser gerada nem vista por uma
+IA — defina direto no painel do Supabase (Authentication → Users), mesma
+disciplina do `CENTRAL_SYNC_DATABASE_URL`/`central_sync_vps`. Provisionar o
+`auth.users` de uma VPS real no projeto Supabase real é uma decisão de
+release controlada, feita por você, fora desta automação.
+
+### Produtor real de jobs `pending` (Etapa 5a, só sombra)
+
+O pipeline real de sinais (`pending_order_executor.py`, demo/live) agora
+também enfileira um job **`pending`** de verdade em `portal.execution_jobs`
+— logo após o grupo local ser criado, **antes** de qualquer `order_send`.
+Isso acontece via um callback opcional (`PendingOrderExecutor.on_group_created`,
+`None` por padrão) — a única mudança desta série inteira dentro de
+`pending_order_executor.py`, protegida por `try/except` para nunca atrasar
+ou impedir o envio real da ordem.
+
+Esse job `pending` e o job de resultado (Etapa 2, gravado depois, com o
+resultado real) usam `kind`s diferentes no outbox local
+(`execution_job_pending` vs `execution_job_shadow_write`) mas convergem pra
+**a mesma linha** em `portal.execution_jobs`/`execution_job_orders` — o job
+transiciona `pending → succeeded`/`rejected` de verdade no Supabase.
+
+**Nenhum consumidor real reivindica esses jobs ainda** — por decisão
+explícita, pra não correr o risco de duas fontes de verdade divergentes (o
+agente da Etapa 4, que só simula, nunca deve rodar contra contas reais
+enquanto isso). Os jobs ficam parados na fila, prontos pra quando um
+consumidor de verdade for decidido numa etapa futura, separada.
+
 ## Backup
 
 O comando `telegram-mt5-backup` (`scripts\backup_vps.ps1`) faz um backup

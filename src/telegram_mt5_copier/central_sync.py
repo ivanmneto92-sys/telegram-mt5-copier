@@ -1,0 +1,1210 @@
+"""Etapa 2: shadow-write do listener para o backend central (Supabase, schema
+"portal"). So sinais/revisoes + o minimo de registro (nodes/instances/channels)
+necessario pra sustentar isso -- nao inclui execution_jobs (etapa propria,
+futura). Nao afeta o caminho real de processamento: falha aqui nunca propaga
+pra quem chama (SignalProcessor.process), e a fila local em SQLite garante que
+uma indisponibilidade do Supabase nunca perde um evento, so atrasa.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
+import json
+import logging
+from pathlib import Path
+from typing import Any
+
+from .config import AppConfig
+from .database import (
+    CENTRAL_SYNC_SERVICE_NAME,
+    as_text,
+    connect_database,
+    update_service_heartbeat,
+    utc_now,
+)
+from .models import TradeSignal, decimal_to_text
+from .mt5.models import ExecutionGroup, ExecutionOrder, MT5Account, PendingOrderPlan
+
+try:
+    import asyncpg
+except ImportError:  # pragma: no cover - so acontece se a dependencia nao foi instalada
+    asyncpg = None  # type: ignore[assignment]
+
+OUTBOX_KIND_SIGNAL_SHADOW_WRITE = "signal_shadow_write"
+OUTBOX_KIND_EXECUTION_JOB_SHADOW_WRITE = "execution_job_shadow_write"
+OUTBOX_KIND_EXECUTION_JOB_PENDING = "execution_job_pending"
+OUTBOX_KIND_EXECUTION_JOB_PILOT_PENDING = "execution_job_pilot_pending"
+_BACKOFF_SECONDS = (1, 2, 5, 10, 30, 60, 120, 300)
+
+
+@dataclass(frozen=True)
+class ChannelRow:
+    id: int
+    telegram_chat_id: str | None
+    title: str
+    status: str
+    access_status: str
+
+
+@dataclass(frozen=True)
+class OutboxRow:
+    id: int
+    kind: str
+    payload: dict[str, Any]
+    attempts: int
+
+
+def resolve_local_channel(database_path: Path, source_chat_id: int | str | None) -> ChannelRow | None:
+    if source_chat_id is None:
+        return None
+    with connect_database(database_path) as connection:
+        cursor = connection.execute(
+            """
+            SELECT id, telegram_chat_id, title, status, access_status
+            FROM source_channels
+            WHERE telegram_chat_id = ?
+            """,
+            (as_text(source_chat_id),),
+        )
+        try:
+            row = cursor.fetchone()
+        finally:
+            cursor.close()
+    if row is None:
+        return None
+    return ChannelRow(id=row[0], telegram_chat_id=row[1], title=row[2], status=row[3], access_status=row[4])
+
+
+@dataclass(frozen=True)
+class CustomerAccountRow:
+    """Dados locais minimos (cliente + conta MT5) necessarios para popular
+    portal.customers/portal.mt5_accounts -- nunca inclui senha nem login
+    completo (so os 4 ultimos digitos, ja truncados aqui)."""
+
+    source_user_id: int
+    telegram_user_id: int | None
+    user_status: str
+    user_created_at: str
+    customer_name: str | None
+    email: str | None
+    phone: str | None
+    plan_name: str
+    monthly_amount: str
+    due_date: str | None
+    billing_status: str
+    last_paid_at: str | None
+    source_account_id: int
+    broker_name: str
+    server_name: str
+    login_last4: str = field(repr=False)
+    account_alias: str
+    account_type: str
+    account_mode: str
+    connection_status: str
+    last_error: str | None
+    balance: str | None
+    equity: str | None
+    worker_heartbeat_at: str | None
+    account_created_at: str
+
+
+def resolve_local_customer_and_account(database_path: Path, account_id: int) -> CustomerAccountRow | None:
+    with connect_database(database_path) as connection:
+        cursor = connection.execute(
+            """
+            SELECT u.id, u.telegram_user_id, u.status, u.created_at,
+                   b.customer_name, b.email, b.phone, b.plan_name, b.monthly_amount,
+                   b.due_date, b.billing_status, b.last_paid_at,
+                   a.id, a.broker_name, a.server_name, a.login, a.account_alias,
+                   a.account_type, a.account_mode, a.connection_status, a.last_error,
+                   a.balance, a.equity, a.worker_heartbeat_at, a.created_at
+            FROM mt5_accounts a
+            JOIN users u ON u.id = a.user_id
+            JOIN customer_billing b ON b.user_id = u.id
+            WHERE a.id = ?
+            """,
+            (account_id,),
+        )
+        try:
+            row = cursor.fetchone()
+        finally:
+            cursor.close()
+    if row is None:
+        return None
+    login = str(row[15])
+    return CustomerAccountRow(
+        source_user_id=row[0],
+        telegram_user_id=row[1],
+        user_status=row[2],
+        user_created_at=row[3],
+        customer_name=row[4],
+        email=row[5],
+        phone=row[6],
+        plan_name=row[7],
+        monthly_amount=row[8],
+        due_date=row[9],
+        billing_status=row[10],
+        last_paid_at=row[11],
+        source_account_id=row[12],
+        broker_name=row[13],
+        server_name=row[14],
+        login_last4=login[-4:] if len(login) > 4 else login,
+        account_alias=row[16],
+        account_type=row[17],
+        account_mode=row[18],
+        connection_status=row[19],
+        last_error=row[20],
+        balance=row[21],
+        equity=row[22],
+        worker_heartbeat_at=row[23],
+        account_created_at=row[24],
+    )
+
+
+def build_execution_key(group_signal_id: str, tp_index: int) -> str:
+    # Mesmo prefixo (8 chars hex) que mt5/trade_comment.py grava no comentario
+    # real da ordem no MT5 -- formato compativel com parse_trade_comment(), pra
+    # a Etapa 4 conseguir cruzar o execution_key com o que o terminal mostra.
+    return f"{group_signal_id[:8].lower()}T{tp_index}"
+
+
+def build_outbox_payload(
+    signal: TradeSignal,
+    formatted_message: str,
+    channel: ChannelRow,
+) -> dict[str, Any]:
+    return {
+        "source_channel_id": channel.id,
+        "telegram_chat_id": channel.telegram_chat_id,
+        "channel_title": channel.title,
+        "channel_status": channel.status,
+        "channel_access_status": channel.access_status,
+        "source_message_id": as_text(signal.source_message_id),
+        "content_signature": signal.content_signature,
+        "symbol": signal.symbol,
+        "direction": signal.direction.value,
+        "entry_low": decimal_to_text(signal.entry_low),
+        "entry_high": decimal_to_text(signal.entry_high),
+        "stop_loss": decimal_to_text(signal.stop_loss),
+        "take_profits": [decimal_to_text(value) for value in signal.take_profits],
+        "raw_text": signal.raw_text,
+        "formatted_message": formatted_message,
+        "received_at": utc_now(),
+    }
+
+
+def _build_execution_job_payload_common(
+    signal: TradeSignal,
+    channel: ChannelRow,
+    customer_account: CustomerAccountRow,
+    *,
+    status: str,
+    last_error_code: str | None,
+    last_error_message: str | None,
+    orders: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "source_channel_id": channel.id,
+        "telegram_chat_id": channel.telegram_chat_id,
+        "channel_title": channel.title,
+        "channel_status": channel.status,
+        "channel_access_status": channel.access_status,
+        "source_message_id": as_text(signal.source_message_id),
+        "content_signature": signal.content_signature,
+        "customer": {
+            "source_user_id": customer_account.source_user_id,
+            "telegram_user_id": customer_account.telegram_user_id,
+            "status": customer_account.user_status,
+            "created_at": customer_account.user_created_at,
+            "customer_name": customer_account.customer_name,
+            "email": customer_account.email,
+            "phone": customer_account.phone,
+            "plan_name": customer_account.plan_name,
+            "monthly_amount": customer_account.monthly_amount,
+            "due_date": customer_account.due_date,
+            "billing_status": customer_account.billing_status,
+            "last_paid_at": customer_account.last_paid_at,
+        },
+        "account": {
+            "source_account_id": customer_account.source_account_id,
+            "broker_name": customer_account.broker_name,
+            "server_name": customer_account.server_name,
+            "login_last4": customer_account.login_last4,
+            "account_alias": customer_account.account_alias,
+            "account_type": customer_account.account_type,
+            "account_mode": customer_account.account_mode,
+            "connection_status": customer_account.connection_status,
+            "last_error": customer_account.last_error,
+            "balance": customer_account.balance,
+            "equity": customer_account.equity,
+            "worker_heartbeat_at": customer_account.worker_heartbeat_at,
+            "created_at": customer_account.account_created_at,
+        },
+        "status": status,
+        "last_error_code": last_error_code,
+        "last_error_message": last_error_message,
+        "orders": orders,
+    }
+
+
+def build_execution_job_outbox_payload(
+    signal: TradeSignal,
+    channel: ChannelRow,
+    customer_account: CustomerAccountRow,
+    group: ExecutionGroup,
+    orders: tuple[ExecutionOrder, ...],
+    *,
+    rejected_reason: str | None,
+) -> dict[str, Any]:
+    order_dicts = [
+        {
+            "tp_index": order.tp_index,
+            "execution_key": build_execution_key(group.signal_id, order.tp_index),
+            "requested_volume": decimal_to_text(order.requested_volume),
+            "normalized_volume": decimal_to_text(order.normalized_volume),
+            "entry_price": decimal_to_text(order.entry_price),
+            "stop_loss": decimal_to_text(order.stop_loss),
+            "take_profit": decimal_to_text(order.take_profit),
+            "status": "sent" if order.mt5_order_ticket else "failed",
+            "mt5_order_ticket": order.mt5_order_ticket,
+            "mt5_position_ticket": order.mt5_position_ticket,
+            "retcode": order.broker_retcode,
+            "retcode_message": order.broker_message,
+        }
+        for order in orders
+    ]
+    return _build_execution_job_payload_common(
+        signal,
+        channel,
+        customer_account,
+        status="rejected" if rejected_reason is not None else "succeeded",
+        last_error_code=rejected_reason,
+        last_error_message=rejected_reason,
+        orders=order_dicts,
+    )
+
+
+def build_execution_job_pending_payload(
+    signal: TradeSignal,
+    channel: ChannelRow,
+    customer_account: CustomerAccountRow,
+    group: ExecutionGroup,
+    plan: PendingOrderPlan,
+) -> dict[str, Any]:
+    """Etapa 5a: payload do job ainda ANTES de qualquer order_send -- nunca
+    tem ticket/retcode (nao existem ainda). status='pending' por TP, mesmo
+    default do CHECK de portal.execution_job_orders."""
+    order_dicts = [
+        {
+            "tp_index": order.tp_index,
+            "execution_key": build_execution_key(group.signal_id, order.tp_index),
+            "requested_volume": decimal_to_text(order.requested_volume),
+            "normalized_volume": decimal_to_text(order.normalized_volume),
+            "entry_price": decimal_to_text(order.entry_price),
+            "stop_loss": decimal_to_text(order.stop_loss),
+            "take_profit": decimal_to_text(order.take_profit),
+            "status": "pending",
+            "mt5_order_ticket": None,
+            "mt5_position_ticket": None,
+            "retcode": None,
+            "retcode_message": None,
+        }
+        for order in plan.orders
+    ]
+    return _build_execution_job_payload_common(
+        signal,
+        channel,
+        customer_account,
+        status="pending",
+        last_error_code=None,
+        last_error_message=None,
+        orders=order_dicts,
+    )
+
+
+def build_execution_job_pilot_pending_payload(
+    signal: TradeSignal,
+    channel: ChannelRow,
+    customer_account: CustomerAccountRow,
+) -> dict[str, Any]:
+    """Etapa 5d: produtor pra conta(s) piloteada(s) pela fila central -- ao
+    contrario dos outros dois payloads de execution_job (que carregam um
+    plano ja calculado, local ou central), este carrega so o SINAL BRUTO,
+    sem nenhuma ordem: a conta piloto nunca passa pelo caminho de execucao
+    local (execution_profiles.enabled=0 pra ela, por design), entao nao ha
+    nenhum plano ja calculado pra espelhar. Quem planeja de verdade, com
+    dado de terminal fresco, e o agente (RealExecutionBackend, Etapa 5c), no
+    momento em que reivindicar o job."""
+    payload = _build_execution_job_payload_common(
+        signal,
+        channel,
+        customer_account,
+        status="pending",
+        last_error_code=None,
+        last_error_message=None,
+        orders=[],
+    )
+    payload.update(
+        {
+            "symbol": signal.symbol,
+            "direction": signal.direction.value,
+            "entry_low": decimal_to_text(signal.entry_low),
+            "entry_high": decimal_to_text(signal.entry_high),
+            "stop_loss": decimal_to_text(signal.stop_loss),
+            "take_profits": [decimal_to_text(value) for value in signal.take_profits],
+            "raw_text": signal.raw_text,
+            "source_chat_id": as_text(signal.source_chat_id),
+            "local_user_id": customer_account.source_user_id,
+            "local_account_id": customer_account.source_account_id,
+        }
+    )
+    return payload
+
+
+class CentralSyncOutbox:
+    """Fila local (SQLite) de eventos a replicar no Supabase. Escrita sincrona,
+    barata (mesmo arquivo/conexao do banco de sinais) -- drenada de forma
+    assincrona por run_central_sync_drain_loop."""
+
+    def __init__(self, database_path: Path, *, logger: logging.Logger | None = None) -> None:
+        self.database_path = database_path
+        self.logger = logger
+
+    def ensure_activation_baseline(self) -> None:
+        """Grava, uma unica vez, o signals.id mais alto que ja existia quando o
+        shadow-write comecou a rodar nesta instalacao -- e o corte usado por
+        operational_health.py pra nao alertar sobre historico anterior a
+        Etapa 2. Idempotente: chamadas seguintes sao no-op."""
+        with connect_database(self.database_path) as connection:
+            row = connection.execute(
+                "SELECT activation_signal_id FROM central_sync_activation WHERE id = 1"
+            ).fetchone()
+            if row is not None:
+                return
+            baseline_row = connection.execute("SELECT COALESCE(MAX(id), 0) FROM signals").fetchone()
+            baseline = int(baseline_row[0])
+            connection.execute(
+                """
+                INSERT INTO central_sync_activation (id, activation_signal_id, activated_at)
+                VALUES (1, ?, ?)
+                """,
+                (baseline, utc_now()),
+            ).close()
+
+    def enqueue_signal_shadow_write(
+        self, signal: TradeSignal, formatted_message: str, local_signal_id: int
+    ) -> None:
+        if signal.source_message_id is None:
+            if self.logger is not None:
+                self.logger.info(
+                    "central_sync_enqueue_skipped: sinal local_id=%s sem source_message_id",
+                    local_signal_id,
+                )
+            return
+        channel = resolve_local_channel(self.database_path, signal.source_chat_id)
+        if channel is None:
+            # Canal nao registrado localmente (hoje so acontece em testes
+            # unitarios que criam SignalProcessor sem passar pelo startup real,
+            # onde register_configured_channel ja roda) -- nada a replicar.
+            if self.logger is not None:
+                self.logger.info(
+                    "central_sync_enqueue_skipped: canal nao registrado para sinal local_id=%s chat_id=%s",
+                    local_signal_id,
+                    signal.source_chat_id,
+                )
+            return
+        payload = build_outbox_payload(signal, formatted_message, channel)
+        now = utc_now()
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO central_sync_outbox (
+                    kind, source_signal_id, payload, status, attempts, created_at, updated_at, next_attempt_at
+                )
+                VALUES (?, ?, ?, 'pending', 0, ?, ?, ?)
+                """,
+                (OUTBOX_KIND_SIGNAL_SHADOW_WRITE, local_signal_id, json.dumps(payload), now, now, now),
+            )
+            cursor.close()
+
+    def enqueue_execution_job_shadow_write(
+        self,
+        signal: TradeSignal,
+        account: MT5Account,
+        group: ExecutionGroup,
+        orders: tuple[ExecutionOrder, ...],
+        *,
+        rejected_reason: str | None,
+        local_group_id: int,
+    ) -> None:
+        channel = resolve_local_channel(self.database_path, signal.source_chat_id)
+        if channel is None:
+            if self.logger is not None:
+                self.logger.info(
+                    "central_sync_execution_enqueue_skipped: canal nao registrado group_id=%s",
+                    local_group_id,
+                )
+            return
+        customer_account = resolve_local_customer_and_account(self.database_path, account.id)
+        if customer_account is None:
+            if self.logger is not None:
+                self.logger.info(
+                    "central_sync_execution_enqueue_skipped: conta/cliente local nao encontrado group_id=%s account_id=%s",
+                    local_group_id,
+                    account.id,
+                )
+            return
+        payload = build_execution_job_outbox_payload(
+            signal, channel, customer_account, group, orders, rejected_reason=rejected_reason
+        )
+        now = utc_now()
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO central_sync_outbox (
+                    kind, source_execution_group_id, payload, status, attempts, created_at, updated_at, next_attempt_at
+                )
+                VALUES (?, ?, ?, 'pending', 0, ?, ?, ?)
+                """,
+                (
+                    OUTBOX_KIND_EXECUTION_JOB_SHADOW_WRITE,
+                    local_group_id,
+                    json.dumps(payload),
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            cursor.close()
+
+    def enqueue_execution_job_pending(
+        self,
+        signal: TradeSignal,
+        account: MT5Account,
+        group: ExecutionGroup,
+        plan: PendingOrderPlan,
+    ) -> None:
+        """Etapa 5a: enfileira a "intencao" de execucao ANTES de qualquer
+        order_send -- kind diferente de enqueue_execution_job_shadow_write
+        (que carrega o resultado, escrito depois) de proposito: o indice
+        unico parcial em (kind, source_execution_group_id) e escopado por
+        kind, entao os dois writes pro MESMO group.id nunca colidem, e os
+        dois convergem pra mesma linha central via o mesmo
+        on conflict (mt5_account_id, signal_id) ja usado em _drain_one."""
+        channel = resolve_local_channel(self.database_path, signal.source_chat_id)
+        if channel is None:
+            if self.logger is not None:
+                self.logger.info(
+                    "central_sync_execution_pending_enqueue_skipped: canal nao registrado group_id=%s",
+                    group.id,
+                )
+            return
+        customer_account = resolve_local_customer_and_account(self.database_path, account.id)
+        if customer_account is None:
+            if self.logger is not None:
+                self.logger.info(
+                    "central_sync_execution_pending_enqueue_skipped: conta/cliente local nao encontrado group_id=%s account_id=%s",
+                    group.id,
+                    account.id,
+                )
+            return
+        payload = build_execution_job_pending_payload(signal, channel, customer_account, group, plan)
+        now = utc_now()
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO central_sync_outbox (
+                    kind, source_execution_group_id, payload, status, attempts, created_at, updated_at, next_attempt_at
+                )
+                VALUES (?, ?, ?, 'pending', 0, ?, ?, ?)
+                """,
+                (
+                    OUTBOX_KIND_EXECUTION_JOB_PENDING,
+                    group.id,
+                    json.dumps(payload),
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            cursor.close()
+
+    def enqueue_execution_job_pilot_pending(
+        self,
+        signal: TradeSignal,
+        account: MT5Account,
+        local_signal_id: int,
+    ) -> None:
+        """Etapa 5d: produtor pra conta(s) piloteada(s) pela fila central --
+        ao contrario de enqueue_execution_job_pending (que ancora no
+        execution_groups local, ja que a execucao local aconteceu), a conta
+        piloto nunca executa localmente, entao nao ha nenhum group.id pra
+        usar como identidade. Usa (kind, source_signal_id, source_account_id)
+        -- o mesmo sinal pode ir pra mais de uma conta piloto, cada uma
+        precisa da sua propria linha."""
+        channel = resolve_local_channel(self.database_path, signal.source_chat_id)
+        if channel is None:
+            if self.logger is not None:
+                self.logger.info(
+                    "central_sync_execution_pilot_enqueue_skipped: canal nao registrado signal_id=%s account_id=%s",
+                    local_signal_id,
+                    account.id,
+                )
+            return
+        customer_account = resolve_local_customer_and_account(self.database_path, account.id)
+        if customer_account is None:
+            if self.logger is not None:
+                self.logger.info(
+                    "central_sync_execution_pilot_enqueue_skipped: conta/cliente local nao encontrado signal_id=%s account_id=%s",
+                    local_signal_id,
+                    account.id,
+                )
+            return
+        payload = build_execution_job_pilot_pending_payload(signal, channel, customer_account)
+        now = utc_now()
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO central_sync_outbox (
+                    kind, source_signal_id, source_account_id, payload,
+                    status, attempts, created_at, updated_at, next_attempt_at
+                )
+                VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, ?)
+                """,
+                (
+                    OUTBOX_KIND_EXECUTION_JOB_PILOT_PENDING,
+                    local_signal_id,
+                    account.id,
+                    json.dumps(payload),
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            cursor.close()
+
+    def claim_batch(self, limit: int) -> list[OutboxRow]:
+        now = utc_now()
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                """
+                SELECT id, kind, payload, attempts
+                FROM central_sync_outbox
+                WHERE status = 'pending' OR (status = 'failed' AND next_attempt_at <= ?)
+                ORDER BY id
+                LIMIT ?
+                """,
+                (now, limit),
+            )
+            try:
+                rows = cursor.fetchall()
+            finally:
+                cursor.close()
+        return [
+            OutboxRow(id=row[0], kind=row[1], payload=json.loads(row[2]), attempts=row[3])
+            for row in rows
+        ]
+
+    def mark_done(self, row_id: int) -> None:
+        now = utc_now()
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                "UPDATE central_sync_outbox SET status = 'done', updated_at = ? WHERE id = ?",
+                (now, row_id),
+            )
+            cursor.close()
+
+    def mark_failed(self, row_id: int, error: str) -> None:
+        now = utc_now()
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                "SELECT attempts FROM central_sync_outbox WHERE id = ?",
+                (row_id,),
+            )
+            try:
+                row = cursor.fetchone()
+            finally:
+                cursor.close()
+            attempts = (row[0] if row else 0) + 1
+            delay_seconds = _BACKOFF_SECONDS[min(attempts - 1, len(_BACKOFF_SECONDS) - 1)]
+            next_attempt_at = (
+                datetime.now(tz=timezone.utc) + timedelta(seconds=delay_seconds)
+            ).isoformat()
+            cursor = connection.execute(
+                """
+                UPDATE central_sync_outbox
+                SET status = 'failed', attempts = ?, last_error = ?, updated_at = ?, next_attempt_at = ?
+                WHERE id = ?
+                """,
+                (attempts, error[:2000], now, next_attempt_at, row_id),
+            )
+            cursor.close()
+
+
+def _parse_date(value: str | None) -> date | None:
+    # asyncpg exige um datetime.date de verdade pra um parametro com destino
+    # "date" (o cast ::date no SQL faz o Postgres reportar esse tipo na fase
+    # de Parse, e o codec binario do asyncpg rejeita string nesse caso) --
+    # os valores locais vem como texto ISO do SQLite.
+    if not value:
+        return None
+    return date.fromisoformat(value[:10])
+
+
+def _parse_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    return datetime.fromisoformat(value)
+
+
+def _parse_int(value: str | int | None) -> int | None:
+    # Mesmo motivo de _parse_date/_parse_timestamp: um parametro com destino
+    # bigint/integer no SQL (mt5_order_ticket, retcode) precisa de um int de
+    # verdade -- os valores locais vem como texto (mt5_order_ticket e
+    # broker_retcode sao TEXT no SQLite local).
+    if value is None or value == "":
+        return None
+    return int(value)
+
+
+class CentralSyncClient:
+    """Conexao direta a Postgres (asyncpg) contra o schema "portal" -- esse
+    schema deliberadamente NAO e exposto pela API REST do Supabase (ver
+    supabase/config.toml [api].schemas), entao nao ha como falar com ele via
+    PostgREST/supabase-py, so via conexao Postgres com privilegio de escrita."""
+
+    def __init__(self, database_url: str) -> None:
+        self.database_url = database_url
+        self._pool: Any = None
+
+    @property
+    def connected(self) -> bool:
+        return self._pool is not None
+
+    async def connect(self) -> None:
+        if asyncpg is None:
+            raise RuntimeError(
+                "asyncpg nao instalado -- necessario para CENTRAL_SYNC_ENABLED=true."
+            )
+        self._pool = await asyncpg.create_pool(self.database_url, min_size=1, max_size=2)
+
+    async def reset(self) -> None:
+        pool, self._pool = self._pool, None
+        if pool is not None:
+            await pool.close()
+
+    async def close(self) -> None:
+        await self.reset()
+
+    async def upsert_node(self, node_id: str, node_label: str) -> None:
+        await self._pool.execute(
+            """
+            insert into portal.nodes (id, label)
+            values ($1, $2)
+            on conflict (id) do update set label = excluded.label
+            """,
+            node_id,
+            node_label or node_id,
+        )
+
+    async def upsert_instance(self, instance_id: str, brand_name: str, *, node_id: str) -> None:
+        await self._pool.execute(
+            """
+            insert into portal.instances (id, brand_name, node_id)
+            values ($1, $2, $3)
+            on conflict (id) do update set
+                brand_name = excluded.brand_name,
+                node_id = excluded.node_id
+            """,
+            instance_id,
+            brand_name,
+            node_id,
+        )
+
+    async def upsert_channel(self, instance_id: str, payload: dict[str, Any]) -> Any:
+        row = await self._pool.fetchrow(
+            """
+            insert into portal.channels (
+                instance_id, source_channel_id, telegram_chat_id, title, status, access_status, created_at
+            ) values ($1, $2, $3, $4, $5, $6, now())
+            on conflict (instance_id, source_channel_id) do update set
+                telegram_chat_id = excluded.telegram_chat_id,
+                title = excluded.title,
+                status = excluded.status,
+                access_status = excluded.access_status
+            returning id
+            """,
+            instance_id,
+            payload["source_channel_id"],
+            payload["telegram_chat_id"],
+            payload["channel_title"],
+            payload["channel_status"],
+            payload["channel_access_status"],
+        )
+        return row["id"]
+
+    async def upsert_signal(self, instance_id: str, channel_id: Any, payload: dict[str, Any]) -> Any:
+        source_message_id = int(payload["source_message_id"])
+        row = await self._pool.fetchrow(
+            """
+            insert into portal.signals (
+                instance_id, channel_id, source_message_id, content_signature,
+                symbol, direction, entry_low, entry_high, stop_loss, take_profits
+            ) values ($1, $2, $3, $4, $5, $6, $7::numeric, $8::numeric, $9::numeric, $10::jsonb)
+            on conflict (instance_id, channel_id, source_message_id) do nothing
+            returning id
+            """,
+            instance_id,
+            channel_id,
+            source_message_id,
+            payload["content_signature"],
+            payload["symbol"],
+            payload["direction"],
+            payload["entry_low"],
+            payload["entry_high"],
+            payload["stop_loss"],
+            json.dumps(payload["take_profits"]),
+        )
+        if row is not None:
+            return row["id"]
+        row = await self._pool.fetchrow(
+            """
+            select id from portal.signals
+            where instance_id = $1 and channel_id = $2 and source_message_id = $3
+            """,
+            instance_id,
+            channel_id,
+            source_message_id,
+        )
+        return row["id"]
+
+    async def append_signal_revision(self, signal_id: Any, content_signature: str, raw_payload: dict[str, Any]) -> None:
+        await self._pool.execute(
+            "select portal.append_signal_revision($1, $2, $3::jsonb)",
+            signal_id,
+            content_signature,
+            json.dumps(raw_payload),
+        )
+
+    async def find_channel_id(self, instance_id: str, source_channel_id: int) -> Any:
+        # So-leitura, ao contrario de upsert_channel -- usado pela auditoria
+        # da Etapa 3B, que nunca pode escrever no registro central.
+        row = await self._pool.fetchrow(
+            "select id from portal.channels where instance_id = $1 and source_channel_id = $2",
+            instance_id,
+            source_channel_id,
+        )
+        return row["id"] if row is not None else None
+
+    async def fetch_signal_content_signature(
+        self, instance_id: str, channel_id: Any, source_message_id: str | None
+    ) -> str | None:
+        if source_message_id is None:
+            return None
+        row = await self._pool.fetchrow(
+            """
+            select content_signature from portal.signals
+            where instance_id = $1 and channel_id = $2 and source_message_id = $3
+            """,
+            instance_id,
+            channel_id,
+            int(source_message_id),
+        )
+        return row["content_signature"] if row is not None else None
+
+    async def find_signal_id(self, instance_id: str, channel_id: Any, source_message_id: str) -> Any:
+        row = await self._pool.fetchrow(
+            """
+            select id from portal.signals
+            where instance_id = $1 and channel_id = $2 and source_message_id = $3
+            """,
+            instance_id,
+            channel_id,
+            int(source_message_id),
+        )
+        return row["id"] if row is not None else None
+
+    async def upsert_customer(self, instance_id: str, customer: dict[str, Any]) -> Any:
+        row = await self._pool.fetchrow(
+            """
+            insert into portal.customers (
+                instance_id, source_user_id, telegram_user_id, status, customer_name, email, phone,
+                plan_name, monthly_amount, due_date, billing_status, last_paid_at, created_at
+            ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9::numeric, $10::date, $11, $12::date, $13::timestamptz)
+            on conflict (instance_id, source_user_id) do update set
+                telegram_user_id = excluded.telegram_user_id,
+                status = excluded.status,
+                customer_name = excluded.customer_name,
+                email = excluded.email,
+                phone = excluded.phone,
+                plan_name = excluded.plan_name,
+                monthly_amount = excluded.monthly_amount,
+                due_date = excluded.due_date,
+                billing_status = excluded.billing_status,
+                last_paid_at = excluded.last_paid_at
+            returning id
+            """,
+            instance_id,
+            customer["source_user_id"],
+            customer["telegram_user_id"],
+            customer["status"],
+            customer["customer_name"],
+            customer["email"],
+            customer["phone"],
+            customer["plan_name"],
+            customer["monthly_amount"],
+            _parse_date(customer["due_date"]),
+            customer["billing_status"],
+            _parse_date(customer["last_paid_at"]),
+            _parse_timestamp(customer["created_at"]),
+        )
+        return row["id"]
+
+    async def upsert_account(self, instance_id: str, customer_id: Any, account: dict[str, Any], *, node_id: str) -> Any:
+        row = await self._pool.fetchrow(
+            """
+            insert into portal.mt5_accounts (
+                customer_id, instance_id, source_account_id, node_id, broker_name, server_name,
+                login_last4, account_alias, account_type, account_mode, connection_status, last_error,
+                balance, equity, worker_heartbeat_at, created_at
+            ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::numeric, $14::numeric, $15::timestamptz, $16::timestamptz)
+            on conflict (instance_id, source_account_id) do update set
+                customer_id = excluded.customer_id,
+                node_id = excluded.node_id,
+                broker_name = excluded.broker_name,
+                server_name = excluded.server_name,
+                login_last4 = excluded.login_last4,
+                account_alias = excluded.account_alias,
+                account_type = excluded.account_type,
+                account_mode = excluded.account_mode,
+                connection_status = excluded.connection_status,
+                last_error = excluded.last_error,
+                balance = excluded.balance,
+                equity = excluded.equity,
+                worker_heartbeat_at = excluded.worker_heartbeat_at
+            returning id
+            """,
+            customer_id,
+            instance_id,
+            account["source_account_id"],
+            node_id,
+            account["broker_name"],
+            account["server_name"],
+            account["login_last4"],
+            account["account_alias"],
+            account["account_type"],
+            account["account_mode"],
+            account["connection_status"],
+            account["last_error"],
+            account["balance"],
+            account["equity"],
+            _parse_timestamp(account["worker_heartbeat_at"]),
+            _parse_timestamp(account["created_at"]),
+        )
+        return row["id"]
+
+    async def upsert_execution_job(
+        self,
+        instance_id: str,
+        mt5_account_id: Any,
+        node_id: str,
+        signal_id: Any,
+        content_signature: str,
+        status: str,
+        *,
+        last_error_code: str | None,
+        last_error_message: str | None,
+        payload: dict[str, Any],
+    ) -> Any:
+        row = await self._pool.fetchrow(
+            """
+            insert into portal.execution_jobs (
+                instance_id, mt5_account_id, node_id, signal_id, content_signature, status,
+                finished_at, last_error_code, last_error_message, payload
+            ) values (
+                $1, $2, $3, $4, $5, $6,
+                case when $6 in ('succeeded', 'rejected') then now() else null end,
+                $7, $8, $9::jsonb
+            )
+            on conflict (mt5_account_id, signal_id) do update set
+                status = excluded.status,
+                finished_at = case when excluded.status in ('succeeded', 'rejected') then now() else null end,
+                last_error_code = excluded.last_error_code,
+                last_error_message = excluded.last_error_message,
+                payload = excluded.payload
+            returning id
+            """,
+            instance_id,
+            mt5_account_id,
+            node_id,
+            signal_id,
+            content_signature,
+            status,
+            last_error_code,
+            last_error_message,
+            json.dumps(payload),
+        )
+        return row["id"]
+
+    async def upsert_execution_job_orders(self, execution_job_id: Any, orders: list[dict[str, Any]]) -> None:
+        for order in orders:
+            await self._pool.execute(
+                """
+                insert into portal.execution_job_orders (
+                    execution_job_id, tp_index, execution_key, requested_volume, normalized_volume,
+                    entry_price, stop_loss, take_profit, status, mt5_order_ticket, mt5_position_ticket,
+                    retcode, retcode_message, sent_at
+                ) values (
+                    $1, $2, $3, $4::numeric, $5::numeric, $6::numeric, $7::numeric, $8::numeric, $9,
+                    $10::bigint, $11::bigint, $12::integer, $13,
+                    case when $10::bigint is not null then now() else null end
+                )
+                on conflict (execution_job_id, tp_index) do update set
+                    execution_key = excluded.execution_key,
+                    requested_volume = excluded.requested_volume,
+                    normalized_volume = excluded.normalized_volume,
+                    entry_price = excluded.entry_price,
+                    stop_loss = excluded.stop_loss,
+                    take_profit = excluded.take_profit,
+                    status = excluded.status,
+                    mt5_order_ticket = excluded.mt5_order_ticket,
+                    mt5_position_ticket = excluded.mt5_position_ticket,
+                    retcode = excluded.retcode,
+                    retcode_message = excluded.retcode_message,
+                    sent_at = coalesce(portal.execution_job_orders.sent_at, excluded.sent_at)
+                """,
+                execution_job_id,
+                order["tp_index"],
+                order["execution_key"],
+                order["requested_volume"],
+                order["normalized_volume"],
+                order["entry_price"],
+                order["stop_loss"],
+                order["take_profit"],
+                order["status"],
+                _parse_int(order["mt5_order_ticket"]),
+                _parse_int(order["mt5_position_ticket"]),
+                _parse_int(order["retcode"]),
+                order["retcode_message"],
+            )
+
+
+async def _drain_one(client: CentralSyncClient, config: AppConfig, row: OutboxRow) -> None:
+    if row.kind == OUTBOX_KIND_SIGNAL_SHADOW_WRITE:
+        payload = row.payload
+        channel_id = await client.upsert_channel(config.instance_id, payload)
+        signal_id = await client.upsert_signal(config.instance_id, channel_id, payload)
+        # payload completo (inclui symbol/direction/entry_low/entry_high/stop_loss/
+        # take_profits) -- portal.append_signal_revision extrai os campos
+        # estruturados daqui pra manter portal.signals atualizado a cada revisao,
+        # nao so o content_signature.
+        await client.append_signal_revision(signal_id, payload["content_signature"], payload)
+        return
+
+    if row.kind in (
+        OUTBOX_KIND_EXECUTION_JOB_SHADOW_WRITE,
+        OUTBOX_KIND_EXECUTION_JOB_PENDING,
+        OUTBOX_KIND_EXECUTION_JOB_PILOT_PENDING,
+    ):
+        # Os tres kinds levam o MESMO formato de payload (via
+        # _build_execution_job_payload_common) e a mesma sequencia de
+        # upserts -- so o "status"/"orders" dentro do payload diferem (Etapa
+        # 2 carrega o resultado real depois do order_send local; Etapa 5a
+        # carrega a intencao ja planejada, antes do order_send local; Etapa
+        # 5d carrega so o sinal bruto, sem plano nenhum, ja que a conta
+        # piloto nunca executa localmente). Todos convergem pra mesma linha
+        # central via on conflict (mt5_account_id, signal_id)/(execution_job_id, tp_index).
+        payload = row.payload
+        customer_id = await client.upsert_customer(config.instance_id, payload["customer"])
+        account_id = await client.upsert_account(
+            config.instance_id, customer_id, payload["account"], node_id=config.node_id
+        )
+        channel_id = await client.upsert_channel(config.instance_id, payload)
+        signal_id = await client.find_signal_id(config.instance_id, channel_id, payload["source_message_id"])
+        if signal_id is None:
+            # Sinal ainda nao drenado pro Supabase (o enqueue do sinal e o da
+            # execucao sao dois itens separados do mesmo outbox) -- levanta pra
+            # cair no backoff normal e ser retentado, nao um erro permanente.
+            raise ValueError("sinal ainda nao replicado no Supabase -- retentando")
+        job_id = await client.upsert_execution_job(
+            config.instance_id,
+            account_id,
+            config.node_id,
+            signal_id,
+            payload["content_signature"],
+            payload["status"],
+            last_error_code=payload["last_error_code"],
+            last_error_message=payload["last_error_message"],
+            payload={"orders": payload["orders"]},
+        )
+        await client.upsert_execution_job_orders(job_id, payload["orders"])
+        return
+
+    # Nao existe outro "kind" hoje -- levanta em vez de retornar silenciosamente
+    # pra nao deixar o chamador marcar a linha como "done" sem ter processado
+    # nada (run_central_sync_drain_loop so chama mark_done apos _drain_one
+    # terminar sem excecao).
+    raise ValueError(f"tipo de outbox desconhecido: {row.kind!r}")
+
+
+@dataclass(frozen=True)
+class SignalAuditRow:
+    id: int
+    source_chat_id: str | None
+    source_message_id: str | None
+    content_signature: str
+
+
+def _sample_signals_to_audit(database_path: Path, sample_size: int) -> list[SignalAuditRow]:
+    """Etapa 3B: monta a amostra de um ciclo de auditoria -- primeiro todo
+    signal_id que ja tem achado aberto (pra poder fechar), depois completa ate
+    sample_size com sinais 'done' aleatorios, nunca repetindo os ja incluidos."""
+    with connect_database(database_path) as connection:
+        open_ids = [
+            row[0] for row in connection.execute("SELECT signal_id FROM central_sync_audit_findings")
+        ]
+        rows: list[tuple] = []
+        if open_ids:
+            placeholders = ",".join("?" for _ in open_ids)
+            rows = connection.execute(
+                f"""
+                SELECT id, source_chat_id, source_message_id, content_signature
+                FROM signals WHERE id IN ({placeholders})
+                """,
+                open_ids,
+            ).fetchall()
+        remaining = max(sample_size - len(rows), 0)
+        if remaining > 0:
+            exclude_clause = ""
+            params: tuple = ()
+            if open_ids:
+                exclude_clause = f"AND s.id NOT IN ({','.join('?' for _ in open_ids)})"
+                params = tuple(open_ids)
+            random_rows = connection.execute(
+                f"""
+                SELECT s.id, s.source_chat_id, s.source_message_id, s.content_signature
+                FROM signals s
+                JOIN central_sync_outbox o ON o.source_signal_id = s.id
+                WHERE o.kind = 'signal_shadow_write' AND o.status = 'done'
+                {exclude_clause}
+                ORDER BY RANDOM()
+                LIMIT ?
+                """,
+                (*params, remaining),
+            ).fetchall()
+            rows = list(rows) + list(random_rows)
+    return [
+        SignalAuditRow(id=row[0], source_chat_id=row[1], source_message_id=row[2], content_signature=row[3])
+        for row in rows
+    ]
+
+
+def _mark_audit_finding_ok(database_path: Path, signal_id: int) -> None:
+    with connect_database(database_path) as connection:
+        connection.execute(
+            "DELETE FROM central_sync_audit_findings WHERE signal_id = ?", (signal_id,)
+        ).close()
+
+
+def _record_audit_mismatch(
+    database_path: Path,
+    signal_id: int,
+    local_content_signature: str,
+    remote_content_signature: str | None,
+) -> None:
+    now = utc_now()
+    with connect_database(database_path) as connection:
+        existing = connection.execute(
+            "SELECT detected_at FROM central_sync_audit_findings WHERE signal_id = ?", (signal_id,)
+        ).fetchone()
+        detected_at = existing[0] if existing is not None else now
+        connection.execute(
+            """
+            INSERT INTO central_sync_audit_findings (
+                signal_id, detected_at, last_checked_at, local_content_signature, remote_content_signature
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(signal_id) DO UPDATE SET
+                last_checked_at = excluded.last_checked_at,
+                local_content_signature = excluded.local_content_signature,
+                remote_content_signature = excluded.remote_content_signature
+            """,
+            (signal_id, detected_at, now, local_content_signature, remote_content_signature),
+        ).close()
+
+
+async def _run_audit_cycle(client: CentralSyncClient, outbox: CentralSyncOutbox, config: AppConfig) -> None:
+    samples = await asyncio.to_thread(
+        _sample_signals_to_audit, outbox.database_path, config.central_sync_audit_sample_size
+    )
+    for row in samples:
+        channel = resolve_local_channel(outbox.database_path, row.source_chat_id)
+        remote_signature: str | None = None
+        if channel is not None:
+            channel_id = await client.find_channel_id(config.instance_id, channel.id)
+            if channel_id is not None:
+                remote_signature = await client.fetch_signal_content_signature(
+                    config.instance_id, channel_id, row.source_message_id
+                )
+        if remote_signature == row.content_signature:
+            await asyncio.to_thread(_mark_audit_finding_ok, outbox.database_path, row.id)
+        else:
+            await asyncio.to_thread(
+                _record_audit_mismatch, outbox.database_path, row.id, row.content_signature, remote_signature
+            )
+
+
+async def run_central_sync_drain_loop(
+    outbox: CentralSyncOutbox,
+    client: CentralSyncClient,
+    config: AppConfig,
+    logger: logging.Logger,
+) -> None:
+    last_audit_at: datetime | None = None
+    audit_interval = timedelta(seconds=config.central_sync_audit_interval_seconds)
+    while True:
+        try:
+            # Heartbeat proprio, sempre, mesmo se o resto do corpo do loop
+            # falhar -- mede "o loop de drenagem esta vivo", separado de "o
+            # Supabase esta alcancavel" (que a conexao abaixo pode falhar sem
+            # travar o loop). Fica DENTRO do try: uma falha transitoria aqui
+            # (ex.: SQLite bloqueado por outro escritor no mesmo instante) nao
+            # pode matar a task inteira pro resto da vida do processo -- so
+            # essa iteracao falha, o loop continua na proxima.
+            await asyncio.to_thread(update_service_heartbeat, outbox.database_path, CENTRAL_SYNC_SERVICE_NAME)
+            if not client.connected:
+                await client.connect()
+            await client.upsert_node(config.node_id, config.node_label)
+            await client.upsert_instance(config.instance_id, config.brand_name, node_id=config.node_id)
+            rows = await asyncio.to_thread(outbox.claim_batch, config.central_sync_max_batch)
+            for row in rows:
+                try:
+                    await _drain_one(client, config, row)
+                    await asyncio.to_thread(outbox.mark_done, row.id)
+                except Exception as exc:
+                    logger.warning("central_sync_row_failed id=%s erro=%s", row.id, exc)
+                    await asyncio.to_thread(outbox.mark_failed, row.id, str(exc))
+
+            # Etapa 3B: auditoria por amostragem, so de vez em quando (nunca a
+            # cada poll de 5s) -- reaproveita a mesma conexao ja resiliente
+            # acima. Erro aqui nunca pode derrubar o loop de drenagem, que e a
+            # prioridade real; so essa auditoria e pulada e retentada no
+            # proximo ciclo (last_audit_at ainda avanca mesmo em erro, pra nao
+            # martelar o Supabase a cada 5s numa falha persistente).
+            now = datetime.now(tz=timezone.utc)
+            if last_audit_at is None or now - last_audit_at >= audit_interval:
+                try:
+                    await _run_audit_cycle(client, outbox, config)
+                except Exception as exc:
+                    logger.warning("central_sync_audit_cycle_failed: %s", exc)
+                last_audit_at = now
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("central_sync_drain_loop_error: %s", exc)
+            try:
+                await client.reset()
+            except Exception:
+                pass
+        await asyncio.sleep(config.central_sync_poll_seconds)

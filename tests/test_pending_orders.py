@@ -21,6 +21,7 @@ from telegram_mt5_copier.mt5.models import (
     ENTRY_EXECUTION_MARKET_IMMEDIATE,
     ENTRY_PRICE_DISTRIBUTED,
     ENTRY_PRICE_MIDDLE,
+    LatencyMetrics,
     PendingOrderType,
     SymbolInfo,
     TickInfo,
@@ -182,6 +183,16 @@ class PendingOrderTests(unittest.TestCase):
             execution_mode="simulation",
             now=datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc),
         )
+
+    def test_get_account_by_id_encontra_sem_precisar_do_user_id(self) -> None:
+        found = self.accounts.get_account_by_id(self.account.id)
+
+        self.assertIsNotNone(found)
+        self.assertEqual(found.id, self.account.id)
+        self.assertEqual(found.user_id, self.user.id)
+
+    def test_get_account_by_id_devolve_none_quando_nao_encontra(self) -> None:
+        self.assertIsNone(self.accounts.get_account_by_id(999999))
 
     def test_buy_abaixo_do_mercado_gera_buy_limit(self) -> None:
         plan = self.plan_buy(TickInfo(bid=Decimal("4062"), ask=Decimal("4062")))
@@ -863,6 +874,107 @@ class PendingOrderTests(unittest.TestCase):
         self.assertIn("Gestão aplicada", result.message)
         self.assertIn("Lote fixo total: 0.04", result.message)
         self.assertIn("Orientação: mantenha o lote e o Stop Loss", result.message)
+
+    def test_on_group_created_e_chamado_antes_de_qualquer_order_send(self) -> None:
+        # Etapa 5a: o callback existe pra permitir espelhar a "intencao" no
+        # backend central antes do resultado ser conhecido -- precisa
+        # disparar depois do grupo local existir, mas ANTES de qualquer
+        # order_send de verdade.
+        order_send_count_no_callback: list[int] = []
+        client = SimulatedMT5Client(tick=TickInfo(bid=Decimal("4062"), ask=Decimal("4062")))
+
+        def on_group_created(signal, account, group, plan) -> None:
+            order_send_count_no_callback.append(len(client.order_send_requests))
+
+        self.executor(
+            client=client,
+            execution_mode="demo_execution",
+            global_kill_switch=False,
+            on_group_created=on_group_created,
+        ).execute_for_account(parse_signal_text(BUY_SIGNAL).signal, self.account, self.profile())
+
+        self.assertEqual(order_send_count_no_callback, [0])
+        self.assertEqual(len(client.order_send_requests), 4)
+
+    def test_on_group_created_recebe_signal_account_group_plan_corretos(self) -> None:
+        calls: list[tuple] = []
+        client = SimulatedMT5Client(tick=TickInfo(bid=Decimal("4062"), ask=Decimal("4062")))
+        signal = parse_signal_text(BUY_SIGNAL).signal
+
+        result = self.executor(
+            client=client,
+            execution_mode="demo_execution",
+            global_kill_switch=False,
+            on_group_created=lambda *args: calls.append(args),
+        ).execute_for_account(signal, self.account, self.profile())
+
+        self.assertEqual(len(calls), 1)
+        called_signal, called_account, called_group, called_plan = calls[0]
+        self.assertIs(called_signal, signal)
+        self.assertEqual(called_account.id, self.account.id)
+        self.assertEqual(called_group.id, result.group_result.group.id)
+        self.assertEqual(len(called_plan.orders), 4)
+
+    def test_excecao_no_on_group_created_nao_impede_envio_real(self) -> None:
+        client = SimulatedMT5Client(tick=TickInfo(bid=Decimal("4062"), ask=Decimal("4062")))
+
+        def on_group_created(signal, account, group, plan) -> None:
+            raise RuntimeError("falha simulada no callback")
+
+        result = self.executor(
+            client=client,
+            execution_mode="demo_execution",
+            global_kill_switch=False,
+            on_group_created=on_group_created,
+        ).execute_for_account(parse_signal_text(BUY_SIGNAL).signal, self.account, self.profile())
+
+        self.assertIsNone(result.group_result.rejected_reason)
+        self.assertEqual(len(client.order_send_requests), 4)
+        self.assertEqual(group_status(self.database_path, result.group_result.group.id), "pending_active")
+
+    def test_on_group_created_nunca_e_chamado_em_modo_simulation(self) -> None:
+        calls: list[tuple] = []
+
+        self.executor(
+            execution_mode="simulation",
+            on_group_created=lambda *args: calls.append(args),
+        ).execute_for_account(parse_signal_text(BUY_SIGNAL).signal, self.account, self.profile())
+
+        self.assertEqual(calls, [])
+
+    def test_execute_plan_chamado_isoladamente_sem_passar_por_execute_for_account(self) -> None:
+        # Etapa 5b: prova que execute_plan e realmente auto-contido -- monta
+        # o plano na mao (do jeito que o agente da Etapa 5c vai fazer, a
+        # partir de um job da fila central) e chama o metodo direto, sem
+        # passar por execute_for_account nem por execute_for_signal.
+        signal = parse_signal_text(BUY_SIGNAL).signal
+        tick = TickInfo(bid=Decimal("4062"), ask=Decimal("4062"))
+        symbol_info = SymbolInfo(name="XAUUSD")
+        client = SimulatedMT5Client(tick=tick, symbol_info=symbol_info)
+        plan = PendingOrderPlanner().plan(
+            signal=signal,
+            account=self.account,
+            profile=self.profile(),
+            symbol_info=symbol_info,
+            tick=tick,
+            execution_mode="demo_execution",
+            now=datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc),
+        )
+        executor = self.executor(client=client, execution_mode="demo_execution", global_kill_switch=False)
+
+        result = executor.execute_plan(
+            signal=signal,
+            plan=plan,
+            account=self.account,
+            profile=self.profile(),
+            client=client,
+            symbol_info=symbol_info,
+            metrics=LatencyMetrics(),
+        )
+
+        self.assertIsNone(result.group_result.rejected_reason)
+        self.assertEqual(len(client.order_send_requests), 4)
+        self.assertEqual(group_status(self.database_path, result.group_result.group.id), "pending_active")
 
     def test_corretora_com_gtc_nao_recebe_expiration(self) -> None:
         client = SimulatedMT5Client(
@@ -2177,6 +2289,7 @@ class PendingOrderTests(unittest.TestCase):
         execution_mode: str = "simulation",
         global_kill_switch: bool = False,
         allow_live_accounts: bool = False,
+        on_group_created=None,
     ) -> PendingOrderExecutor:
         selected_client = client or SimulatedMT5Client(tick=tick or TickInfo(bid=Decimal("4062"), ask=Decimal("4062")))
         return PendingOrderExecutor(
@@ -2186,6 +2299,7 @@ class PendingOrderTests(unittest.TestCase):
             global_kill_switch=global_kill_switch,
             allow_live_accounts=allow_live_accounts,
             client_factory=lambda: selected_client,
+            on_group_created=on_group_created,
         )
 
 
