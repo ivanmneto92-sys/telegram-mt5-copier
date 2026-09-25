@@ -799,6 +799,38 @@ operacional por sinal (`central_sync:audit_mismatch:<id>`), que some sozinho
 quando uma auditoria seguinte confirma que o conteúdo voltou a bater. Só
 leitura — nunca corrige nada automaticamente.
 
+### Agente de execução (Etapa 4, só simulação)
+
+`telegram-mt5-execution-agent` (módulo `execution_agent.py`) é um processo
+**separado**, standalone — não faz parte do `run_telegram_listener`, não
+entra no `supervisor.py` nesta etapa. Ele fala com o Supabase de um jeito
+completamente diferente do shadow-write: as RPCs de `agent_api`
+(`claim_execution_jobs`/`start_execution_job`/`complete_execution_job`/
+`fail_execution_job`, schema `agent_api`, exposto na Data API) exigem um JWT
+real do Supabase Auth (`auth.uid()`), não uma conexão Postgres direta — por
+isso o agente faz login via `EXECUTION_AGENT_EMAIL`/`EXECUTION_AGENT_PASSWORD`
+(`POST /auth/v1/token`) e chama as RPCs via HTTP
+(`POST /rest/v1/rpc/<função>`, sempre com os headers `Accept-Profile`/
+`Content-Profile: agent_api` — sem eles o PostgREST tenta rotear pro schema
+`public` e a RPC não é encontrada). Cliente HTTP minimalista (`httpx`), sem
+`supabase-py`.
+
+**Nesta etapa, o agente só simula**: nunca chama MT5/corretora nenhuma. Ele
+reivindica um job, "executa" (monta um resumo a partir do `payload` do job) e
+conclui — sem nenhum estado local persistente, porque o próprio mecanismo de
+`reservation_token`/lease das RPCs (Etapa 1) já garante que um crash no meio
+de um job simplesmente deixa o lease expirar e ser reivindicado de novo.
+Também **não existe ainda nenhum produtor real** de jobs `pending` — a Etapa
+2 só espelha execuções já terminadas — então o agente só foi testado com
+jobs inseridos manualmente (fixture); nada no pipeline real de sinais muda
+nesta etapa.
+
+A senha (`EXECUTION_AGENT_PASSWORD`) nunca deve ser gerada nem vista por uma
+IA — defina direto no painel do Supabase (Authentication → Users), mesma
+disciplina do `CENTRAL_SYNC_DATABASE_URL`/`central_sync_vps`. Provisionar o
+`auth.users` de uma VPS real no projeto Supabase real é uma decisão de
+release controlada, feita por você, fora desta automação.
+
 ## Backup
 
 O comando `telegram-mt5-backup` (`scripts\backup_vps.ps1`) faz um backup

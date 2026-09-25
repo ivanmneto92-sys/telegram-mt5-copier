@@ -15,6 +15,7 @@ dependencies = [
     "cryptography>=42.0,<45.0",
     "tzdata>=2025.2",
     "asyncpg>=0.29,<0.32",
+    "httpx>=0.27,<0.29",
 ]
 
 [project.scripts]
@@ -29,6 +30,7 @@ telegram-mt5-supervisor = "telegram_mt5_copier.supervisor:main"
 telegram-mt5-health-monitor = "telegram_mt5_copier.operational_health:main"
 telegram-market-news = "telegram_mt5_copier.market_news_monitor:main"
 telegram-mt5-backup = "telegram_mt5_copier.backup:main"
+telegram-mt5-execution-agent = "telegram_mt5_copier.execution_agent:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

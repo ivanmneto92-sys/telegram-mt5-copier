@@ -115,6 +115,14 @@ class AppConfig:
     central_sync_delivery_lag_seconds: int
     central_sync_audit_sample_size: int
     central_sync_audit_interval_seconds: int
+    execution_agent_enabled: bool
+    supabase_url: str | None = field(repr=False)
+    supabase_anon_key: str | None = field(repr=False)
+    execution_agent_email: str | None = field(repr=False)
+    execution_agent_password: str | None = field(repr=False)
+    execution_agent_poll_seconds: int
+    execution_agent_claim_limit: int
+    execution_agent_lease_seconds: int
     backup_encryption_key: str | None = field(repr=False)
     backup_retention_days: int
     b2_key_id: str | None = field(repr=False)
@@ -284,6 +292,30 @@ class AppConfig:
             central_sync_audit_interval_seconds=parse_positive_int(
                 _value("CENTRAL_SYNC_AUDIT_INTERVAL_SECONDS", file_values, runtime_env, "1800"),
                 "CENTRAL_SYNC_AUDIT_INTERVAL_SECONDS",
+            ),
+            execution_agent_enabled=parse_bool(
+                _value("EXECUTION_AGENT_ENABLED", file_values, runtime_env, "false"),
+                default=False,
+            ),
+            supabase_url=_optional_value("SUPABASE_URL", file_values, runtime_env),
+            supabase_anon_key=_optional_value("SUPABASE_ANON_KEY", file_values, runtime_env),
+            execution_agent_email=_optional_value(
+                "EXECUTION_AGENT_EMAIL", file_values, runtime_env
+            ),
+            execution_agent_password=_optional_value(
+                "EXECUTION_AGENT_PASSWORD", file_values, runtime_env
+            ),
+            execution_agent_poll_seconds=parse_positive_int(
+                _value("EXECUTION_AGENT_POLL_SECONDS", file_values, runtime_env, "5"),
+                "EXECUTION_AGENT_POLL_SECONDS",
+            ),
+            execution_agent_claim_limit=parse_positive_int(
+                _value("EXECUTION_AGENT_CLAIM_LIMIT", file_values, runtime_env, "5"),
+                "EXECUTION_AGENT_CLAIM_LIMIT",
+            ),
+            execution_agent_lease_seconds=parse_positive_int(
+                _value("EXECUTION_AGENT_LEASE_SECONDS", file_values, runtime_env, "60"),
+                "EXECUTION_AGENT_LEASE_SECONDS",
             ),
             backup_encryption_key=_optional_value(
                 "BACKUP_ENCRYPTION_KEY", file_values, runtime_env
