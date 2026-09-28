@@ -30,7 +30,16 @@ if ([string]::IsNullOrWhiteSpace($TaskName)) {
     }
 }
 
-$servicePattern = '(?i)(telegram-mt5-supervisor|telegram-mt5-onboarding|telegram-management-bot|telegram-copier|telegram-mt5-worker|telegram-mt5-health-monitor|telegram-market-news)(\.exe)?'
+# telegram_mt5_copier\.mt5_worker cobre os processos por conta lancados como
+# "python.exe -m telegram_mt5_copier.mt5_worker --account-id N" (mt5_worker_pool.py) --
+# usam "_" no nome do modulo, nao "-", entao nunca batiam nos padroes acima
+# (so cobrem nomes de executavel com hifen, tipo telegram-mt5-worker-pool.exe).
+# Sem essa entrada, cada reinicio deixava os workers por conta da execucao
+# anterior orfaos, acumulando processos e as vezes travando o worker novo
+# num lock que o orfao ainda segurava (achado real, 2026-09-28: dezenas de
+# processos acumulados desde 24/09 em duas instalacoes, incluindo um caso
+# onde isso bloqueou completamente o monitoramento de uma conta por dias).
+$servicePattern = '(?i)(telegram-mt5-supervisor|telegram-mt5-onboarding|telegram-management-bot|telegram-copier|telegram-mt5-worker|telegram-mt5-health-monitor|telegram-market-news|telegram_mt5_copier\.mt5_worker)(\.exe)?'
 $rootPrefix = "$projectRoot\"
 
 function Get-InstanceServiceProcesses {
