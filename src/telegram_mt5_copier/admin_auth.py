@@ -86,12 +86,40 @@ def verify_password(value: str, encoded: str) -> bool:
 
 DUMMY_PASSWORD_HASH = hash_password("senha-inexistente-123")
 
+ADMIN_ROLE_MASTER = "master"
+ADMIN_ROLE_REGULAR = "regular"
+ADMIN_ROLES = frozenset({ADMIN_ROLE_MASTER, ADMIN_ROLE_REGULAR})
+
+
+def _resolve_roster_role(connection: sqlite3.Connection, telegram_user_id: int) -> str | None:
+    row = connection.execute(
+        "SELECT role FROM admin_roster WHERE telegram_user_id = ? AND revoked_at IS NULL",
+        (telegram_user_id,),
+    ).fetchone()
+    return str(row[0]) if row is not None else None
+
+
+def resolve_admin_role(
+    database_path: Path, bot_admin_ids: frozenset[int] | tuple[int, ...], telegram_user_id: int
+) -> str | None:
+    """Fonte unica de verdade pra "quem e admin e em que nivel".
+
+    BOT_ADMIN_IDS (.env) e sempre master, incondicional -- e o mecanismo de
+    recuperacao que nunca pode ficar trancado por um erro em admin_roster.
+    Admins adicionados pelo painel web vivem em admin_roster (nao revogados).
+    """
+    if telegram_user_id in bot_admin_ids:
+        return ADMIN_ROLE_MASTER
+    with connect_database(database_path) as connection:
+        return _resolve_roster_role(connection, telegram_user_id)
+
 
 @dataclass(frozen=True)
 class BrowserAdminSession:
     admin_telegram_user_id: int
     session_token: str
     expires_at: str
+    role: str
 
 
 class AdminBrowserAuthService:
@@ -161,7 +189,7 @@ class AdminBrowserAuthService:
             ):
                 raise ValueError("Link de acesso inválido ou expirado.")
             admin_id = int(row[1])
-            self._require_admin(admin_id)
+            role = self._require_admin(admin_id, connection=connection)
             session_token = secrets.token_urlsafe(48)
             expires_at = now + timedelta(hours=self.session_ttl_hours)
             update = connection.execute(
@@ -192,6 +220,7 @@ class AdminBrowserAuthService:
             admin_telegram_user_id=admin_id,
             session_token=session_token,
             expires_at=expires_at.isoformat(),
+            role=role,
         )
 
     def authenticate_session(self, session_token: str) -> int:
@@ -210,7 +239,7 @@ class AdminBrowserAuthService:
             if row is None or datetime.fromisoformat(str(row[2])) <= now:
                 raise ValueError("Sessão administrativa expirada.")
             admin_id = int(row[1])
-            self._require_admin(admin_id)
+            self._require_admin(admin_id, connection=connection)
             connection.execute(
                 "UPDATE admin_browser_sessions SET last_seen_at = ? WHERE id = ?",
                 (now.isoformat(), int(row[0])),
@@ -288,7 +317,13 @@ class AdminBrowserAuthService:
             stored_hash = str(row[1]) if row is not None else DUMMY_PASSWORD_HASH
             password_matches = verify_password(candidate, stored_hash)
             admin_id = int(row[0]) if row is not None else None
-            authorized = admin_id is not None and admin_id in self.admin_ids
+            if admin_id is None:
+                role: str | None = None
+            elif admin_id in self.admin_ids:
+                role = ADMIN_ROLE_MASTER
+            else:
+                role = _resolve_roster_role(connection, admin_id)
+            authorized = role is not None
             if row is None or not password_matches or not authorized:
                 if row is not None:
                     failed_attempts = int(row[2]) + 1
@@ -333,12 +368,30 @@ class AdminBrowserAuthService:
                             now.isoformat(), now.isoformat(),
                         ),
                     ).close()
-                    return BrowserAdminSession(admin_id, session_token, expires_at.isoformat())
+                    return BrowserAdminSession(admin_id, session_token, expires_at.isoformat(), role=str(role))
         raise ValueError(rejection or "E-mail ou senha inválidos.")
 
-    def _require_admin(self, telegram_user_id: int) -> None:
-        if telegram_user_id not in self.admin_ids:
+    def _require_admin(
+        self, telegram_user_id: int, *, connection: sqlite3.Connection | None = None
+    ) -> str:
+        """Levanta se nao autorizado; devolve o role resolvido ('master'/'regular').
+
+        Aceita uma conexao ja aberta (evita abrir uma segunda conexao SQLite
+        aninhada quando o chamador ja esta dentro de um `with connect_database`).
+        """
+        if telegram_user_id in self.admin_ids:
+            return ADMIN_ROLE_MASTER
+        role = (
+            _resolve_roster_role(connection, telegram_user_id)
+            if connection is not None
+            else resolve_admin_role(self.database_path, self.admin_ids, telegram_user_id)
+        )
+        if role is None:
             raise ValueError("Administrador não autorizado.")
+        return role
+
+    def resolve_role(self, telegram_user_id: int) -> str | None:
+        return resolve_admin_role(self.database_path, self.admin_ids, telegram_user_id)
 
 
 def token_hash(token: str) -> str:

@@ -412,6 +412,82 @@ class MiniAppFrontendTests(unittest.TestCase):
         self.assertTrue(approval_payload["ok"])
         self.assertEqual(approval_payload["approval"]["status"], "active")
 
+    def test_master_gerencia_admins_pelo_painel_e_admin_comum_e_bloqueado(self) -> None:
+        with mini_app_server(admin_ids=(9001,)) as base_url:
+            master_login_url = OnboardingHandler.admin_browser_auth.create_login_url(
+                9001, "https://institutotrader.online/admin"
+            )
+            master_token = master_login_url.split("#token=", 1)[1]
+            request = Request(
+                f"{base_url}/api/admin/browser-login",
+                data=urlencode({"token": master_token}).encode("utf-8"),
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                method="POST",
+            )
+            with urlopen(request, timeout=5) as response:
+                master_payload = json.loads(response.read().decode("utf-8"))
+                master_cookie = response.headers.get("Set-Cookie", "").split(";", 1)[0]
+
+            self.assertEqual(master_payload["admin"]["role"], "master")
+            self.assertEqual(
+                {item["telegram_user_id"] for item in master_payload["admins"]}, {9001}
+            )
+
+            add_result = post_expect_error_with_cookie(
+                f"{base_url}/api/admin/admin-add",
+                {
+                    "csrf_token": master_payload["csrf_token"],
+                    "telegram_user_id": "202",
+                    "role": "regular",
+                    "label": "Suporte",
+                },
+                master_cookie,
+            )
+            self.assertEqual(add_result["status"], 200)
+            self.assertTrue(add_result["body"]["ok"])
+
+            regular_login_url = OnboardingHandler.admin_browser_auth.create_login_url(
+                202, "https://institutotrader.online/admin"
+            )
+            regular_token = regular_login_url.split("#token=", 1)[1]
+            regular_request = Request(
+                f"{base_url}/api/admin/browser-login",
+                data=urlencode({"token": regular_token}).encode("utf-8"),
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                method="POST",
+            )
+            with urlopen(regular_request, timeout=5) as response:
+                regular_payload = json.loads(response.read().decode("utf-8"))
+                regular_cookie = response.headers.get("Set-Cookie", "").split(";", 1)[0]
+
+            self.assertEqual(regular_payload["admin"]["role"], "regular")
+            self.assertNotIn("admins", regular_payload)
+
+            blocked = post_expect_error_with_cookie(
+                f"{base_url}/api/admin/admin-add",
+                {
+                    "csrf_token": regular_payload["csrf_token"],
+                    "telegram_user_id": "303",
+                    "role": "regular",
+                },
+                regular_cookie,
+            )
+            self.assertEqual(blocked["status"], 400)
+
+            revoke_result = post_expect_error_with_cookie(
+                f"{base_url}/api/admin/admin-revoke",
+                {"csrf_token": master_payload["csrf_token"], "telegram_user_id": "202"},
+                master_cookie,
+            )
+            self.assertEqual(revoke_result["status"], 200)
+
+            refreshed = post_expect_error_with_cookie(
+                f"{base_url}/api/admin/session", {}, master_cookie
+            )
+            self.assertNotIn(
+                202, {item["telegram_user_id"] for item in refreshed["body"]["admins"]}
+            )
+
     def test_admin_configura_senha_pelo_link_do_telegram_e_depois_loga_direto(self) -> None:
         """Bootstrap (unica vez, via link do bot) -> configura senha -> dali em
         diante loga direto por e-mail/senha, sem depender do Telegram de novo."""

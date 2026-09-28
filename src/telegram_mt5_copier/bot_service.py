@@ -9,7 +9,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from .account_service import AccountService
 from .access_control import ACCESS_EXPIRED, paid_access_decision
-from .admin_auth import AdminBrowserAuthService
+from .admin_auth import AdminBrowserAuthService, resolve_admin_role
 from .client_auth import ClientBrowserAuthService
 from .channel_catalog import (
     ChannelCatalogService,
@@ -406,7 +406,7 @@ class BotService:
                 return BotResponse(str(exc), CHANNEL_MENU, screen="channels")
             return self._channels_screen(user)
         if callback == CB_ADMIN_BROWSER_ACCESS:
-            if telegram_user_id not in self.admin_ids:
+            if resolve_admin_role(self.database_path, frozenset(self.admin_ids), telegram_user_id) is None:
                 return BotResponse("Acesso administrativo não autorizado.", MAIN_MENU)
             panel_url = self._effective_admin_panel_url()
             if not panel_url:
@@ -1119,7 +1119,7 @@ class BotService:
             mt5_status = mt5_account_connection_label(mt5_account.connection_status)
         admin_url = (
             self._effective_admin_panel_url()
-            if user.telegram_user_id in self.admin_ids
+            if resolve_admin_role(self.database_path, frozenset(self.admin_ids), user.telegram_user_id) is not None
             else None
         )
         return BotResponse(
@@ -1557,7 +1557,7 @@ class BotService:
         return "🟡 Aguardando aprovação", "⏸️ Bloqueadas"
 
     def _log_admin_if_needed(self, telegram_user_id: int, target_user_id: int, action_type: str) -> None:
-        if telegram_user_id not in self.admin_ids:
+        if resolve_admin_role(self.database_path, frozenset(self.admin_ids), telegram_user_id) is None:
             return
         self.users.log_admin_action(
             admin_telegram_user_id=telegram_user_id,

@@ -13,6 +13,7 @@ from telegram_mt5_copier.database import (
     SIGNAL_MONITOR_SERVICE_NAME,
     connect_database,
     update_service_heartbeat,
+    utc_now,
 )
 from telegram_mt5_copier.mt5.account_service import MT5AccountForm, MT5AccountService
 from telegram_mt5_copier.mt5.client import SimulatedMT5Client
@@ -257,6 +258,33 @@ class BotManagementTests(unittest.TestCase):
         self.assertIn("https://institutotrader.online/admin?v=4#token=", response.text)
         self.assertIn("expira em 5 minutos", response.text)
         self.assertIn("não autorizado", denied.text)
+
+    def test_admin_so_roster_ve_botao_e_gera_link_sem_estar_no_env(self) -> None:
+        with connect_database(self.database_path) as connection:
+            now = utc_now()
+            connection.execute(
+                """
+                INSERT INTO admin_roster (
+                    telegram_user_id, role, label, added_by_telegram_user_id,
+                    created_at, updated_at, revoked_at, revoked_by_telegram_user_id
+                ) VALUES (606, 'regular', NULL, 9001, ?, ?, NULL, NULL)
+                """,
+                (now, now),
+            ).close()
+        service = BotService(
+            self.database_path,
+            admin_ids=(9001,),
+            mt5_onboarding_url="https://institutotrader.online/?v=4",
+        )
+        try:
+            menu = service.menu(606, "roster-admin")
+            response = service.handle_callback(606, "roster-admin", "v1:admin:pc")
+        finally:
+            service.close()
+
+        buttons = [button for row in menu.keyboard for button in row]
+        self.assertIn("🖥️ Acessar pelo PC", [button.text for button in buttons])
+        self.assertIn("https://institutotrader.online/admin?v=4#token=", response.text)
 
     def test_submenu_execucao_dos_sinais_salva_preferencias(self) -> None:
         accounts = MT5AccountService(

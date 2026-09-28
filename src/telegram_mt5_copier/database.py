@@ -789,6 +789,25 @@ def initialize_database(database_path: Path) -> None:
                 updated_at TEXT NOT NULL
             );
 
+            -- Admins adicionados pelo painel web, em complemento a BOT_ADMIN_IDS
+            -- (que continua sendo a lista fixa do .env, sempre "master", nunca
+            -- removivel por aqui -- e o mecanismo de recuperacao contra qualquer
+            -- erro nesta tabela). "role" e 'master' (pode gerenciar outros
+            -- admins) ou 'regular' (opera clientes/canais/cobranca, sem poder
+            -- mexer em quem e admin); validado em Python, nao via CHECK.
+            -- revoked_at NULL = ativo; soft-delete para poder reativar/trocar
+            -- de nivel sem perder o historico de quem adicionou quem.
+            CREATE TABLE IF NOT EXISTS admin_roster (
+                telegram_user_id INTEGER PRIMARY KEY,
+                role TEXT NOT NULL DEFAULT 'regular',
+                label TEXT,
+                added_by_telegram_user_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                revoked_at TEXT,
+                revoked_by_telegram_user_id INTEGER
+            );
+
             CREATE TABLE IF NOT EXISTS source_channels (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 telegram_chat_id TEXT UNIQUE,

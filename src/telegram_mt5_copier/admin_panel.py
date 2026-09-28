@@ -12,6 +12,7 @@ from .access_control import (
     AccessDecision,
     paid_access_decision,
 )
+from .admin_auth import ADMIN_ROLE_MASTER, ADMIN_ROLES, resolve_admin_role
 from .database import connect_database, initialize_database, utc_now
 from .channel_catalog import ChannelCatalogService
 from .mt5.account_service import MT5AccountService
@@ -27,6 +28,7 @@ BILLING_STATUSES = {"pending", "paid", "overdue", "exempt", "cancelled"}
 class AdminIdentity:
     telegram_user_id: int
     username: str | None
+    role: str
 
 
 class AdminPanelService:
@@ -53,12 +55,132 @@ class AdminPanelService:
 
     def authenticate(self, init_data: str) -> AdminIdentity:
         parsed = validate_telegram_web_app_init_data(init_data, self.bot_token)
-        if parsed.user.id not in self.admin_ids:
+        role = resolve_admin_role(self.database_path, self.admin_ids, parsed.user.id)
+        if role is None:
             raise WebAppValidationError("Administrador não autorizado.")
         return AdminIdentity(
             telegram_user_id=parsed.user.id,
             username=parsed.user.username,
+            role=role,
         )
+
+    def resolve_role(self, telegram_user_id: int) -> str | None:
+        return resolve_admin_role(self.database_path, self.admin_ids, telegram_user_id)
+
+    def list_admin_roster(self) -> list[dict[str, object]]:
+        entries: list[dict[str, object]] = [
+            {
+                "telegram_user_id": admin_id,
+                "role": ADMIN_ROLE_MASTER,
+                "label": None,
+                "source": "env",
+                "created_at": None,
+            }
+            for admin_id in sorted(self.admin_ids)
+        ]
+        with connect_database(self.database_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT telegram_user_id, role, label, created_at
+                FROM admin_roster
+                WHERE revoked_at IS NULL
+                ORDER BY created_at ASC
+                """
+            ).fetchall()
+        entries.extend(
+            {
+                "telegram_user_id": int(row[0]),
+                "role": str(row[1]),
+                "label": row[2],
+                "source": "roster",
+                "created_at": row[3],
+            }
+            for row in rows
+        )
+        return entries
+
+    def add_admin(
+        self,
+        *,
+        actor_telegram_user_id: int,
+        target_telegram_user_id: int,
+        role: str,
+        label: str | None = None,
+    ) -> dict[str, object]:
+        actor_role = resolve_admin_role(self.database_path, self.admin_ids, actor_telegram_user_id)
+        if actor_role != ADMIN_ROLE_MASTER:
+            raise ValueError("Apenas administradores master podem adicionar administradores.")
+        if role not in ADMIN_ROLES:
+            raise ValueError("Papel de administrador inválido.")
+        if target_telegram_user_id in self.admin_ids:
+            raise ValueError("Este administrador já é fixo do .env.")
+        now = utc_now()
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO admin_roster (
+                    telegram_user_id, role, label, added_by_telegram_user_id,
+                    created_at, updated_at, revoked_at, revoked_by_telegram_user_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)
+                ON CONFLICT(telegram_user_id) DO UPDATE SET
+                    role = excluded.role,
+                    label = excluded.label,
+                    revoked_at = NULL,
+                    revoked_by_telegram_user_id = NULL,
+                    updated_at = excluded.updated_at
+                """,
+                (target_telegram_user_id, role, label, actor_telegram_user_id, now, now),
+            ).close()
+        self._log_admin_action(
+            actor_telegram_user_id,
+            target_telegram_user_id,
+            "admin_roster_add",
+            {"role": role, "label": label},
+        )
+        return {"telegram_user_id": target_telegram_user_id, "role": role, "label": label, "source": "roster"}
+
+    def revoke_admin(self, *, actor_telegram_user_id: int, target_telegram_user_id: int) -> dict[str, object]:
+        actor_role = resolve_admin_role(self.database_path, self.admin_ids, actor_telegram_user_id)
+        if actor_role != ADMIN_ROLE_MASTER:
+            raise ValueError("Apenas administradores master podem remover administradores.")
+        if target_telegram_user_id in self.admin_ids:
+            raise ValueError("Este administrador é fixo do .env e não pode ser removido pelo painel.")
+        now = utc_now()
+        with connect_database(self.database_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT role FROM admin_roster WHERE telegram_user_id = ? AND revoked_at IS NULL",
+                (target_telegram_user_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("Administrador não encontrado.")
+            if str(row[0]) == ADMIN_ROLE_MASTER:
+                remaining_masters = connection.execute(
+                    """
+                    SELECT COUNT(*) FROM admin_roster
+                    WHERE role = ? AND revoked_at IS NULL AND telegram_user_id != ?
+                    """,
+                    (ADMIN_ROLE_MASTER, target_telegram_user_id),
+                ).fetchone()[0]
+                total_masters = len(self.admin_ids) + int(remaining_masters)
+                if total_masters == 0:
+                    raise ValueError("Não é possível remover o último administrador master.")
+            connection.execute(
+                """
+                UPDATE admin_roster
+                SET revoked_at = ?, revoked_by_telegram_user_id = ?, updated_at = ?
+                WHERE telegram_user_id = ?
+                """,
+                (now, actor_telegram_user_id, now, target_telegram_user_id),
+            ).close()
+        self._log_admin_action(
+            actor_telegram_user_id,
+            target_telegram_user_id,
+            "admin_roster_revoke",
+            {},
+        )
+        return {"telegram_user_id": target_telegram_user_id, "revoked": True}
 
     def dashboard(self) -> dict[str, object]:
         with connect_database(self.database_path) as connection:
@@ -1021,6 +1143,7 @@ def render_admin_panel(
         <button class="nav-button" type="button" data-view="clients"><span class="nav-icon">♟</span><span class="nav-label">Clientes</span><span class="nav-badge" id="nav-clients">0</span></button>
         <button class="nav-button" type="button" data-view="finance"><span class="nav-icon">$</span><span class="nav-label">Financeiro</span><span class="nav-badge" id="nav-overdue">0</span></button>
         <button class="nav-button" type="button" data-view="channels"><span class="nav-icon">◉</span><span class="nav-label">Canais</span><span class="nav-badge" id="nav-channels">0</span></button>
+        <button class="nav-button" type="button" data-view="admins" id="nav-admins-button" hidden><span class="nav-icon">☺</span><span class="nav-label">Admins</span></button>
       </nav>
       <div class="sidebar-foot">Acesso protegido por sessão administrativa. Todas as alterações importantes são auditadas.</div>
     </aside>
@@ -1079,6 +1202,19 @@ def render_admin_panel(
           <div class="view-head"><div><h2>Canais de sinais</h2><p>Analise solicitações, controle o monitoramento e organize os nomes exibidos.</p></div></div>
           <div class="list" id="channel-list"></div>
         </section>
+        <section class="view" id="view-admins" data-view-panel="admins" hidden>
+          <div class="view-head"><div><h2>Administradores</h2><p>Quem tem acesso ao painel. Só admins master podem adicionar ou remover.</p></div></div>
+          <form class="form-section" id="admin-add-form">
+            <input class="input" id="admin-add-telegram-id" type="number" placeholder="Telegram user ID" required>
+            <input class="input" id="admin-add-label" type="text" placeholder="Rótulo (opcional)">
+            <select class="input" id="admin-add-role">
+              <option value="regular">Comum</option>
+              <option value="master">Master</option>
+            </select>
+            <button class="primary" id="admin-add-submit" type="submit">Adicionar admin</button>
+          </form>
+          <div class="list" id="admin-list"></div>
+        </section>
       </section>
     </div>
     <dialog id="finance-dialog">
@@ -1135,13 +1271,15 @@ def render_admin_script() -> str:
 (function () {
   "use strict";
   var tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
-  var state = { users: [], summary: {}, channels: { requests: [], channels: [] }, csrf: "", filter: "all", query: "", financeFilter: "all", financeQuery: "", view: "overview", busy: false, browser: false };
+  var state = { users: [], summary: {}, channels: { requests: [], channels: [] }, admins: [], role: null, csrf: "", filter: "all", query: "", financeFilter: "all", financeQuery: "", view: "overview", busy: false, browser: false };
   var notice = document.getElementById("notice");
   var summary = document.getElementById("summary");
   var workspace = document.getElementById("workspace");
   var list = document.getElementById("user-list");
   var financeList = document.getElementById("finance-list");
   var channelList = document.getElementById("channel-list");
+  var adminList = document.getElementById("admin-list");
+  var adminAddForm = document.getElementById("admin-add-form");
   var search = document.getElementById("search");
   var financeSearch = document.getElementById("finance-search");
   var filters = document.getElementById("filters");
@@ -1292,6 +1430,7 @@ def render_admin_script() -> str:
     document.getElementById("nav-clients").textContent = state.summary.users || 0;
     document.getElementById("nav-overdue").textContent = state.summary.billing_overdue || 0;
     document.getElementById("nav-channels").textContent = state.summary.pending_channel_requests || 0;
+    document.getElementById("nav-admins-button").hidden = state.role !== "master";
   }
 
   function setView(view) {
@@ -1299,8 +1438,10 @@ def render_admin_script() -> str:
       overview: ["Visão geral", "O que precisa da sua atenção agora."],
       clients: ["Clientes", "Acesso, conexão MT5 e gestão operacional."],
       finance: ["Financeiro", "Pagamentos, vencimentos e liberações."],
-      channels: ["Canais", "Fontes de sinais e solicitações pendentes."]
+      channels: ["Canais", "Fontes de sinais e solicitações pendentes."],
+      admins: ["Administradores", "Quem tem acesso ao painel."]
     };
+    if (view === "admins" && state.role !== "master") { view = "overview"; }
     if (!labels[view]) { view = "overview"; }
     state.view = view;
     Array.prototype.forEach.call(document.querySelectorAll("[data-view-panel]"), function (panel) {
@@ -1482,10 +1623,29 @@ def render_admin_script() -> str:
       '<div class="empty">Nenhuma solicitação ou canal cadastrado.</div>';
   }
 
+  function renderAdmins() {
+    if (!adminList) { return; }
+    var html = state.admins.map(function (admin) {
+      var roleLabel = admin.role === "master" ? "Master" : "Comum";
+      var sourceLabel = admin.source === "env" ? "Fixo (.env)" : "Adicionado pelo painel";
+      var removeButton = admin.source === "roster"
+        ? '<button class="action pause" data-admin-action="revoke" data-admin-telegram-id="' + esc(admin.telegram_user_id) + '">Remover</button>'
+        : "";
+      return '<article class="channel-card"><div class="identity"><h2>' +
+        esc(admin.label || ("Telegram #" + admin.telegram_user_id)) + '</h2>' +
+        '<div class="meta">ID ' + esc(admin.telegram_user_id) + ' · ' + esc(sourceLabel) + '</div></div>' +
+        '<div class="detail"><strong>' + esc(roleLabel) + '</strong></div>' +
+        '<div class="actions">' + removeButton + '</div></article>';
+    }).join("");
+    adminList.innerHTML = html || '<div class="empty">Nenhum administrador cadastrado.</div>';
+  }
+
   function applyDashboard(data) {
     state.users = data.users || [];
     state.summary = data.summary || {};
     state.channels = data.channel_catalog || { requests: [], channels: [] };
+    state.admins = data.admins || [];
+    state.role = (data.admin && data.admin.role) || null;
     state.csrf = data.csrf_token || state.csrf;
     state.browser = !tg || !tg.initData;
     logout.hidden = !state.browser;
@@ -1497,6 +1657,7 @@ def render_admin_script() -> str:
     renderUsers();
     renderFinance();
     renderChannels();
+    renderAdmins();
     updateNavigation();
     setView(state.view);
   }
@@ -1541,6 +1702,34 @@ def render_admin_script() -> str:
       status: status
     })).then(reloadDashboard)
       .catch(function (error) { showError(error.message || "Não foi possível alterar o cliente."); })
+      .finally(function () { state.busy = false; button.disabled = false; });
+  }
+
+  function addAdmin(telegramUserId, role, label, button) {
+    if (state.busy) { return; }
+    state.busy = true;
+    if (button) { button.disabled = true; }
+    post("/api/admin/admin-add", authFields({
+      csrf_token: state.csrf,
+      telegram_user_id: telegramUserId,
+      role: role,
+      label: label || ""
+    })).then(reloadDashboard)
+      .then(function () { adminAddForm.reset(); })
+      .catch(function (error) { showError(error.message || "Não foi possível adicionar o administrador."); })
+      .finally(function () { state.busy = false; if (button) { button.disabled = false; } });
+  }
+
+  function revokeAdmin(telegramUserId, button) {
+    if (state.busy) { return; }
+    if (!window.confirm("Remover o acesso administrativo deste usuário?")) { return; }
+    state.busy = true;
+    button.disabled = true;
+    post("/api/admin/admin-revoke", authFields({
+      csrf_token: state.csrf,
+      telegram_user_id: telegramUserId
+    })).then(reloadDashboard)
+      .catch(function (error) { showError(error.message || "Não foi possível remover o administrador."); })
       .finally(function () { state.busy = false; button.disabled = false; });
   }
 
@@ -1666,6 +1855,22 @@ def render_admin_script() -> str:
     var button = event.target.closest("[data-view]");
     if (button) { setView(button.getAttribute("data-view")); }
   });
+  if (adminList) {
+    adminList.addEventListener("click", function (event) {
+      var button = event.target.closest("[data-admin-action='revoke']");
+      if (button) { revokeAdmin(button.getAttribute("data-admin-telegram-id"), button); }
+    });
+  }
+  if (adminAddForm) {
+    adminAddForm.addEventListener("submit", function (event) {
+      event.preventDefault();
+      var telegramUserId = document.getElementById("admin-add-telegram-id").value.trim();
+      var label = document.getElementById("admin-add-label").value.trim();
+      var role = document.getElementById("admin-add-role").value;
+      if (!telegramUserId) { return; }
+      addAdmin(telegramUserId, role, label, document.getElementById("admin-add-submit"));
+    });
+  }
   financeSearch.addEventListener("input", function () {
     state.financeQuery = financeSearch.value.trim().toLowerCase();
     renderFinance();

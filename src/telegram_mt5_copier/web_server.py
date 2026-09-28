@@ -229,6 +229,12 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             if path == "/api/admin/channel-status":
                 self.handle_admin_channel_status(fields)
                 return
+            if path == "/api/admin/admin-add":
+                self.handle_admin_add_admin(fields)
+                return
+            if path == "/api/admin/admin-revoke":
+                self.handle_admin_revoke_admin(fields)
+                return
             if path == "/api/v1/auth/browser-login":
                 self.handle_client_browser_login(fields)
                 return
@@ -654,7 +660,7 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             session = self.admin_browser_auth.consume_login_token(fields.get("token", ""))
         except ValueError as exc:
             raise WebAppValidationError(str(exc)) from exc
-        identity = AdminIdentity(session.admin_telegram_user_id, None)
+        identity = AdminIdentity(session.admin_telegram_user_id, None, role=session.role)
         self.send_admin_dashboard(
             identity,
             extra_headers=(("Set-Cookie", admin_session_cookie(session.session_token)),),
@@ -671,7 +677,7 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             self.send_json({"ok": False, "error": str(exc)}, status=401)
             return
         safe_log("admin_password_login_accepted", user_id=str(session.admin_telegram_user_id))
-        identity = AdminIdentity(session.admin_telegram_user_id, None)
+        identity = AdminIdentity(session.admin_telegram_user_id, None, role=session.role)
         self.send_admin_dashboard(
             identity,
             extra_headers=(("Set-Cookie", admin_session_cookie(session.session_token)),),
@@ -715,9 +721,12 @@ class OnboardingHandler(BaseHTTPRequestHandler):
                 "admin": {
                     "telegram_user_id": identity.telegram_user_id,
                     "username": identity.username,
+                    "role": identity.role,
                 },
             }
         )
+        if identity.role == "master":
+            payload["admins"] = self.admin_panel.list_admin_roster()
         safe_log("admin_session_accepted", user_id=str(identity.telegram_user_id))
         self.send_json(payload, extra_headers=extra_headers)
 
@@ -739,6 +748,46 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             status=str(result["status"]),
         )
         self.send_json({"ok": True, "user": result})
+
+    def handle_admin_add_admin(self, fields: dict[str, str]) -> None:
+        identity = self.authenticate_admin_mutation(fields)
+        if identity.role != "master":
+            raise ValueError("Apenas administradores master podem adicionar administradores.")
+        try:
+            target_telegram_user_id = int(fields.get("telegram_user_id", ""))
+        except ValueError as exc:
+            raise ValueError("Telegram user id inválido.") from exc
+        result = self.admin_panel.add_admin(
+            actor_telegram_user_id=identity.telegram_user_id,
+            target_telegram_user_id=target_telegram_user_id,
+            role=fields.get("role", ""),
+            label=fields.get("label") or None,
+        )
+        safe_log(
+            "admin_roster_add",
+            admin_id=str(identity.telegram_user_id),
+            target_id=str(target_telegram_user_id),
+        )
+        self.send_json({"ok": True, "admin": result})
+
+    def handle_admin_revoke_admin(self, fields: dict[str, str]) -> None:
+        identity = self.authenticate_admin_mutation(fields)
+        if identity.role != "master":
+            raise ValueError("Apenas administradores master podem remover administradores.")
+        try:
+            target_telegram_user_id = int(fields.get("telegram_user_id", ""))
+        except ValueError as exc:
+            raise ValueError("Telegram user id inválido.") from exc
+        result = self.admin_panel.revoke_admin(
+            actor_telegram_user_id=identity.telegram_user_id,
+            target_telegram_user_id=target_telegram_user_id,
+        )
+        safe_log(
+            "admin_roster_revoke",
+            admin_id=str(identity.telegram_user_id),
+            target_id=str(target_telegram_user_id),
+        )
+        self.send_json({"ok": True, "admin": result})
 
     def handle_admin_mt5_account_delete(self, fields: dict[str, str]) -> None:
         identity = self.authenticate_admin_mutation(fields)
@@ -900,7 +949,10 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             admin_id = self.admin_browser_auth.authenticate_session(session_token)
         except ValueError as exc:
             raise WebAppValidationError(str(exc)) from exc
-        return AdminIdentity(admin_id, None)
+        role = self.admin_browser_auth.resolve_role(admin_id)
+        if role is None:
+            raise WebAppValidationError("Administrador não autorizado.")
+        return AdminIdentity(admin_id, None, role=role)
 
     def admin_session_cookie(self) -> str:
         cookie = SimpleCookie()
@@ -1172,6 +1224,8 @@ def safe_endpoint(value: str) -> str:
         "/api/admin/channel-revalidate",
         "/api/admin/channel-display-name",
         "/api/admin/channel-status",
+        "/api/admin/admin-add",
+        "/api/admin/admin-revoke",
     }
     return value if value in allowed else ""
 
