@@ -341,7 +341,7 @@ wheels = [
 
 [[package]]
 name = "telegram-mt5-copier"
-version = "0.45.6"
+version = "0.45.8"
 source = { editable = "." }
 dependencies = [
     { name = "asyncpg" },

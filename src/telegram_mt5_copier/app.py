@@ -28,6 +28,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--provision-mt5-account", type=int, help="Provisiona terminal isolado para uma conta MT5.")
     parser.add_argument("--user-id", type=int, help="ID interno do usuario dono da conta MT5.")
+    parser.add_argument(
+        "--set-admin-password",
+        type=int,
+        metavar="TELEGRAM_USER_ID",
+        help=(
+            "Bootstrap de login por e-mail/senha para um admin, rodado na propria VPS -- "
+            "nao depende do bot nem de uma sessao ja autenticada. O ID precisa estar em "
+            "BOT_ADMIN_IDS (mesma trava de sempre); a senha e pedida interativamente, "
+            "nunca como argumento (evita ficar no historico do shell)."
+        ),
+    )
+    parser.add_argument("--admin-email", help="E-mail a associar, usado com --set-admin-password.")
     args = parser.parse_args(argv)
 
     try:
@@ -50,6 +62,12 @@ def main(argv: list[str] | None = None) -> int:
             print("--user-id e obrigatorio com --provision-mt5-account.", file=sys.stderr)
             return 2
         return run_mt5_provision(config, args.user_id, args.provision_mt5_account)
+
+    if args.set_admin_password is not None:
+        if not args.admin_email:
+            print("--admin-email e obrigatorio com --set-admin-password.", file=sys.stderr)
+            return 2
+        return run_set_admin_password(config, args.set_admin_password, args.admin_email)
 
     return run_service(config)
 
@@ -162,6 +180,33 @@ def run_mt5_provision(config: AppConfig, user_id: int, account_id: int) -> int:
     except Exception as exc:
         print(f"Falha ao provisionar terminal MT5: {exc}", file=sys.stderr)
         return 2
+
+
+def run_set_admin_password(config: AppConfig, telegram_user_id: int, email: str) -> int:
+    """Bootstrap local de login por e-mail/senha pra um admin, sem depender do bot.
+
+    Continua exigindo que telegram_user_id esteja em BOT_ADMIN_IDS (a mesma trava
+    de sempre) -- rodar isto na propria VPS, com acesso de shell, e o que substitui
+    a sessao de navegador que create_login_url normalmente exigiria."""
+    import getpass
+
+    from .admin_auth import AdminBrowserAuthService
+
+    password = getpass.getpass("Nova senha do admin: ")
+    confirm = getpass.getpass("Confirme a senha: ")
+    if password != confirm:
+        print("As senhas nao coincidem.", file=sys.stderr)
+        return 2
+
+    service = AdminBrowserAuthService(config.database_path, admin_ids=config.bot_admin_ids)
+    try:
+        service.set_password_for_admin(telegram_user_id, email=email, password=password)
+    except ValueError as exc:
+        print(f"Falha ao definir senha de admin: {exc}", file=sys.stderr)
+        return 2
+
+    print(f"Login por e-mail/senha configurado para o admin {telegram_user_id} ({email}).")
+    return 0
 
 
 def run_service(config: AppConfig) -> int:
