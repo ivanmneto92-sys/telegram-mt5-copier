@@ -124,6 +124,7 @@ class PositionManager:
                     continue
                 ticket = int(value(position, "ticket", 0) or 0)
                 self._mark_filled(order_record.order_id, ticket)
+                self._update_floating_profit(order_record.order_id, value(position, "profit", 0))
                 managed_positions.append((position, order_record))
 
             history_deals: tuple[object, ...] = ()
@@ -1088,6 +1089,19 @@ class PositionManager:
                 WHERE id = ?
                 """,
                 (str(position_ticket), utc_now(), utc_now(), order_id),
+            )
+            cursor.close()
+
+    def _update_floating_profit(self, order_id: int, profit: object) -> None:
+        """Grava o lucro/prejuizo flutuante corrente de uma posicao ainda
+        aberta -- chamado a cada ciclo (position.profit ja vem do
+        positions_get() acima, sem chamada extra ao MT5). SettlementMonitor
+        limpa este campo quando a posicao fecha de verdade e net_profit
+        assume."""
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                "UPDATE execution_orders SET floating_profit = ?, updated_at = ? WHERE id = ?",
+                (str(Decimal(str(profit or 0))), utc_now(), order_id),
             )
             cursor.close()
 

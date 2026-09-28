@@ -1305,6 +1305,98 @@ class PendingOrderTests(unittest.TestCase):
         self.assertEqual(client.order_send_requests[-1]["position"], 9001)
         self.assertEqual(client.order_send_requests[-1]["sl"], 4063.0)
 
+    def test_worker_grava_lucro_flutuante_da_posicao_aberta_a_cada_ciclo(self) -> None:
+        # position.profit ja vem do positions_get() que o loop de
+        # breakeven/trailing ja chama -- so precisa ser gravado, sem
+        # chamada nova ao MT5. Cobre o "resultado real" que o portal
+        # precisa mostrar pra uma operacao ainda aberta.
+        signal = parse_signal_text(BUY_SIGNAL).signal
+        result = self.executor().execute_for_account(signal, self.account, self.profile())
+        group_id = result.group_result.group.id
+        client = SimulatedMT5Client(
+            tick=TickInfo(bid=Decimal("4080"), ask=Decimal("4080")),
+            positions=(
+                {
+                    "magic": 27071301,
+                    "comment": f"tgcp {signal.signature[:8]} TP1",
+                    "ticket": 9002,
+                    "symbol": "XAUUSD",
+                    "price_open": 4061,
+                    "sl": 4044,
+                    "tp": 4066,
+                    "profit": 12.5,
+                },
+            ),
+        )
+        manager = PositionManager(self.database_path, self.accounts, lambda: client)
+
+        manager.manage_account(self.account, self.profile())
+
+        with connect_database(self.database_path) as connection:
+            floating = connection.execute(
+                "SELECT floating_profit FROM execution_orders WHERE execution_group_id = ?",
+                (group_id,),
+            ).fetchone()[0]
+        self.assertEqual(floating, "12.5")
+
+    def test_fechamento_de_verdade_limpa_o_lucro_flutuante(self) -> None:
+        # Depois que SettlementMonitor confirma o fechamento real, o campo
+        # flutuante nao pode continuar com um valor velho -- net_profit
+        # (o resultado real) assume dali pra frente.
+        signal = parse_signal_text(BUY_SIGNAL).signal
+        result = self.executor().execute_for_account(signal, self.account, self.profile())
+        group_id = result.group_result.group.id
+        comment = f"tgcp {signal.signature[:8]} TP1"
+        client = SimulatedMT5Client(
+            tick=TickInfo(bid=Decimal("4080"), ask=Decimal("4080")),
+            positions=(
+                {
+                    "magic": 27071301, "comment": comment, "ticket": 9003,
+                    "symbol": "XAUUSD", "price_open": 4061, "sl": 4044, "tp": 4066,
+                    "profit": 8.0,
+                },
+            ),
+        )
+        PositionManager(self.database_path, self.accounts, lambda: client).manage_account(
+            self.account, self.profile()
+        )
+        with connect_database(self.database_path) as connection:
+            floating_before = connection.execute(
+                "SELECT floating_profit FROM execution_orders WHERE execution_group_id = ?",
+                (group_id,),
+            ).fetchone()[0]
+        self.assertEqual(floating_before, "8.0")
+
+        class RecordingNotifier:
+            def __init__(self) -> None:
+                self.messages: list[tuple[int, str]] = []
+
+            def send(self, telegram_user_id: int, message: str) -> bool:
+                self.messages.append((telegram_user_id, message))
+                return True
+
+        notifier = RecordingNotifier()
+        monitor = SettlementMonitor(self.database_path, notifier)  # type: ignore[arg-type]
+        now = datetime.now(tz=timezone.utc).timestamp()
+        closing_client = SimulatedMT5Client(
+            history_deals=(
+                {"ticket": 5000, "position_id": 9003, "magic": 27071301,
+                 "entry": 0, "time": now, "profit": 0, "commission": -0.20},
+                {"ticket": 5001, "position_id": 9003, "magic": 27071301,
+                 "entry": 1, "reason": 5, "time": now, "price": 4066,
+                 "profit": 20.0, "commission": 0, "swap": 0, "fee": 0},
+            ),
+        )
+        monitor.reconcile(closing_client, self.account)
+
+        with connect_database(self.database_path) as connection:
+            floating_after, net_profit = connection.execute(
+                "SELECT floating_profit, net_profit FROM execution_orders WHERE execution_group_id = ?",
+                (group_id,),
+            ).fetchone()
+        self.assertIsNone(floating_after)
+        self.assertEqual(net_profit, "19.8")
+
     def test_fechamento_e_registrado_e_notificado_uma_unica_vez(self) -> None:
         signal = parse_signal_text(BUY_SIGNAL).signal
         result = self.executor().execute_for_account(signal, self.account, self.profile())

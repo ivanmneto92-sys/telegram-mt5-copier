@@ -167,6 +167,7 @@ class ClientPortalService:
                 raise ValueError("Cliente nao encontrado.")
             account = self._select_account(db, user_id, account_id)
             performance = None
+            floating_total = Decimal("0")
             if account is not None:
                 performance = db.execute(
                     """
@@ -177,6 +178,20 @@ class ClientPortalService:
                     """,
                     (int(account[0]),),
                 ).fetchone()
+                # Lucro/prejuizo flutuante de posicoes ainda abertas nessa conta
+                # -- account_daily_performance so cobre negocios ja fechados
+                # (history_deals_get); somamos aqui pro "resultado do dia"
+                # refletir a posicao de verdade, nao so o que ja fechou hoje.
+                floating_row = db.execute(
+                    """
+                    SELECT COALESCE(SUM(CAST(o.floating_profit AS REAL)), 0)
+                    FROM execution_orders o
+                    JOIN execution_groups g ON g.id = o.execution_group_id
+                    WHERE g.mt5_account_id = ? AND o.floating_profit IS NOT NULL
+                    """,
+                    (int(account[0]),),
+                ).fetchone()
+                floating_total = Decimal(str(floating_row[0] or 0))
             # Sem conta escolhida, conta as operacoes de todas as contas do cliente.
             active_count = db.execute(
                 """
@@ -195,7 +210,7 @@ class ClientPortalService:
                 "daily_signal_pause_until": user[2],
             },
             "account": self._account(account),
-            "daily_performance": self._performance(performance),
+            "daily_performance": self._performance(performance, floating_total),
             "active_operations": int(active_count),
         }
 
@@ -287,7 +302,8 @@ class ClientPortalService:
                 SELECT g.id, g.status, g.symbol, g.direction, g.order_type,
                        g.selected_entry_price, g.stop_loss, g.total_volume,
                        g.created_at, g.error_code, c.title,
-                       COUNT(o.id), COALESCE(SUM(CAST(o.net_profit AS REAL)), 0)
+                       COUNT(o.id),
+                       COALESCE(SUM(CAST(COALESCE(o.net_profit, o.floating_profit, '0') AS REAL)), 0)
                 FROM execution_groups g
                 LEFT JOIN signals sig ON sig.signature = g.signal_id
                 LEFT JOIN source_channels c ON c.telegram_chat_id = sig.source_chat_id
@@ -550,11 +566,26 @@ class ClientPortalService:
         }
 
     @staticmethod
-    def _performance(row: object) -> dict[str, object] | None:
+    def _performance(row: object, floating_total: Decimal = Decimal("0")) -> dict[str, object] | None:
         if row is None:
             return None
+        # net_profit devolvido aqui e o resultado "real real": realizado hoje
+        # (account_daily_performance, so negocios ja fechados) + flutuante
+        # agora (posicoes ainda abertas) -- o mesmo numero que o cliente veria
+        # somando o resultado do dia com o que esta em aberto no MT5.
+        realized = Decimal(str(row[1]))
+        combined = realized + floating_total
+        starting_balance = row[4]
+        return_percent = row[5]
+        if starting_balance is not None:
+            try:
+                starting_balance_dec = Decimal(str(starting_balance))
+                if starting_balance_dec > 0:
+                    return_percent = str(combined * Decimal("100") / starting_balance_dec)
+            except InvalidOperation:
+                pass
         return {
-            "date": row[0], "net_profit": row[1], "gross_profit": row[2],
-            "trading_costs": row[3], "starting_balance": row[4],
-            "return_percent": row[5], "updated_at": row[6],
+            "date": row[0], "net_profit": str(combined), "gross_profit": row[2],
+            "trading_costs": row[3], "starting_balance": starting_balance,
+            "return_percent": return_percent, "updated_at": row[6],
         }

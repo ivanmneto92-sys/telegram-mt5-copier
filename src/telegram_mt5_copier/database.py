@@ -1095,6 +1095,14 @@ def run_schema_migrations(connection: sqlite3.Connection) -> None:
     ensure_column(connection, "execution_orders", "fee", "TEXT")
     ensure_column(connection, "execution_orders", "net_profit", "TEXT")
     ensure_column(connection, "execution_orders", "mt5_close_deal_ticket", "TEXT")
+    # Lucro/prejuizo flutuante da posicao aberta, gravado a cada ciclo do
+    # PositionManager (client.positions_get() ja e chamado la pra
+    # breakeven/trailing) -- NULL pra ordens ainda nao preenchidas ou ja
+    # fechadas (SettlementMonitor limpa ao fechar; net_profit assume dali
+    # pra frente). Distinto de net_profit (resultado REAL, so apos
+    # fechamento) -- client_portal.py combina os dois pra mostrar o
+    # resultado corrente de uma posicao ainda aberta.
+    ensure_column(connection, "execution_orders", "floating_profit", "TEXT")
     ensure_column(
         connection,
         "execution_orders",

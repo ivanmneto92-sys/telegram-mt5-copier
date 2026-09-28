@@ -1,3 +1,4 @@
+from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -508,6 +509,91 @@ class ClientPortalTests(unittest.TestCase):
 
         self.assertIsNone(operations[0]["error_code"])
         self.assertIsNone(operations[0]["reason_label"])
+
+    def test_operations_mostra_lucro_flutuante_pra_posicao_ainda_aberta(self) -> None:
+        # PositionManager grava floating_profit a cada ciclo enquanto uma
+        # posicao esta aberta (net_profit so existe depois de fechar de
+        # verdade) -- o portal precisa mostrar o flutuante nesse meio tempo,
+        # nao zero.
+        account_id = self._add_account(self.user_id, "Principal", "111111")
+        now = utc_now()
+        with connect_database(self.database_path) as db:
+            group_id = int(db.execute(
+                """
+                INSERT INTO execution_groups (
+                    signal_id, user_id, mt5_account_id, status, direction, symbol,
+                    entry_low, entry_high, selected_entry_price, order_type,
+                    total_volume, stop_loss, expiration_at, execution_mode,
+                    signal_received_at, pending_created_at, created_at, updated_at
+                ) VALUES ('sig-aberta', ?, ?, 'open', 'buy', 'XAUUSD',
+                          '4100', '4100', '4100', 'market', '0.01', '4090', ?,
+                          'demo_execution', ?, ?, ?, ?)
+                """,
+                (self.user_id, account_id, now, now, now, now, now),
+            ).lastrowid)
+            db.execute(
+                """
+                INSERT INTO execution_orders (
+                    execution_group_id, tp_index, requested_volume, normalized_volume,
+                    entry_price, stop_loss, take_profit, order_type, status,
+                    floating_profit, created_at, updated_at
+                ) VALUES (?, 1, '0.01', '0.01', '4100', '4090', '4110', 'buy',
+                          'filled', '15.5', ?, ?)
+                """,
+                (group_id, now, now),
+            )
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+
+        operations = portal.operations(self.user_id)["operations"]
+
+        self.assertEqual("15.5", operations[0]["net_profit"])
+
+    def test_dashboard_soma_flutuante_ao_realizado_como_resultado_do_dia(self) -> None:
+        account_id = self._add_account(self.user_id, "Principal", "111111")
+        now = utc_now()
+        with connect_database(self.database_path) as db:
+            db.execute(
+                """
+                INSERT INTO account_daily_performance (
+                    mt5_account_id, performance_date, realized_profit,
+                    starting_balance, return_percent, updated_at
+                ) VALUES (?, '2026-09-28', '100', '10000', '1.0', ?)
+                """,
+                (account_id, now),
+            )
+            group_id = int(db.execute(
+                """
+                INSERT INTO execution_groups (
+                    signal_id, user_id, mt5_account_id, status, direction, symbol,
+                    entry_low, entry_high, selected_entry_price, order_type,
+                    total_volume, stop_loss, expiration_at, execution_mode,
+                    signal_received_at, pending_created_at, created_at, updated_at
+                ) VALUES ('sig-aberta-2', ?, ?, 'open', 'buy', 'XAUUSD',
+                          '4100', '4100', '4100', 'market', '0.01', '4090', ?,
+                          'demo_execution', ?, ?, ?, ?)
+                """,
+                (self.user_id, account_id, now, now, now, now, now),
+            ).lastrowid)
+            db.execute(
+                """
+                INSERT INTO execution_orders (
+                    execution_group_id, tp_index, requested_volume, normalized_volume,
+                    entry_price, stop_loss, take_profit, order_type, status,
+                    floating_profit, created_at, updated_at
+                ) VALUES (?, 1, '0.01', '0.01', '4100', '4090', '4110', 'buy',
+                          'filled', '25', ?, ?)
+                """,
+                (group_id, now, now),
+            )
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+
+        performance = portal.dashboard(self.user_id, account_id)["daily_performance"]
+
+        # 100 (realizado hoje) + 25 (flutuante da posicao ainda aberta) = 125
+        # -- ".0" no final vem do SUM(CAST(...AS REAL)) do SQLite (float),
+        # cosmetico, nao afeta o valor.
+        self.assertEqual(Decimal("125"), Decimal(performance["net_profit"]))
+        self.assertEqual("1.25", performance["return_percent"])
 
     def test_risk_rejects_unknown_and_out_of_range_values(self) -> None:
         portal = ClientPortalService(self.database_path, brand_name="Marca")

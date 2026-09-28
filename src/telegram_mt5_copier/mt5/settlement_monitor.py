@@ -158,7 +158,7 @@ class SettlementMonitor:
                 """
                 UPDATE execution_orders SET status='closed',closed_at=?,close_reason=?,
                     close_price=?,gross_profit=?,commission=?,swap=?,fee=?,net_profit=?,
-                    mt5_close_deal_ticket=?,updated_at=? WHERE id=?
+                    mt5_close_deal_ticket=?,floating_profit=NULL,updated_at=? WHERE id=?
                 """,
                 (closed_at, reason, str(price), str(gross), str(commission), str(swap),
                  str(fee), str(net), ticket, now, order_id),
