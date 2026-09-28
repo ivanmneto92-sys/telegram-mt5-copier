@@ -1276,6 +1276,27 @@ class PendingOrderTests(unittest.TestCase):
         self.assertEqual(expired, 1)
         self.assertEqual(group_status(self.database_path, result.group_result.group.id), "expired")
 
+    def test_monitor_nao_expira_grupo_com_ordem_ja_preenchida(self) -> None:
+        signal = parse_signal_text(BUY_SIGNAL).signal
+        result = self.executor().execute_for_account(signal, self.account, self.profile())
+        group_id = result.group_result.group.id
+        status_before = group_status(self.database_path, group_id)
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                "UPDATE execution_orders SET status='filled' "
+                "WHERE execution_group_id=? AND tp_index=1",
+                (group_id,),
+            ).close()
+        monitor = PendingOrderMonitor(self.database_path)
+
+        try:
+            expired = monitor.expire_orders(datetime.now(tz=timezone.utc) + timedelta(hours=3))
+        finally:
+            monitor.close()
+
+        self.assertEqual(expired, 0)
+        self.assertEqual(group_status(self.database_path, group_id), status_before)
+
     def test_worker_aplica_breakeven_e_trailing_em_posicao_identificada(self) -> None:
         signal = parse_signal_text(BUY_SIGNAL).signal
         self.executor().execute_for_account(signal, self.account, self.profile())

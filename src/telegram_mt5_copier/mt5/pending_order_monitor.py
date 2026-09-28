@@ -31,6 +31,11 @@ class PendingOrderMonitor:
                 SET status = 'expired', updated_at = ?
                 WHERE expiration_at <= ?
                   AND status IN ('planned', 'simulated', 'pending_submission', 'pending_active')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM execution_orders
+                      WHERE execution_orders.execution_group_id = execution_groups.id
+                        AND execution_orders.status = 'filled'
+                  )
                 """,
                 (now_iso, now_iso),
             )
