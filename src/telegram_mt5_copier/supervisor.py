@@ -330,6 +330,7 @@ def main() -> int:
         notifier = TelegramAdminNotifier(
             config.telegram_bot_token,
             config.bot_admin_ids,
+            database_path=config.database_path,
             logger=logger,
         )
         supervisor = PlatformSupervisor(
