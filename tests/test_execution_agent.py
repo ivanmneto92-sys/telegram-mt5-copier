@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import dataclasses
 from decimal import Decimal
 import json
 from pathlib import Path
@@ -11,6 +10,7 @@ import httpx
 
 from telegram_mt5_copier.config import AppConfig
 from telegram_mt5_copier.credential_service import CredentialService
+from telegram_mt5_copier.database import connect_database
 from telegram_mt5_copier.execution_agent import (
     AgentApiClient,
     AgentApiError,
@@ -373,10 +373,10 @@ class RealExecutionBackendTests(unittest.IsolatedAsyncioTestCase):
             MT5AccountForm("Broker", "Broker-Demo", "12345678", "secret", "Demo"),
         )
         self.accounts_service.update_execution_profile_fixed_lot(self.user.id, self.account.id, Decimal("0.04"))
-        # RealExecutionBackend so executa contas listadas em QUEUE_PILOT_ACCOUNT_IDS
-        # (trava contra reexecutar por engano o espelho de uma conta real nao-piloto)
-        # -- so da pra saber o id depois de criar a conta acima.
-        self.config = dataclasses.replace(self.config, queue_pilot_account_ids=(self.account.id,))
+        # RealExecutionBackend so executa contas com o toggle queue_pilot_enabled
+        # ligado (trava contra reexecutar por engano o espelho de uma conta
+        # real nao-piloto) -- Passo 6, leitura fresca no banco a cada chamada.
+        self.accounts_service.set_queue_pilot_enabled(self.account.id, True)
 
     async def asyncTearDown(self) -> None:
         self.accounts_service.close()
@@ -448,21 +448,64 @@ class RealExecutionBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(second.orders)
         self.assertEqual(len(client.order_send_requests), 2)  # so a primeira chamada enviou de verdade
 
-    async def test_conta_fora_de_queue_pilot_account_ids_e_recusada_sem_executar(self) -> None:
+    async def test_conta_com_toggle_desligado_e_recusada_sem_executar(self) -> None:
         # Simula o cenario real de risco encontrado na Etapa 5e: um job
         # espelho de uma conta NAO-piloto (Etapa 2/5a, qualquer conta
         # demo/live real) acaba reivindicado por engano -- o backend precisa
         # recusar sem nunca chamar execute_for_account, mesmo que o payload
         # seja perfeitamente valido.
-        config_sem_piloto = dataclasses.replace(self.config, queue_pilot_account_ids=())
+        self.accounts_service.set_queue_pilot_enabled(self.account.id, False)
         client = SimulatedMT5Client(tick=TickInfo(bid=Decimal("4062"), ask=Decimal("4062")))
-        backend = RealExecutionBackend(config_sem_piloto, client_factory=lambda: client)
+        backend = RealExecutionBackend(self.config, client_factory=lambda: client)
 
         with self.assertRaises(ExecutionBackendError):
             await backend.execute({"payload": self._payload()})
 
         self.assertEqual(len(client.order_send_requests), 0)
         self.assertEqual(len(client.order_check_requests), 0)
+
+    async def test_toggle_ligado_pelo_painel_afeta_a_mesma_instancia_sem_reiniciar(self) -> None:
+        # A propriedade central do Passo 6: uma UNICA instancia de
+        # RealExecutionBackend (equivalente a um processo do agente ja
+        # rodando) precisa reagir a um toggle feito pelo painel web sem
+        # ser reconstruida -- diferente do antigo QUEUE_PILOT_ACCOUNT_IDS,
+        # congelado no processo desde a Etapa 4.
+        self.accounts_service.set_queue_pilot_enabled(self.account.id, False)
+        client = SimulatedMT5Client(tick=TickInfo(bid=Decimal("4062"), ask=Decimal("4062")))
+        backend = RealExecutionBackend(self.config, client_factory=lambda: client)
+
+        with self.assertRaises(ExecutionBackendError):
+            await backend.execute({"payload": self._payload()})
+        self.assertEqual(len(client.order_send_requests), 0)
+
+        self.accounts_service.set_queue_pilot_enabled(self.account.id, True)
+        outcome = await backend.execute({"payload": self._payload()})
+
+        self.assertEqual(outcome.status, "succeeded")
+        self.assertEqual(len(client.order_send_requests), 2)
+
+    async def test_conta_real_ainda_e_bloqueada_mesmo_com_toggle_ligado(self) -> None:
+        # Documenta o limite atual, achado na revisao do Passo 6: o toggle
+        # queue_pilot_enabled so controla QUAL conta o agente tenta executar
+        # -- RealExecutionBackend continua fixo em execution_mode="demo_execution"
+        # e allow_live_accounts=False, entao uma conta account_type='real'
+        # e sempre recusada por pending_order_executor, mesmo piloteada.
+        # Habilitar execucao de verdade em conta real e uma etapa futura
+        # separada. Este teste existe pra essa trava nunca regredir
+        # silenciosamente (ex.: alguem mudar execution_mode sem revisar).
+        with connect_database(self.config.database_path) as connection:
+            connection.execute(
+                "UPDATE mt5_accounts SET account_type = 'real' WHERE id = ?",
+                (self.account.id,),
+            ).close()
+        client = SimulatedMT5Client(tick=TickInfo(bid=Decimal("4062"), ask=Decimal("4062")))
+        backend = RealExecutionBackend(self.config, client_factory=lambda: client)
+
+        outcome = await backend.execute({"payload": self._payload()})
+
+        self.assertEqual(outcome.status, "rejected")
+        self.assertIn("real_account_blocked", outcome.result["rejection_code"])
+        self.assertEqual(len(client.order_send_requests), 0)
 
     async def test_payload_sem_campo_obrigatorio_levanta_execution_backend_error(self) -> None:
         client = SimulatedMT5Client(tick=TickInfo(bid=Decimal("4062"), ask=Decimal("4062")))

@@ -527,9 +527,7 @@ class MT5AccountService:
         return account_from_row(row)
 
     def get_account_by_id(self, account_id: int) -> MT5Account | None:
-        """Etapa 5d: busca so pelo id, sem exigir o user_id -- usado pra
-        resolver contas piloteadas pela fila central (QUEUE_PILOT_ACCOUNT_IDS
-        so tem o id, nao o par user_id+account_id). Devolve None em vez de
+        """Busca so pelo id, sem exigir o user_id. Devolve None em vez de
         levantar quando nao encontra, pra o chamador poder logar e pular uma
         conta mal configurada sem derrubar nada."""
         with connect_database(self.database_path) as connection:
@@ -549,6 +547,63 @@ class MT5AccountService:
             finally:
                 cursor.close()
         return account_from_row(row) if row is not None else None
+
+    def is_queue_pilot_enabled(self, account_id: int) -> bool:
+        """Passo 6: leitura fresca a cada chamada (nunca cacheada) -- e a
+        checagem de seguranca que RealExecutionBackend.execute() faz antes
+        de executar de verdade um job da fila central. Precisa refletir um
+        toggle feito pelo painel web sem exigir reiniciar o agente."""
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                "SELECT queue_pilot_enabled FROM mt5_accounts WHERE id = ?",
+                (account_id,),
+            )
+            try:
+                row = cursor.fetchone()
+            finally:
+                cursor.close()
+        return row is not None and bool(row[0])
+
+    def list_queue_pilot_accounts(self, source_chat_id: int | str) -> tuple[MT5Account, ...]:
+        """Passo 6: contas com o toggle ligado E inscritas no canal do sinal
+        (mesma checagem de user_channel_subscriptions que a execucao local
+        ja usa via channel_selection_filter_sql) -- sem isso, uma conta
+        piloto receberia sinal de qualquer canal do sistema, nao so os que
+        ela realmente segue."""
+        channel_filter = channel_selection_filter_sql()
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                f"""
+                SELECT a.id, a.user_id, a.broker_name, a.server_name, a.login,
+                       a.encrypted_password, a.account_alias, a.terminal_path,
+                       a.account_type, a.connection_status, a.last_error,
+                       a.last_connected_at, a.account_mode, a.balance, a.equity,
+                       a.worker_heartbeat_at
+                FROM mt5_accounts a
+                WHERE a.queue_pilot_enabled = 1
+                  {channel_filter}
+                ORDER BY a.id ASC
+                """,
+                (str(source_chat_id),),
+            )
+            try:
+                rows = cursor.fetchall()
+            finally:
+                cursor.close()
+        return tuple(account_from_row(row) for row in rows)
+
+    def set_queue_pilot_enabled(self, account_id: int, enabled: bool) -> None:
+        with connect_database(self.database_path) as connection:
+            cursor = connection.execute(
+                "UPDATE mt5_accounts SET queue_pilot_enabled = ?, updated_at = ? WHERE id = ?",
+                (1 if enabled else 0, utc_now(), account_id),
+            )
+            try:
+                changed = cursor.rowcount
+            finally:
+                cursor.close()
+        if changed != 1:
+            raise ValueError("Conta MT5 nao encontrada.")
 
     def first_account(self, user_id: int) -> MT5Account | None:
         accounts = self.list_accounts(user_id)

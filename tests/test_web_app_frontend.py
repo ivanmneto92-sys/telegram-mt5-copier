@@ -474,6 +474,21 @@ class MiniAppFrontendTests(unittest.TestCase):
             )
             self.assertEqual(blocked["status"], 400)
 
+            # Passo 6: mesmo gate de master aplicado a rota de toggle da fila
+            # central -- admin comum nao pode ligar/desligar uma conta piloto.
+            queue_pilot_blocked = post_expect_error_with_cookie(
+                f"{base_url}/api/admin/mt5-account-queue-pilot-status",
+                {
+                    "csrf_token": regular_payload["csrf_token"],
+                    "user_id": "1",
+                    "account_id": "1",
+                    "enabled": "1",
+                },
+                regular_cookie,
+            )
+            self.assertEqual(queue_pilot_blocked["status"], 400)
+            self.assertIn("master", queue_pilot_blocked["body"]["error"])
+
             revoke_result = post_expect_error_with_cookie(
                 f"{base_url}/api/admin/admin-revoke",
                 {"csrf_token": master_payload["csrf_token"], "telegram_user_id": "202"},

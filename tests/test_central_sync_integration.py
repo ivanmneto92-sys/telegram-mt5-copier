@@ -103,7 +103,6 @@ def _fake_config(node_id: str = "dev-local") -> AppConfig:
         execution_agent_poll_seconds=5,
         execution_agent_claim_limit=5,
         execution_agent_lease_seconds=60,
-        queue_pilot_account_ids=(),
         backup_encryption_key=None,
         backup_retention_days=14,
         b2_key_id=None,

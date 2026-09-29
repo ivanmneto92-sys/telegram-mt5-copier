@@ -42,6 +42,7 @@ from telegram_mt5_copier.database import (
 )
 from telegram_mt5_copier.listener import SignalProcessor
 from telegram_mt5_copier.models import DecisionStatus, Direction, IncomingMessage, TradeSignal
+from telegram_mt5_copier.mt5.account_service import MT5AccountService
 from telegram_mt5_copier.mt5.execution_group_service import ExecutionGroupResult
 from telegram_mt5_copier.mt5.models import ExecutionGroup, ExecutionOrder, MT5Account
 from telegram_mt5_copier.mt5.pending_order_executor import PendingExecutionResult
@@ -1361,7 +1362,8 @@ class ListenerQueuePilotAccountsTests(unittest.IsolatedAsyncioTestCase):
         self.database_path = Path(self.temp_dir.name) / "signals.sqlite3"
         self.database = SignalDatabase(self.database_path)
         self.database.initialize()
-        ChannelCatalogService(self.database_path).register_configured_channel(
+        self.catalog = ChannelCatalogService(self.database_path)
+        self.channel_id = self.catalog.register_configured_channel(
             telegram_chat_id="123456",
             title="Canal VIP",
             username=None,
@@ -1370,9 +1372,17 @@ class ListenerQueuePilotAccountsTests(unittest.IsolatedAsyncioTestCase):
             last_message_id=None,
         )
         self.user_id, self.account_id = seed_customer_and_account(self.database_path)
-        self.pilot_account = make_mt5_account(self.account_id, self.user_id)
+        self.accounts_service = MT5AccountService(self.database_path)
         self.publisher = FakePublisher()
         self.outbox = CentralSyncOutbox(self.database_path)
+
+    def _enable_pilot(self, user_id: int, account_id: int) -> None:
+        # Passo 6: precisa das duas coisas pra list_queue_pilot_accounts
+        # devolver a conta -- o toggle ligado E uma inscricao ativa no
+        # canal (a checagem de canal e nova, corrige um gap real achado
+        # na revisao: antes a conta piloto recebia sinal de qualquer canal).
+        self.accounts_service.set_queue_pilot_enabled(account_id, True)
+        self.catalog.toggle_subscription(user_id, self.channel_id)
 
     async def asyncTearDown(self) -> None:
         self.database.close()
@@ -1392,9 +1402,10 @@ class ListenerQueuePilotAccountsTests(unittest.IsolatedAsyncioTestCase):
     async def test_conta_piloto_enfileira_job_sem_nenhum_pending_order_executor(self) -> None:
         # Sem pending_order_executor nenhum -- prova que o gancho da conta
         # piloto e totalmente independente do caminho de execucao local.
+        self._enable_pilot(self.user_id, self.account_id)
         processor = SignalProcessor(
             self.database, self.publisher, logger=NullLogger(),
-            central_sync_outbox=self.outbox, queue_pilot_accounts=(self.pilot_account,),
+            central_sync_outbox=self.outbox, queue_pilot_accounts_service=self.accounts_service,
         )
 
         decision = await processor.process(
@@ -1409,9 +1420,11 @@ class ListenerQueuePilotAccountsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row.payload["orders"], [])
 
     async def test_sem_conta_piloto_configurada_nao_enfileira_nada(self) -> None:
+        # Conta existe mas o toggle nunca foi ligado -- list_queue_pilot_accounts
+        # nao devolve nada, mesmo com o servico configurado.
         processor = SignalProcessor(
             self.database, self.publisher, logger=NullLogger(),
-            central_sync_outbox=self.outbox, queue_pilot_accounts=(),
+            central_sync_outbox=self.outbox, queue_pilot_accounts_service=self.accounts_service,
         )
 
         await processor.process(IncomingMessage(source_chat_id="123456", source_message_id=1, text=BUY_VALID))
@@ -1422,11 +1435,12 @@ class ListenerQueuePilotAccountsTests(unittest.IsolatedAsyncioTestCase):
         second_user_id, second_account_id = seed_customer_and_account(
             self.database_path, telegram_user_id=555099, login="1199887766"
         )
-        second_pilot_account = make_mt5_account(second_account_id, second_user_id, login="1199887766")
+        self._enable_pilot(self.user_id, self.account_id)
+        self._enable_pilot(second_user_id, second_account_id)
         processor = SignalProcessor(
             self.database, self.publisher, logger=NullLogger(),
             central_sync_outbox=self.outbox,
-            queue_pilot_accounts=(self.pilot_account, second_pilot_account),
+            queue_pilot_accounts_service=self.accounts_service,
         )
 
         await processor.process(IncomingMessage(source_chat_id="123456", source_message_id=1, text=BUY_VALID))
@@ -1441,9 +1455,10 @@ class ListenerQueuePilotAccountsTests(unittest.IsolatedAsyncioTestCase):
             def enqueue_execution_job_pilot_pending(self, *args, **kwargs) -> None:
                 raise RuntimeError("supabase indisponivel (simulado)")
 
+        self._enable_pilot(self.user_id, self.account_id)
         processor = SignalProcessor(
             self.database, self.publisher, logger=NullLogger(),
-            central_sync_outbox=RaisingPilotOutbox(), queue_pilot_accounts=(self.pilot_account,),
+            central_sync_outbox=RaisingPilotOutbox(), queue_pilot_accounts_service=self.accounts_service,
         )
 
         decision = await processor.process(
@@ -1451,6 +1466,32 @@ class ListenerQueuePilotAccountsTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(decision.status, DecisionStatus.ACCEPTED)
+
+    async def test_toggle_ligado_pelo_painel_afeta_o_mesmo_processor_sem_reiniciar(self) -> None:
+        # Mesma propriedade central testada em test_execution_agent.py, do
+        # lado do produtor: uma UNICA instancia de SignalProcessor (equivalente
+        # a um listener ja rodando) precisa reagir a um toggle feito pelo
+        # painel web sem ser reconstruida.
+        processor = SignalProcessor(
+            self.database, self.publisher, logger=NullLogger(),
+            central_sync_outbox=self.outbox, queue_pilot_accounts_service=self.accounts_service,
+        )
+
+        await processor.process(
+            IncomingMessage(source_chat_id="123456", source_message_id=1, text=BUY_VALID)
+        )
+        self.assertEqual(self._pilot_rows(), 0)
+
+        self._enable_pilot(self.user_id, self.account_id)
+        # Texto diferente (nao so source_message_id) pra nao colidir com o
+        # dedup por conteudo do claim_signal -- senao o segundo process()
+        # nem chegaria no bloco do piloto.
+        second_signal_text = "XAUUSD BUY\n\nENTRY 5105-03\n\nSL 5090\nTP 5110\nTP 5115\n"
+        await processor.process(
+            IncomingMessage(source_chat_id="123456", source_message_id=2, text=second_signal_text)
+        )
+
+        self.assertEqual(self._pilot_rows(), 1)
 
 
 class ReportGroupCreatedToCentralSyncTests(unittest.TestCase):

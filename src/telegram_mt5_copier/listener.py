@@ -55,7 +55,7 @@ class SignalProcessor:
         execution_notifier: Callable[[PendingExecutionResult], Awaitable[None]] | None = None,
         publication_scope: str | None = None,
         central_sync_outbox: CentralSyncOutbox | None = None,
-        queue_pilot_accounts: tuple[MT5Account, ...] = (),
+        queue_pilot_accounts_service: MT5AccountService | None = None,
     ) -> None:
         self.database = database
         self.publisher = publisher
@@ -64,12 +64,13 @@ class SignalProcessor:
         self.execution_notifier = execution_notifier
         self.publication_scope = publication_scope
         self.central_sync_outbox = central_sync_outbox
-        # Etapa 5d: conta(s) demo dedicada(s), isolada(s) do caminho de
+        # Passo 6: conta(s) piloto da fila central, isolada(s) do caminho de
         # execucao local (execution_profiles.enabled=0 pra elas) -- toda
         # sinal aceito tambem vira um job pending de verdade na fila central
-        # pra cada uma, sem passar pelo pending_order_executor. Vazio por
-        # padrao (nada muda sem configurar QUEUE_PILOT_ACCOUNT_IDS).
-        self.queue_pilot_accounts = queue_pilot_accounts
+        # pra cada uma, sem passar pelo pending_order_executor. Lida do banco
+        # a cada sinal (queue_pilot_enabled, gerenciavel pelo painel web sem
+        # reiniciar o listener) -- None (padrao) desliga o recurso inteiro.
+        self.queue_pilot_accounts_service = queue_pilot_accounts_service
         self._closed = False
 
     def close(self) -> None:
@@ -196,12 +197,22 @@ class SignalProcessor:
                         )
                     except Exception:
                         self.logger.exception("central_sync_outbox_execution_enqueue_failed")
-        if self.central_sync_outbox is not None and self.queue_pilot_accounts:
-            # Etapa 5d: independente do pending_order_executor (a conta
+        if self.central_sync_outbox is not None and self.queue_pilot_accounts_service is not None:
+            # Passo 6: independente do pending_order_executor (a conta
             # piloto nunca passa por ele -- execution_profiles.enabled=0
             # pra ela, por design) -- todo sinal aceito tambem vira um job
-            # pending de verdade na fila central, pra cada conta piloto.
-            for pilot_account in self.queue_pilot_accounts:
+            # pending de verdade na fila central, pra cada conta piloto
+            # inscrita no canal deste sinal. Lido fresco do banco a cada
+            # sinal (queue_pilot_enabled), sem cache -- reflete um toggle
+            # feito pelo painel web sem precisar reiniciar o listener.
+            try:
+                pilot_accounts = self.queue_pilot_accounts_service.list_queue_pilot_accounts(
+                    signal.source_chat_id
+                )
+            except Exception:
+                pilot_accounts = ()
+                self.logger.exception("queue_pilot_accounts_lookup_failed")
+            for pilot_account in pilot_accounts:
                 try:
                     self.central_sync_outbox.enqueue_execution_job_pilot_pending(
                         signal, pilot_account, local_signal_id
@@ -332,22 +343,16 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
                 logger,
             )
 
-    # Etapa 5d: resolve as contas demo piloteadas pela fila central (se
-    # configuradas) -- so leitura, nao precisa de credential_service (essas
-    # contas nunca sao inicializadas por aqui, so referenciadas no payload).
-    queue_pilot_accounts: tuple[MT5Account, ...] = ()
-    if config.queue_pilot_account_ids:
-        pilot_account_service = mt5_accounts if pending_order_executor is not None else MT5AccountService(
-            config.database_path
+    # Passo 6: servico de leitura das contas piloto da fila central --
+    # so leitura, nao precisa de credential_service (essas contas nunca
+    # sao inicializadas por aqui, so referenciadas no payload). Reaproveita
+    # o MT5AccountService ja construido acima quando existe, pra nao abrir
+    # uma segunda instancia a toa.
+    queue_pilot_accounts_service: MT5AccountService | None = None
+    if central_sync_outbox is not None:
+        queue_pilot_accounts_service = (
+            mt5_accounts if pending_order_executor is not None else MT5AccountService(config.database_path)
         )
-        resolved_pilot_accounts = []
-        for pilot_account_id in config.queue_pilot_account_ids:
-            pilot_account = pilot_account_service.get_account_by_id(pilot_account_id)
-            if pilot_account is None:
-                logger.warning("queue_pilot_account_nao_encontrada id=%s", pilot_account_id)
-                continue
-            resolved_pilot_accounts.append(pilot_account)
-        queue_pilot_accounts = tuple(resolved_pilot_accounts)
 
     processor = SignalProcessor(
         database,
@@ -357,7 +362,7 @@ async def run_telegram_listener(config: AppConfig, logger: logging.Logger) -> in
         execution_notifier=execution_notifier,
         publication_scope=config.destination_chat_id,
         central_sync_outbox=central_sync_outbox,
-        queue_pilot_accounts=queue_pilot_accounts,
+        queue_pilot_accounts_service=queue_pilot_accounts_service,
     )
 
     client = TelegramClient(

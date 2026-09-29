@@ -296,16 +296,6 @@ class RealExecutionBackend:
         credential_service = CredentialService(config.mt5_credential_key) if config.mt5_credential_key else None
         if credential_service is None:
             raise ExecutionBackendError("MT5_CREDENTIAL_KEY obrigatoria para EXECUTION_AGENT_MODE=demo_execution.")
-        # Trava de seguranca essencial: portal.execution_jobs recebe jobs de
-        # DUAS origens bem diferentes -- espelhos informativos de execucoes
-        # LOCAIS reais (Etapa 2/5a, para QUALQUER conta demo/live, nunca so
-        # a piloto) e jobs de verdade da conta piloto (Etapa 5d). claim_execution_jobs
-        # nao distingue as duas coisas (nao ha esse conceito no schema remoto)
-        # -- sem esta checagem, o agente poderia reivindicar e reexecutar de
-        # verdade o job espelho de um cliente real que ja esta executando
-        # localmente, causando ordem duplicada. So contas explicitamente
-        # listadas aqui podem ser executadas de verdade por este backend.
-        self.pilot_account_ids = frozenset(config.queue_pilot_account_ids)
         self.accounts = MT5AccountService(
             config.database_path,
             credential_service=credential_service,
@@ -343,14 +333,19 @@ class RealExecutionBackend:
         except (KeyError, ValueError, TypeError) as exc:
             raise ExecutionBackendError(f"payload invalido: {exc}") from exc
 
-        if account_id not in self.pilot_account_ids:
-            # Job reivindicado que nao pertence a uma conta piloto configurada
-            # -- nunca executa. Provavelmente um espelho informativo de uma
-            # execucao local real (Etapa 2/5a) que o claim pegou por nao haver
-            # como o RPC remoto distinguir as duas origens. Falha explicita em
-            # vez de silenciosa, pra aparecer no log/monitoramento.
+        # Trava de seguranca essencial: portal.execution_jobs recebe jobs de
+        # DUAS origens bem diferentes -- espelhos informativos de execucoes
+        # LOCAIS reais (Etapa 2/5a, para QUALQUER conta demo/live, nunca so
+        # a piloto) e jobs de verdade da conta piloto (Passo 6). claim_execution_jobs
+        # nao distingue as duas coisas (nao ha esse conceito no schema remoto)
+        # -- sem esta checagem, o agente poderia reivindicar e reexecutar de
+        # verdade o job espelho de um cliente real que ja esta executando
+        # localmente, causando ordem duplicada. Leitura fresca no banco a
+        # cada chamada (nao cacheada) -- reflete um toggle feito pelo painel
+        # web sem precisar reiniciar este processo.
+        if not self.accounts.is_queue_pilot_enabled(account_id):
             raise ExecutionBackendError(
-                f"conta {account_id} nao esta em QUEUE_PILOT_ACCOUNT_IDS -- job recusado, nunca executado"
+                f"conta {account_id} nao esta habilitada como piloto da fila central -- job recusado, nunca executado"
             )
 
         account = self.accounts.get_account(user_id, account_id)

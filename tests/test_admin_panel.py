@@ -279,6 +279,75 @@ class AdminPanelTests(unittest.TestCase):
                 account_id=account_id,
             )
 
+    def test_master_liga_conta_como_piloto_da_fila_central(self) -> None:
+        account_id = self._insert_account_with_profile(self.bob.id, "778899")
+        accounts = MT5AccountService(self.database_path)
+        service = AdminPanelService(
+            self.database_path, bot_token=self.token, admin_ids=(9001,), mt5_accounts=accounts,
+        )
+
+        result = service.set_queue_pilot_enabled(
+            actor_telegram_user_id=9001, target_user_id=self.bob.id, account_id=account_id, enabled=True,
+        )
+
+        self.assertEqual(result["queue_pilot_enabled"], True)
+        self.assertTrue(accounts.is_queue_pilot_enabled(account_id))
+        with connect_database(self.database_path) as connection:
+            action = connection.execute(
+                "SELECT action_type, target_user_id FROM admin_actions "
+                "WHERE action_type = 'admin_panel_queue_pilot_toggle'"
+            ).fetchone()
+        self.assertEqual(tuple(action), ("admin_panel_queue_pilot_toggle", self.bob.id))
+
+    def test_admin_comum_nao_pode_alterar_fila_central(self) -> None:
+        account_id = self._insert_account_with_profile(self.bob.id, "778899")
+        accounts = MT5AccountService(self.database_path)
+        service = AdminPanelService(
+            self.database_path, bot_token=self.token, admin_ids=(9001,), mt5_accounts=accounts,
+        )
+        service.add_admin(
+            actor_telegram_user_id=9001, target_telegram_user_id=303, role="regular",
+        )
+
+        with self.assertRaisesRegex(ValueError, "master"):
+            service.set_queue_pilot_enabled(
+                actor_telegram_user_id=303, target_user_id=self.bob.id, account_id=account_id, enabled=True,
+            )
+        self.assertFalse(accounts.is_queue_pilot_enabled(account_id))
+
+    def test_toggle_recusado_para_conta_de_outro_cliente(self) -> None:
+        account_id = self._insert_account_with_profile(self.bob.id, "778899")
+        accounts = MT5AccountService(self.database_path)
+        service = AdminPanelService(
+            self.database_path, bot_token=self.token, admin_ids=(9001,), mt5_accounts=accounts,
+        )
+
+        with self.assertRaises(ValueError):
+            service.set_queue_pilot_enabled(
+                actor_telegram_user_id=9001, target_user_id=self.alice.id, account_id=account_id, enabled=True,
+            )
+
+    def test_toggle_sem_mt5_accounts_configurado_falha(self) -> None:
+        account_id = self._insert_account_with_profile(self.bob.id, "778899")
+        with self.assertRaises(ValueError):
+            self.service.set_queue_pilot_enabled(
+                actor_telegram_user_id=9001, target_user_id=self.bob.id, account_id=account_id, enabled=True,
+            )
+
+    def test_dashboard_inclui_queue_pilot_enabled_por_conta_e_contador(self) -> None:
+        account_id = self._insert_account_with_profile(self.bob.id, "778899")
+        accounts = MT5AccountService(self.database_path)
+        service = AdminPanelService(
+            self.database_path, bot_token=self.token, admin_ids=(9001,), mt5_accounts=accounts,
+        )
+        accounts.set_queue_pilot_enabled(account_id, True)
+
+        payload = service.dashboard()
+
+        self.assertEqual(payload["summary"]["queue_pilot_enabled_count"], 1)
+        bob_accounts = next(u for u in payload["users"] if u["id"] == self.bob.id)["accounts"]
+        self.assertTrue(bob_accounts[0]["queue_pilot_enabled"])
+
     def test_status_invalido_e_rejeitado(self) -> None:
         with self.assertRaises(ValueError):
             self.service.set_user_status(

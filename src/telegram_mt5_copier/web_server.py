@@ -235,6 +235,9 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             if path == "/api/admin/admin-revoke":
                 self.handle_admin_revoke_admin(fields)
                 return
+            if path == "/api/admin/mt5-account-queue-pilot-status":
+                self.handle_admin_mt5_account_queue_pilot_status(fields)
+                return
             if path == "/api/v1/auth/browser-login":
                 self.handle_client_browser_login(fields)
                 return
@@ -809,6 +812,31 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         )
         self.send_json({"ok": True, "result": result})
 
+    def handle_admin_mt5_account_queue_pilot_status(self, fields: dict[str, str]) -> None:
+        identity = self.authenticate_admin_mutation(fields)
+        if identity.role != "master":
+            raise ValueError("Apenas administradores master podem alterar a fila central.")
+        try:
+            target_user_id = int(fields.get("user_id", ""))
+            account_id = int(fields.get("account_id", ""))
+        except ValueError as exc:
+            raise ValueError("Cliente ou conta inválidos.") from exc
+        enabled = fields.get("enabled") == "1"
+        result = self.admin_panel.set_queue_pilot_enabled(
+            actor_telegram_user_id=identity.telegram_user_id,
+            target_user_id=target_user_id,
+            account_id=account_id,
+            enabled=enabled,
+        )
+        safe_log(
+            "admin_queue_pilot_status_changed",
+            admin_id=str(identity.telegram_user_id),
+            target_id=str(target_user_id),
+            account_id=str(account_id),
+            enabled=str(enabled).lower(),
+        )
+        self.send_json({"ok": True, "result": result})
+
     def handle_admin_billing_update(self, fields: dict[str, str]) -> None:
         identity = self.authenticate_admin_mutation(fields)
         target_user_id = parsed_user_id(fields)
@@ -1226,6 +1254,7 @@ def safe_endpoint(value: str) -> str:
         "/api/admin/channel-status",
         "/api/admin/admin-add",
         "/api/admin/admin-revoke",
+        "/api/admin/mt5-account-queue-pilot-status",
     }
     return value if value in allowed else ""
 

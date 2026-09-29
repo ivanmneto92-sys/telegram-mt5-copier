@@ -208,6 +208,9 @@ class AdminPanelService:
                 WHERE status IN ('pending_submission', 'pending_active')
                 """
             ).fetchone()[0]
+            queue_pilot_enabled_count = connection.execute(
+                "SELECT COUNT(*) FROM mt5_accounts WHERE queue_pilot_enabled = 1"
+            ).fetchone()[0]
             rows = connection.execute(
                 """
                 SELECT
@@ -260,7 +263,8 @@ class AdminPanelService:
                         WHERE g.mt5_account_id = a.id
                           AND g.status IN ('pending_submission', 'pending_active')
                     ),
-                    (SELECT MAX(g.created_at) FROM execution_groups g WHERE g.mt5_account_id = a.id)
+                    (SELECT MAX(g.created_at) FROM execution_groups g WHERE g.mt5_account_id = a.id),
+                    a.queue_pilot_enabled
                 FROM mt5_accounts a
                 LEFT JOIN execution_profiles p
                     ON p.user_id = a.user_id AND p.mt5_account_id = a.id
@@ -358,6 +362,7 @@ class AdminPanelService:
                 "monthly_total": decimal_text(billing_summary["monthly_total"]),
                 "active_channels": active_channels,
                 "pending_channel_requests": pending_channel_requests,
+                "queue_pilot_enabled_count": int(queue_pilot_enabled_count or 0),
             },
             "users": users,
             "channel_catalog": channel_catalog,
@@ -548,6 +553,45 @@ class AdminPanelService:
         finally:
             users.close()
         return {"user_id": target_user_id, "removed_account_id": account_id}
+
+    def set_queue_pilot_enabled(
+        self,
+        *,
+        actor_telegram_user_id: int,
+        target_user_id: int,
+        account_id: int,
+        enabled: bool,
+    ) -> dict[str, object]:
+        """Passo 6: liga/desliga uma conta MT5 como piloto da fila central,
+        substituindo QUEUE_PILOT_ACCOUNT_IDS (variavel de ambiente estatica)
+        por um toggle gerenciavel pelo painel, sem reiniciar a VPS. Master-only:
+        essa checagem controla se dinheiro real pode passar pela fila."""
+        if self.mt5_accounts is None:
+            raise ValueError("Gestão de contas MT5 não está disponível nesta instância.")
+        actor_role = resolve_admin_role(self.database_path, self.admin_ids, actor_telegram_user_id)
+        if actor_role != ADMIN_ROLE_MASTER:
+            raise ValueError("Apenas administradores master podem alterar a fila central.")
+        self._require_user(target_user_id)
+        with connect_database(self.database_path) as connection:
+            row = connection.execute(
+                "SELECT account_type, server_name FROM mt5_accounts WHERE id = ? AND user_id = ?",
+                (account_id, target_user_id),
+            ).fetchone()
+        if row is None:
+            raise ValueError("Conta MT5 não encontrada para este cliente.")
+        self.mt5_accounts.set_queue_pilot_enabled(account_id, enabled)
+        self._log_admin_action(
+            actor_telegram_user_id,
+            target_user_id,
+            "admin_panel_queue_pilot_toggle",
+            {
+                "account_id": account_id,
+                "enabled": enabled,
+                "account_type": str(row[0]),
+                "server_name": str(row[1]),
+            },
+        )
+        return {"user_id": target_user_id, "account_id": account_id, "queue_pilot_enabled": enabled}
 
     def approve_paid_access(
         self,
@@ -817,6 +861,7 @@ def admin_account_payload(row: tuple[object, ...]) -> dict[str, object]:
         "execution_count": int(row[17] or 0),
         "active_group_count": int(row[18] or 0),
         "last_execution_at": str(row[19]) if row[19] else None,
+        "queue_pilot_enabled": bool(row[20]),
     }
 
 

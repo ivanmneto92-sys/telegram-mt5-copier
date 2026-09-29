@@ -1059,6 +1059,10 @@ def run_schema_migrations(connection: sqlite3.Connection) -> None:
     )
     cursor.close()
     ensure_column(connection, "mt5_accounts", "worker_heartbeat_at", "TEXT")
+    # Passo 6: substitui QUEUE_PILOT_ACCOUNT_IDS (variavel de ambiente estatica)
+    # por um toggle por conta, gravado no banco -- gerenciavel pelo painel web
+    # sem reiniciar a VPS. 0 por padrao, nada muda pra quem nunca usou isto.
+    ensure_column(connection, "mt5_accounts", "queue_pilot_enabled", "INTEGER NOT NULL DEFAULT 0")
     ensure_column(
         connection,
         "execution_profiles",

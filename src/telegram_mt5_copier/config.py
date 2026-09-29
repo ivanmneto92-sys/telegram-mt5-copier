@@ -124,7 +124,6 @@ class AppConfig:
     execution_agent_poll_seconds: int
     execution_agent_claim_limit: int
     execution_agent_lease_seconds: int
-    queue_pilot_account_ids: tuple[int, ...]
     backup_encryption_key: str | None = field(repr=False)
     backup_retention_days: int
     b2_key_id: str | None = field(repr=False)
@@ -321,10 +320,6 @@ class AppConfig:
             execution_agent_lease_seconds=parse_positive_int(
                 _value("EXECUTION_AGENT_LEASE_SECONDS", file_values, runtime_env, "60"),
                 "EXECUTION_AGENT_LEASE_SECONDS",
-            ),
-            queue_pilot_account_ids=parse_int_id_list(
-                _optional_value("QUEUE_PILOT_ACCOUNT_IDS", file_values, runtime_env),
-                "QUEUE_PILOT_ACCOUNT_IDS",
             ),
             backup_encryption_key=_optional_value(
                 "BACKUP_ENCRYPTION_KEY", file_values, runtime_env
