@@ -277,11 +277,23 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             if path == "/api/v1/accounts/remove":
                 self.handle_client_account_remove(fields)
                 return
+            if path == "/api/v1/accounts/test-connection":
+                self.handle_client_account_test_connection(fields)
+                return
             if path == "/api/v1/channels/toggle":
                 self.handle_client_channel_toggle(fields)
                 return
+            if path == "/api/v1/channels/mode":
+                self.handle_client_channel_mode_update(fields)
+                return
+            if path == "/api/v1/channels/suggest":
+                self.handle_client_channel_suggest(fields)
+                return
             if path == "/api/v1/copier/pause-toggle":
                 self.handle_client_copier_pause_toggle()
+                return
+            if path == "/api/v1/copier/daily-stop-toggle":
+                self.handle_client_daily_stop_toggle()
                 return
             if path == "/api/v1/settings":
                 self.handle_client_settings_update(fields)
@@ -626,6 +638,22 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             self.send_mt5_account_removed_notification_best_effort(user_id, account)
         self.send_json({"ok": True})
 
+    def handle_client_account_test_connection(self, fields: dict[str, str]) -> None:
+        user_id = self.authenticate_client()
+        account_id = parse_account_id(fields.get("account_id"))
+        if account_id is None:
+            raise InvalidAccountIdError("Identificador de conta invalido.")
+        try:
+            result = self.client_portal.test_mt5_connection(user_id, account_id)
+        except AccountNotFoundError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=404)
+            return
+        except ValueError as exc:
+            self.send_json({"ok": False, "error": str(exc)}, status=400)
+            return
+        safe_log("client_mt5_connection_tested", user_id=str(user_id), account_id=str(account_id))
+        self.send_json({"ok": True, **result})
+
     def handle_client_channel_toggle(self, fields: dict[str, str]) -> None:
         user_id = self.authenticate_client()
         try:
@@ -641,21 +669,57 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         )
         self.send_json({"ok": True, **payload})
 
+    def handle_client_channel_mode_update(self, fields: dict[str, str]) -> None:
+        user_id = self.authenticate_client()
+        mode = fields.get("mode", "")
+        payload = self.client_portal.set_channel_mode(user_id, mode)
+        safe_log("client_channel_mode_updated", user_id=str(user_id), mode=mode)
+        self.send_json({"ok": True, **payload})
+
+    def handle_client_channel_suggest(self, fields: dict[str, str]) -> None:
+        user_id = self.authenticate_client()
+        link = fields.get("link", "")
+        payload = self.client_portal.suggest_channel(user_id, link)
+        safe_log("client_channel_suggested", user_id=str(user_id))
+        self.send_json({"ok": True, **payload})
+
     def handle_client_copier_pause_toggle(self) -> None:
         user_id = self.authenticate_client()
         payload = self.client_portal.toggle_copier_pause(user_id)
         safe_log("client_copier_status_toggled", user_id=str(user_id), status=str(payload["status"]))
         self.send_json({"ok": True, **payload})
 
+    def handle_client_daily_stop_toggle(self) -> None:
+        user_id = self.authenticate_client()
+        payload = self.client_portal.toggle_daily_stop(user_id)
+        safe_log(
+            "client_daily_stop_toggled",
+            user_id=str(user_id),
+            active=str(payload["daily_signal_pause_active"]).lower(),
+        )
+        self.send_json({"ok": True, **payload})
+
     def handle_client_settings_update(self, fields: dict[str, str]) -> None:
         user_id = self.authenticate_client()
-        avoid_high_impact_news = fields.get("avoid_high_impact_news") == "1"
-        payload = self.client_portal.set_news_preference(user_id, avoid_high_impact_news)
-        safe_log(
-            "client_news_preference_updated",
-            user_id=str(user_id),
-            avoid_high_impact_news=str(avoid_high_impact_news).lower(),
-        )
+        payload: dict[str, object] = {}
+        if "avoid_high_impact_news" in fields:
+            avoid_high_impact_news = fields.get("avoid_high_impact_news") == "1"
+            payload = self.client_portal.set_news_preference(user_id, avoid_high_impact_news)
+            safe_log(
+                "client_news_preference_updated",
+                user_id=str(user_id),
+                avoid_high_impact_news=str(avoid_high_impact_news).lower(),
+            )
+        if "result_alerts_enabled" in fields:
+            result_alerts_enabled = fields.get("result_alerts_enabled") == "1"
+            payload = self.client_portal.set_result_alerts(user_id, result_alerts_enabled)
+            safe_log(
+                "client_result_alerts_updated",
+                user_id=str(user_id),
+                result_alerts_enabled=str(result_alerts_enabled).lower(),
+            )
+        if not payload:
+            raise ValueError("Nenhuma preferencia informada.")
         self.send_json({"ok": True, **payload})
 
     def handle_admin_browser_login(self, fields: dict[str, str]) -> None:

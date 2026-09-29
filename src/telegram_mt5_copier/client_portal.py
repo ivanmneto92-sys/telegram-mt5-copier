@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Mapping
 
+from .access_control import paid_access_decision
 from .channel_catalog import ChannelCatalogService
+from .daily_schedule import next_daily_signal_resume_at
 from .client_auth import normalize_email, validate_customer_name, validate_phone
 from .database import connect_database, initialize_database, utc_now
 from .mt5.account_service import MT5AccountForm, MT5AccountService
 from .mt5.pending_order_executor import rejection_reason_label
+from .mt5.settlement_monitor import get_result_mode, set_result_mode
 from .settings_service import SettingsService
 from .users import USER_STATUS_ACTIVE, USER_STATUS_PAUSED, UserRepository
 from .web_app import WebAppValidationError, validate_broker_name, validate_server_name
@@ -122,6 +126,21 @@ class ClientPortalService:
         removed = self._account(row)
         self.mt5_accounts.remove_account(user_id, account_id)
         return {"account": removed}
+
+    def test_mt5_connection(self, user_id: int, account_id: int) -> dict[str, object]:
+        """Testa a conexao com o terminal MT5 sob demanda, reaproveitando
+        MT5AccountService.test_connection -- o mesmo usado pelo bot no botao
+        "Testar conexao". Checa posse primeiro (levanta AccountNotFoundError,
+        mesmo padrao de remove_account) -- MT5AccountService.get_account
+        levantaria so um ValueError generico, que nao deve vazar como 404."""
+        if self.mt5_accounts is None:
+            raise ValueError("Teste de conexão MT5 indisponível nesta instância.")
+        with connect_database(self.database_path) as db:
+            self._select_account(db, user_id, account_id)  # levanta AccountNotFoundError
+        updated = self.mt5_accounts.test_connection(user_id, account_id, startup_retry=True)
+        with connect_database(self.database_path) as db:
+            row = self._select_account(db, user_id, updated.id)
+        return {"account": self._account(row)}
 
     @staticmethod
     def _select_account(db: object, user_id: int, account_id: int | None) -> object | None:
@@ -252,6 +271,24 @@ class ClientPortalService:
         enabled = self.channels_catalog.toggle_subscription(user_id, channel_id)
         return {"channel_id": channel_id, "enabled": enabled}
 
+    def set_channel_mode(self, user_id: int, mode: str) -> dict[str, object]:
+        """Muda entre "seguir todos os canais aprovados" e "escolher manualmente",
+        reaproveitando ChannelCatalogService.set_selection_mode -- o mesmo
+        usado pelo bot no menu de canais."""
+        self.channels_catalog.set_selection_mode(user_id, mode)
+        return self.channels(user_id)
+
+    def suggest_channel(self, user_id: int, raw_link: str) -> dict[str, object]:
+        """Sugere um canal novo pro catalogo, reaproveitando
+        ChannelCatalogService.submit_request -- a mesma logica do bot no
+        fluxo "Sugerir canal" (link publico/privado/@username)."""
+        result = self.channels_catalog.submit_request(user_id, raw_link)
+        return {
+            "status": result.status,
+            "canonical_link": result.canonical_link,
+            "title": result.title,
+        }
+
     def toggle_copier_pause(self, user_id: int) -> dict[str, object]:
         """Pausa/reativa o copiador pro cliente autenticado.
 
@@ -270,6 +307,51 @@ class ClientPortalService:
         updated = self.users.set_status(user_id, next_status)
         return {"status": updated.status}
 
+    def daily_stop_status(self, user_id: int) -> dict[str, object]:
+        user = self.users.get_by_id(user_id)
+        return self._daily_stop_payload(user.daily_signal_pause_until)
+
+    def stop_signals_today(self, user_id: int) -> dict[str, object]:
+        """Para novas entradas so ate a retomada automatica (23h/dia util),
+        reaproveitando UserRepository.set_daily_signal_pause_until e
+        next_daily_signal_resume_at -- os mesmos usados pelo bot no menu
+        "Parar sinais hoje". Operacoes/ordens ja existentes nao sao afetadas.
+        """
+        user = self.users.get_by_id(user_id)
+        if user.status != USER_STATUS_ACTIVE or not paid_access_decision(
+            self.database_path, user_id
+        ).allowed:
+            raise ValueError("Não há novas entradas liberadas para interromper neste momento.")
+        resume_at = next_daily_signal_resume_at()
+        updated = self.users.set_daily_signal_pause_until(user_id, resume_at.isoformat())
+        return self._daily_stop_payload(updated.daily_signal_pause_until)
+
+    def resume_signals_today(self, user_id: int) -> dict[str, object]:
+        updated = self.users.set_daily_signal_pause_until(user_id, None)
+        return self._daily_stop_payload(updated.daily_signal_pause_until)
+
+    def toggle_daily_stop(self, user_id: int) -> dict[str, object]:
+        current = self.daily_stop_status(user_id)
+        if current["daily_signal_pause_active"]:
+            return self.resume_signals_today(user_id)
+        return self.stop_signals_today(user_id)
+
+    @staticmethod
+    def _daily_stop_payload(pause_until: str | None) -> dict[str, object]:
+        active = False
+        if pause_until:
+            try:
+                parsed = datetime.fromisoformat(pause_until)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                active = parsed.astimezone(timezone.utc) > datetime.now(tz=timezone.utc)
+            except ValueError:
+                active = False
+        return {
+            "daily_signal_pause_until": pause_until if active else None,
+            "daily_signal_pause_active": active,
+        }
+
     def news_preference(self, user_id: int) -> dict[str, object]:
         settings = self.settings.ensure_defaults(user_id)
         return {
@@ -277,6 +359,7 @@ class ClientPortalService:
             "market_news_available": self.market_news_enabled,
             "minutes_before": self.market_news_minutes_before,
             "minutes_after": self.market_news_minutes_after,
+            "result_alerts_enabled": get_result_mode(self.database_path, user_id) != "off",
         }
 
     def set_news_preference(self, user_id: int, avoid_high_impact_news: bool) -> dict[str, object]:
@@ -288,6 +371,12 @@ class ClientPortalService:
         aqui tem efeito imediato nos dois canais (bot e portal).
         """
         self.settings.update_avoid_high_impact_news(user_id, avoid_high_impact_news)
+        return self.news_preference(user_id)
+
+    def set_result_alerts(self, user_id: int, enabled: bool) -> dict[str, object]:
+        """Liga/desliga o aviso de operacao fechada -- reaproveita set_result_mode,
+        o mesmo usado pelo bot no menu "Alertas de resultados"."""
+        set_result_mode(self.database_path, user_id, "all" if enabled else "off")
         return self.news_preference(user_id)
 
     def operations(
@@ -459,7 +548,9 @@ class ClientPortalService:
                 """
                 SELECT enabled, risk_mode, fixed_lot, risk_percent, daily_profit_target,
                        daily_loss_limit, max_open_signals, split_tps, breakeven_enabled,
-                       trailing_enabled, take_profit_limit, tp1_breakeven_enabled, updated_at
+                       trailing_enabled, take_profit_limit, tp1_breakeven_enabled, updated_at,
+                       max_spread_points, max_slippage_points, entry_execution_mode,
+                       entry_price_mode, pending_expiration_minutes
                 FROM execution_profiles WHERE user_id = ? AND mt5_account_id = ?
                 """,
                 (user_id, int(account[0])),
@@ -485,6 +576,8 @@ class ClientPortalService:
             "risk_mode", "fixed_lot", "risk_percent", "daily_profit_target",
             "daily_loss_limit", "max_open_signals", "split_tps", "breakeven_enabled",
             "trailing_enabled", "take_profit_limit", "tp1_breakeven_enabled",
+            "max_spread_points", "max_slippage_points", "entry_execution_mode",
+            "entry_price_mode", "pending_expiration_minutes",
         }
         unknown = set(fields) - allowed
         if unknown:
@@ -513,11 +606,22 @@ class ClientPortalService:
             if raw not in {"fixed_lot", "risk_percent"}:
                 raise ValueError("Modo de risco invalido.")
             return raw
+        if field == "entry_execution_mode":
+            if raw not in {"pending_order", "market_on_zone", "market_immediate"}:
+                raise ValueError("Modo de entrada invalido.")
+            return raw
+        if field == "entry_price_mode":
+            if raw not in {"first_touch", "middle", "distributed"}:
+                raise ValueError("Preco da faixa invalido.")
+            return raw
         if field in {"split_tps", "breakeven_enabled", "trailing_enabled", "tp1_breakeven_enabled"}:
             if raw not in {"0", "1", "false", "true"}:
                 raise ValueError("Valor booleano invalido.")
             return int(raw in {"1", "true"})
-        if field in {"max_open_signals", "take_profit_limit"}:
+        if field in {
+            "max_open_signals", "take_profit_limit", "max_spread_points",
+            "max_slippage_points", "pending_expiration_minutes",
+        }:
             try:
                 value = int(raw)
             except ValueError as exc:
@@ -526,6 +630,10 @@ class ClientPortalService:
                 raise ValueError("Maximo de sinais deve ficar entre 1 e 100.")
             if field == "take_profit_limit" and not 0 <= value <= 10:
                 raise ValueError("Quantidade de Take Profits deve ficar entre 0 e 10.")
+            if field in {"max_spread_points", "max_slippage_points"} and not 0 <= value <= 100000:
+                raise ValueError("Limite deve ficar entre 0 e 100000 pontos.")
+            if field == "pending_expiration_minutes" and not 1 <= value <= 100000:
+                raise ValueError("Validade da ordem invalida.")
             return value
         try:
             value = Decimal(raw.replace(",", "."))
@@ -552,6 +660,9 @@ class ClientPortalService:
             "split_tps": bool(row[7]), "breakeven_enabled": bool(row[8]),
             "trailing_enabled": bool(row[9]), "take_profit_limit": int(row[10]),
             "tp1_breakeven_enabled": bool(row[11]), "updated_at": row[12],
+            "max_spread_points": int(row[13]), "max_slippage_points": int(row[14]),
+            "entry_execution_mode": row[15], "entry_price_mode": row[16],
+            "pending_expiration_minutes": int(row[17]),
         }
 
     @staticmethod
