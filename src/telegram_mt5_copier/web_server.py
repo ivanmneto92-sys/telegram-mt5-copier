@@ -31,6 +31,7 @@ from .users import UserRepository
 from .web_app import (
     CSRFTokenService,
     MT5OnboardingService,
+    SimpleRateLimiter,
     WebAppValidationError,
     render_miniapp_script,
     render_onboarding_form,
@@ -40,6 +41,13 @@ from .web_app import (
 
 class InvalidAccountIdError(ValueError):
     """account_id com formato invalido; vira HTTP 400 (nao 401)."""
+
+
+def client_csrf_identity(user_id: int) -> str:
+    """Namespace do token CSRF do cliente, separado do namespace do admin
+    (que usa o telegram_user_id puro) -- evita que um users.id pequeno
+    colida com um telegram_user_id de admin que tenha o mesmo valor."""
+    return f"client:{user_id}"
 
 
 def parse_account_id(raw: str | None) -> int | None:
@@ -57,6 +65,7 @@ class OnboardingHandler(BaseHTTPRequestHandler):
     client_browser_auth: ClientBrowserAuthService
     client_portal: ClientPortalService
     csrf: CSRFTokenService
+    password_reset_rate_limiter: SimpleRateLimiter = SimpleRateLimiter(limit=3, window_seconds=900)
     bot_token: str
     broker_options: tuple[str, ...] = ()
     broker_servers: dict[str, tuple[str, ...]] = {}
@@ -260,7 +269,7 @@ class OnboardingHandler(BaseHTTPRequestHandler):
                 self.handle_client_email_confirm(fields)
                 return
             if path == "/api/v1/auth/email/resend":
-                self.handle_client_email_resend()
+                self.handle_client_email_resend(fields)
                 return
             if path == "/api/v1/auth/logout":
                 self.handle_client_logout()
@@ -290,10 +299,10 @@ class OnboardingHandler(BaseHTTPRequestHandler):
                 self.handle_client_channel_suggest(fields)
                 return
             if path == "/api/v1/copier/pause-toggle":
-                self.handle_client_copier_pause_toggle()
+                self.handle_client_copier_pause_toggle(fields)
                 return
             if path == "/api/v1/copier/daily-stop-toggle":
-                self.handle_client_daily_stop_toggle()
+                self.handle_client_daily_stop_toggle(fields)
                 return
             if path == "/api/v1/settings":
                 self.handle_client_settings_update(fields)
@@ -367,6 +376,7 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             )
             if path in {"/api/v1/session", "/api/v1/dashboard"}:
                 payload = self.client_portal.dashboard(user_id, account_id)
+                payload["csrf_token"] = self.csrf.issue(client_csrf_identity(user_id))
             elif path == "/api/v1/accounts":
                 payload = self.client_portal.accounts(user_id)
             elif path == "/api/v1/brokers":
@@ -516,18 +526,29 @@ class OnboardingHandler(BaseHTTPRequestHandler):
     def handle_client_password_forgot(self, fields: dict[str, str]) -> None:
         email = fields.get("email", "")
         try:
-            if self.client_app_url:
-                reset_url = self.client_browser_auth.request_password_reset(
-                    email, urljoin(self.client_app_url, "redefinir-senha")
-                )
-                if reset_url is not None:
-                    subject, html = password_reset_email(
-                        brand_name=self.brand_name, reset_url=reset_url
+            rate_limit_key: str | None = normalize_email(email)
+        except ValueError:
+            rate_limit_key = None
+        # Limita por e-mail normalizado (nao por IP): o risco real e alguem
+        # martelar reenvios contra a caixa de entrada de UM cliente, nao um
+        # unico atacante testando varios enderecos. Um e-mail mal formado
+        # nunca gera envio de qualquer forma, entao pula o limitador pra ele.
+        if rate_limit_key is None or self.password_reset_rate_limiter.allow(rate_limit_key):
+            try:
+                if self.client_app_url:
+                    reset_url = self.client_browser_auth.request_password_reset(
+                        email, urljoin(self.client_app_url, "redefinir-senha")
                     )
-                    self.email_service.send(to=normalize_email(email), subject=subject, html=html)
-        except (ValueError, EmailSendError) as exc:
-            # Nunca revela ao chamador se o e-mail existe ou se o envio falhou.
-            safe_log("password_reset_send_failed", reason=safe_reason(str(exc)))
+                    if reset_url is not None:
+                        subject, html = password_reset_email(
+                            brand_name=self.brand_name, reset_url=reset_url
+                        )
+                        self.email_service.send(to=normalize_email(email), subject=subject, html=html)
+            except (ValueError, EmailSendError) as exc:
+                # Nunca revela ao chamador se o e-mail existe ou se o envio falhou.
+                safe_log("password_reset_send_failed", reason=safe_reason(str(exc)))
+        else:
+            safe_log("password_reset_rate_limited")
         safe_log("password_reset_requested")
         self.send_json({"ok": True})
 
@@ -544,14 +565,14 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         safe_log("email_confirmed")
         self.send_json({"ok": True})
 
-    def handle_client_email_resend(self) -> None:
-        user_id = self.authenticate_client()
+    def handle_client_email_resend(self, fields: dict[str, str]) -> None:
+        user_id = self.authenticate_client_mutation(fields)
         self.send_email_confirmation_best_effort(user_id)
         safe_log("email_confirmation_resent", user_id=str(user_id))
         self.send_json({"ok": True})
 
     def handle_client_password_setup(self, fields: dict[str, str]) -> None:
-        user_id = self.authenticate_client()
+        user_id = self.authenticate_client_mutation(fields)
         self.client_browser_auth.set_password_for_user(
             user_id,
             email=fields.get("email", ""),
@@ -563,6 +584,7 @@ class OnboardingHandler(BaseHTTPRequestHandler):
 
     def send_client_session(self, user_id: int, session_token: str) -> None:
         payload = self.client_portal.dashboard(user_id)
+        payload["csrf_token"] = self.csrf.issue(client_csrf_identity(user_id))
         self.send_json(
             {"ok": True, **payload},
             extra_headers=(("Set-Cookie", client_session_cookie(session_token)),),
@@ -578,7 +600,7 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         )
 
     def handle_client_profile_update(self, fields: dict[str, str]) -> None:
-        user_id = self.authenticate_client()
+        user_id = self.authenticate_client_mutation(fields)
         old_email = str(self.client_portal.profile(user_id)["profile"]["email"] or "")
         payload = self.client_portal.update_profile(
             user_id,
@@ -594,8 +616,9 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         self.send_json({"ok": True, **payload})
 
     def handle_client_risk_update(self, fields: dict[str, str]) -> None:
-        user_id = self.authenticate_client()
+        user_id = self.authenticate_client_mutation(fields)
         risk_fields = dict(fields)
+        risk_fields.pop("csrf_token", None)
         account_id = parse_account_id(risk_fields.pop("account_id", None))
         try:
             payload = self.client_portal.update_risk(user_id, risk_fields, account_id)
@@ -606,7 +629,7 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         self.send_json({"ok": True, **payload})
 
     def handle_client_account_create(self, fields: dict[str, str]) -> None:
-        user_id = self.authenticate_client()
+        user_id = self.authenticate_client_mutation(fields)
         payload = self.client_portal.add_account(
             user_id,
             broker_name=fields.get("broker_name", ""),
@@ -623,7 +646,7 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         self.send_json({"ok": True, **payload})
 
     def handle_client_account_remove(self, fields: dict[str, str]) -> None:
-        user_id = self.authenticate_client()
+        user_id = self.authenticate_client_mutation(fields)
         account_id = parse_account_id(fields.get("account_id"))
         if account_id is None:
             raise InvalidAccountIdError("Identificador de conta invalido.")
@@ -639,7 +662,7 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         self.send_json({"ok": True})
 
     def handle_client_account_test_connection(self, fields: dict[str, str]) -> None:
-        user_id = self.authenticate_client()
+        user_id = self.authenticate_client_mutation(fields)
         account_id = parse_account_id(fields.get("account_id"))
         if account_id is None:
             raise InvalidAccountIdError("Identificador de conta invalido.")
@@ -655,7 +678,7 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         self.send_json({"ok": True, **result})
 
     def handle_client_channel_toggle(self, fields: dict[str, str]) -> None:
-        user_id = self.authenticate_client()
+        user_id = self.authenticate_client_mutation(fields)
         try:
             channel_id = int(fields.get("channel_id", ""))
         except (TypeError, ValueError):
@@ -670,27 +693,27 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         self.send_json({"ok": True, **payload})
 
     def handle_client_channel_mode_update(self, fields: dict[str, str]) -> None:
-        user_id = self.authenticate_client()
+        user_id = self.authenticate_client_mutation(fields)
         mode = fields.get("mode", "")
         payload = self.client_portal.set_channel_mode(user_id, mode)
         safe_log("client_channel_mode_updated", user_id=str(user_id), mode=mode)
         self.send_json({"ok": True, **payload})
 
     def handle_client_channel_suggest(self, fields: dict[str, str]) -> None:
-        user_id = self.authenticate_client()
+        user_id = self.authenticate_client_mutation(fields)
         link = fields.get("link", "")
         payload = self.client_portal.suggest_channel(user_id, link)
         safe_log("client_channel_suggested", user_id=str(user_id))
         self.send_json({"ok": True, **payload})
 
-    def handle_client_copier_pause_toggle(self) -> None:
-        user_id = self.authenticate_client()
+    def handle_client_copier_pause_toggle(self, fields: dict[str, str]) -> None:
+        user_id = self.authenticate_client_mutation(fields)
         payload = self.client_portal.toggle_copier_pause(user_id)
         safe_log("client_copier_status_toggled", user_id=str(user_id), status=str(payload["status"]))
         self.send_json({"ok": True, **payload})
 
-    def handle_client_daily_stop_toggle(self) -> None:
-        user_id = self.authenticate_client()
+    def handle_client_daily_stop_toggle(self, fields: dict[str, str]) -> None:
+        user_id = self.authenticate_client_mutation(fields)
         payload = self.client_portal.toggle_daily_stop(user_id)
         safe_log(
             "client_daily_stop_toggled",
@@ -700,7 +723,7 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         self.send_json({"ok": True, **payload})
 
     def handle_client_settings_update(self, fields: dict[str, str]) -> None:
-        user_id = self.authenticate_client()
+        user_id = self.authenticate_client_mutation(fields)
         payload: dict[str, object] = {}
         if "avoid_high_impact_news" in fields:
             avoid_high_impact_news = fields.get("avoid_high_impact_news") == "1"
@@ -1058,6 +1081,12 @@ class OnboardingHandler(BaseHTTPRequestHandler):
     def authenticate_client(self) -> int:
         return self.client_browser_auth.authenticate_session(self.client_session_cookie())
 
+    def authenticate_client_mutation(self, fields: dict[str, str]) -> int:
+        user_id = self.authenticate_client()
+        if not self.csrf.validate(fields.get("csrf_token", ""), client_csrf_identity(user_id)):
+            raise WebAppValidationError("CSRF invalido.")
+        return user_id
+
     def client_session_cookie(self) -> str:
         cookie = SimpleCookie()
         try:
@@ -1204,6 +1233,7 @@ def main() -> int:
         OnboardingHandler.admin_browser_auth = admin_browser_auth
         OnboardingHandler.client_browser_auth = client_browser_auth
         OnboardingHandler.client_portal = client_portal
+        OnboardingHandler.password_reset_rate_limiter = SimpleRateLimiter(limit=3, window_seconds=900)
         OnboardingHandler.client_app_url = config.client_app_url
         if config.resend_api_key and config.resend_from_email:
             OnboardingHandler.email_service = ResendEmailService(

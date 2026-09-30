@@ -102,18 +102,21 @@ class CSRFTokenService:
         self.secret = secret
         self.ttl_seconds = ttl_seconds
 
-    def issue(self, telegram_user_id: int, now: int | None = None) -> str:
+    def issue(self, identity: int | str, now: int | None = None) -> str:
         timestamp = int(time.time()) if now is None else now
-        payload = f"{telegram_user_id}:{timestamp}"
+        payload = f"{identity}:{timestamp}"
         signature = hmac.new(self.secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
         return f"{payload}:{signature}"
 
-    def validate(self, token: str, telegram_user_id: int, now: int | None = None) -> bool:
-        parts = token.split(":")
+    def validate(self, token: str, identity: int | str, now: int | None = None) -> bool:
+        # rsplit, nao split: uma identidade em string (ex. "client:5") pode
+        # conter ":" -- so o timestamp e a assinatura, os dois ultimos campos,
+        # nunca contem ":".
+        parts = token.rsplit(":", 2)
         if len(parts) != 3:
             return False
-        raw_user_id, raw_timestamp, signature = parts
-        if raw_user_id != str(telegram_user_id):
+        raw_identity, raw_timestamp, signature = parts
+        if raw_identity != str(identity):
             return False
         try:
             timestamp = int(raw_timestamp)
@@ -124,27 +127,31 @@ class CSRFTokenService:
             return False
         expected = hmac.new(
             self.secret.encode("utf-8"),
-            f"{raw_user_id}:{timestamp}".encode("utf-8"),
+            f"{raw_identity}:{timestamp}".encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()
         return hmac.compare_digest(expected, signature)
 
 
 class SimpleRateLimiter:
+    """Limitador em memoria, por processo. A chave pode ser um telegram_user_id
+    (uso original, mini-app) ou qualquer outro identificador hasheavel, como um
+    e-mail normalizado (uso no "esqueci minha senha" do portal web)."""
+
     def __init__(self, limit: int = 5, window_seconds: int = 60) -> None:
         self.limit = limit
         self.window_seconds = window_seconds
-        self._events: dict[int, list[float]] = {}
+        self._events: dict[int | str, list[float]] = {}
 
-    def allow(self, telegram_user_id: int) -> bool:
+    def allow(self, key: int | str) -> bool:
         now = time.monotonic()
         window_start = now - self.window_seconds
-        events = [event for event in self._events.get(telegram_user_id, []) if event >= window_start]
+        events = [event for event in self._events.get(key, []) if event >= window_start]
         if len(events) >= self.limit:
-            self._events[telegram_user_id] = events
+            self._events[key] = events
             return False
         events.append(now)
-        self._events[telegram_user_id] = events
+        self._events[key] = events
         return True
 
 

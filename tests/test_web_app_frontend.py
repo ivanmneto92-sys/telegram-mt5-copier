@@ -18,6 +18,7 @@ from telegram_mt5_copier.web_app import (
     OUTSIDE_TELEGRAM_MESSAGE,
     VALIDATION_FAILED_MESSAGE,
     CSRFTokenService,
+    SimpleRateLimiter,
     build_signed_init_data,
     render_miniapp_script,
     render_onboarding_form,
@@ -620,6 +621,7 @@ class MiniAppFrontendTests(unittest.TestCase):
             )
             with urlopen(registration, timeout=5) as response:
                 cookie = response.headers.get("Set-Cookie", "").split(";", 1)[0]
+                csrf_token = str(json.loads(response.read().decode("utf-8"))["csrf_token"])
 
             profile_update = Request(
                 f"{base_url}/api/v1/profile",
@@ -628,6 +630,7 @@ class MiniAppFrontendTests(unittest.TestCase):
                         "customer_name": "Cliente Atualizado",
                         "email": "atualizado@example.com",
                         "phone": "11988887777",
+                        "csrf_token": csrf_token,
                     }
                 ).encode("utf-8"),
                 headers={
@@ -720,7 +723,9 @@ class MiniAppFrontendTests(unittest.TestCase):
             )
             with urlopen(registration, timeout=5) as response:
                 cookie = response.headers.get("Set-Cookie", "").split(";", 1)[0]
-                user_id = int(json.loads(response.read().decode("utf-8"))["user"]["id"])
+                registration_body = json.loads(response.read().decode("utf-8"))
+                user_id = int(registration_body["user"]["id"])
+                csrf_token = str(registration_body["csrf_token"])
 
             now = utc_now()
             with connect_database(server.database_path) as db:
@@ -743,12 +748,12 @@ class MiniAppFrontendTests(unittest.TestCase):
             status_negative, _ = get(f"{base_url}/api/v1/operations?account_id=-1", cookie)
             updated = post_expect_error_with_cookie(
                 f"{base_url}/api/v1/risk",
-                {"account_id": str(second), "max_open_signals": "7"},
+                {"account_id": str(second), "max_open_signals": "7", "csrf_token": csrf_token},
                 cookie,
             )
             updated_foreign = post_expect_error_with_cookie(
                 f"{base_url}/api/v1/risk",
-                {"account_id": str(foreign), "max_open_signals": "7"},
+                {"account_id": str(foreign), "max_open_signals": "7", "csrf_token": csrf_token},
                 cookie,
             )
             _, first_risk = get(f"{base_url}/api/v1/risk?account_id={first}", cookie)
@@ -796,6 +801,7 @@ class MiniAppFrontendTests(unittest.TestCase):
             )
             with urlopen(registration, timeout=5) as response:
                 cookie = response.headers.get("Set-Cookie", "").split(";", 1)[0]
+                csrf_token = str(json.loads(response.read().decode("utf-8"))["csrf_token"])
 
             now = utc_now()
             with connect_database(server.database_path) as db:
@@ -815,14 +821,20 @@ class MiniAppFrontendTests(unittest.TestCase):
                 f"{base_url}/api/v1/channels/toggle", {"channel_id": str(channel_id)}
             )["status"]
             enabled_result = post_expect_error_with_cookie(
-                f"{base_url}/api/v1/channels/toggle", {"channel_id": str(channel_id)}, cookie
+                f"{base_url}/api/v1/channels/toggle",
+                {"channel_id": str(channel_id), "csrf_token": csrf_token},
+                cookie,
             )
             _, after_enable = get(f"{base_url}/api/v1/channels", cookie)
             disabled_result = post_expect_error_with_cookie(
-                f"{base_url}/api/v1/channels/toggle", {"channel_id": str(channel_id)}, cookie
+                f"{base_url}/api/v1/channels/toggle",
+                {"channel_id": str(channel_id), "csrf_token": csrf_token},
+                cookie,
             )
             invalid_result = post_expect_error_with_cookie(
-                f"{base_url}/api/v1/channels/toggle", {"channel_id": "999999"}, cookie
+                f"{base_url}/api/v1/channels/toggle",
+                {"channel_id": "999999", "csrf_token": csrf_token},
+                cookie,
             )
 
         # Rotas POST de /api/v1 mapeiam ValueError (sessao ausente/invalida)
@@ -864,17 +876,20 @@ class MiniAppFrontendTests(unittest.TestCase):
                 cookie = response.headers.get("Set-Cookie", "").split(";", 1)[0]
 
             _, before_pause = get(f"{base_url}/api/v1/dashboard", cookie)
+            csrf_token = str(before_pause["csrf_token"])
             paused_result = post_expect_error_with_cookie(
-                f"{base_url}/api/v1/copier/pause-toggle", {}, cookie
+                f"{base_url}/api/v1/copier/pause-toggle", {"csrf_token": csrf_token}, cookie
             )
             _, after_pause = get(f"{base_url}/api/v1/dashboard", cookie)
             reactivated_result = post_expect_error_with_cookie(
-                f"{base_url}/api/v1/copier/pause-toggle", {}, cookie
+                f"{base_url}/api/v1/copier/pause-toggle", {"csrf_token": csrf_token}, cookie
             )
 
             _, default_settings = get(f"{base_url}/api/v1/settings", cookie)
             settings_result = post_expect_error_with_cookie(
-                f"{base_url}/api/v1/settings", {"avoid_high_impact_news": "1"}, cookie
+                f"{base_url}/api/v1/settings",
+                {"avoid_high_impact_news": "1", "csrf_token": csrf_token},
+                cookie,
             )
             _, after_settings = get(f"{base_url}/api/v1/settings", cookie)
 
@@ -944,7 +959,11 @@ class MiniAppFrontendTests(unittest.TestCase):
 
             setup_result = post_expect_error_with_cookie(
                 f"{base_url}/api/v1/auth/password",
-                {"email": "migrado@example.com", "password": "SenhaMigrada123"},
+                {
+                    "email": "migrado@example.com",
+                    "password": "SenhaMigrada123",
+                    "csrf_token": str(dashboard_before["csrf_token"]),
+                },
                 cookie,
             )
 
@@ -996,7 +1015,7 @@ class MiniAppFrontendTests(unittest.TestCase):
             except HTTPError as exc:
                 return exc.code, json.loads(exc.read().decode("utf-8"))
 
-        def login_and_get_cookie(password: str) -> str:
+        def login_and_get_cookie(password: str) -> tuple[str, str]:
             with urlopen(
                 Request(
                     f"{base_url}/api/v1/auth/login",
@@ -1008,7 +1027,9 @@ class MiniAppFrontendTests(unittest.TestCase):
                 ),
                 timeout=5,
             ) as response:
-                return response.headers.get("Set-Cookie", "").split(";", 1)[0]
+                cookie = response.headers.get("Set-Cookie", "").split(";", 1)[0]
+                body = json.loads(response.read().decode("utf-8"))
+                return cookie, str(body["csrf_token"])
 
         def token_from_email_link(html: str, param: str) -> str:
             href = re.search(r'href="([^"]+)"', html).group(1)
@@ -1063,7 +1084,7 @@ class MiniAppFrontendTests(unittest.TestCase):
             )
             self.assertEqual(401, old_password_status["status"])
 
-            confirm_cookie = login_and_get_cookie("SenhaNova123")
+            confirm_cookie, confirm_csrf_token = login_and_get_cookie("SenhaNova123")
 
             # Confirma o e-mail usando o link recebido no cadastro.
             confirm_token = token_from_email_link(confirm_html, "confirm_token")
@@ -1077,13 +1098,62 @@ class MiniAppFrontendTests(unittest.TestCase):
 
             # Reenviar confirmacao (autenticado) gera um novo e-mail.
             resend_result = post_expect_error_with_cookie(
-                f"{base_url}/api/v1/auth/email/resend", {}, confirm_cookie
+                f"{base_url}/api/v1/auth/email/resend",
+                {"csrf_token": confirm_csrf_token},
+                confirm_cookie,
             )
             self.assertEqual(200, resend_result["status"])
             self.assertEqual(4, len(server.sent_emails))
 
+    def test_password_forgot_e_limitado_por_email_mas_sempre_responde_ok(self) -> None:
+        server = mini_app_server()
+        with server as base_url:
+            registration = post_json(
+                f"{base_url}/api/v1/auth/register",
+                {
+                    "customer_name": "Cliente Alvo",
+                    "email": "alvo@example.com",
+                    "phone": "11999990000",
+                    "password": "SenhaAntiga123",
+                    "accepted_terms": "true",
+                },
+            )
+            self.assertTrue(registration["ok"])
+            self.assertEqual(1, len(server.sent_emails))  # confirmacao de cadastro
+
+            # As primeiras 3 tentativas (limite configurado) enviam e-mail de
+            # verdade; a 4a e bloqueada silenciosamente -- responde {"ok": true}
+            # igual as outras, sem revelar que foi limitada.
+            for _ in range(3):
+                result = post_json(
+                    f"{base_url}/api/v1/auth/password/forgot", {"email": "alvo@example.com"}
+                )
+                self.assertTrue(result["ok"])
+            self.assertEqual(4, len(server.sent_emails))  # confirmacao + 3 redefinicoes
+
+            blocked_result = post_json(
+                f"{base_url}/api/v1/auth/password/forgot", {"email": "alvo@example.com"}
+            )
+            self.assertTrue(blocked_result["ok"])
+            self.assertEqual(4, len(server.sent_emails))  # nenhum e-mail novo
+
+            # O limite e por e-mail: um endereco diferente nao e afetado.
+            other_result = post_json(
+                f"{base_url}/api/v1/auth/password/forgot", {"email": "naoexiste@example.com"}
+            )
+            self.assertTrue(other_result["ok"])
+            self.assertEqual(4, len(server.sent_emails))  # e-mail nao cadastrado, nada enviado
+
+            # Um e-mail mal formado nunca deveria quebrar a rota nem afetar o
+            # limitador de outros enderecos.
+            malformed_result = post_json(
+                f"{base_url}/api/v1/auth/password/forgot", {"email": "isso-nao-e-um-email"}
+            )
+            self.assertTrue(malformed_result["ok"])
+            self.assertEqual(4, len(server.sent_emails))
+
     def test_email_alterado_e_conta_mt5_disparam_avisos_por_email(self) -> None:
-        def register_and_get_cookie(email: str) -> str:
+        def register_and_get_cookie(email: str) -> tuple[str, str]:
             request = Request(
                 f"{base_url}/api/v1/auth/register",
                 data=urlencode(
@@ -1099,12 +1169,13 @@ class MiniAppFrontendTests(unittest.TestCase):
                 method="POST",
             )
             with urlopen(request, timeout=5) as response:
-                json.loads(response.read().decode("utf-8"))
-                return response.headers.get("Set-Cookie", "").split(";", 1)[0]
+                body = json.loads(response.read().decode("utf-8"))
+                cookie = response.headers.get("Set-Cookie", "").split(";", 1)[0]
+                return cookie, str(body["csrf_token"])
 
         server = mini_app_server(with_mt5_accounts=True)
         with server as base_url:
-            cookie = register_and_get_cookie("original@example.com")
+            cookie, csrf_token = register_and_get_cookie("original@example.com")
             self.assertEqual(1, len(server.sent_emails))  # confirmacao do cadastro
 
             # Trocar o e-mail avisa o ENDERECO ANTIGO e reenvia confirmacao para o novo.
@@ -1114,6 +1185,7 @@ class MiniAppFrontendTests(unittest.TestCase):
                     "customer_name": "Cliente Eventos",
                     "email": "novo@example.com",
                     "phone": "11999990000",
+                    "csrf_token": csrf_token,
                 },
                 cookie,
             )
@@ -1135,6 +1207,7 @@ class MiniAppFrontendTests(unittest.TestCase):
                     "login": "88887777",
                     "password": "mt5-secret",
                     "account_alias": "Conta principal",
+                    "csrf_token": csrf_token,
                 },
                 cookie,
             )
@@ -1150,7 +1223,7 @@ class MiniAppFrontendTests(unittest.TestCase):
             # Remover a conta MT5 avisa o mesmo e-mail.
             removal_result = post_expect_error_with_cookie(
                 f"{base_url}/api/v1/accounts/remove",
-                {"account_id": str(account_id)},
+                {"account_id": str(account_id), "csrf_token": csrf_token},
                 cookie,
             )
             self.assertEqual(200, removal_result["status"])
@@ -1225,6 +1298,7 @@ class mini_app_server:
             mt5_accounts=self.mt5_accounts,
         )
         OnboardingHandler.client_app_url = "https://app.example.com/"
+        OnboardingHandler.password_reset_rate_limiter = SimpleRateLimiter(limit=3, window_seconds=900)
         self.sent_emails: list[dict[str, str]] = []
         OnboardingHandler.email_service = RecordingEmailService(self.sent_emails)
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), OnboardingHandler)
