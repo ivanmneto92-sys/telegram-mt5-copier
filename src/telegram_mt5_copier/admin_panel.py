@@ -554,6 +554,76 @@ class AdminPanelService:
             users.close()
         return {"user_id": target_user_id, "removed_account_id": account_id}
 
+    def delete_client(
+        self,
+        *,
+        actor_telegram_user_id: int,
+        target_user_id: int,
+    ) -> dict[str, object]:
+        """Apaga um cliente por completo: todas as contas MT5 dele (fechando
+        o terminal de cada uma na VPS, como `delete_single_mt5_account`), o
+        cadastro (Telegram, financeiro, credenciais do portal) e tudo o mais
+        que referencia esse usuário no banco.
+
+        Diferente de pausar ou de excluir uma conta MT5 isolada, isto é
+        definitivo e total: não sobra vaga pra reativar depois, nem conta,
+        nem histórico de cobrança. Master-only pelo mesmo motivo de
+        `set_queue_pilot_enabled` — é a ação mais destrutiva do painel,
+        então só quem pode mexer em dinheiro de verdade pode apagar um
+        cliente inteiro.
+
+        `PRAGMA foreign_keys = ON` está ligado em toda conexão
+        (`connect_database`), então toda tabela com chave estrangeira
+        declarada para `users.id` precisa ser limpa antes do `DELETE FROM
+        users` final, ou o banco recusa a exclusão. `admin_actions` não tem
+        essa chave estrangeira de propósito (é o log de auditoria; continua
+        apontando pro id do cliente apagado, que é o registro esperado de
+        "esse admin apagou esse cliente").
+        """
+        if self.mt5_accounts is None or self.terminal_manager is None:
+            raise ValueError("Exclusão de clientes não está disponível nesta instância.")
+        actor_role = resolve_admin_role(self.database_path, self.admin_ids, actor_telegram_user_id)
+        if actor_role != ADMIN_ROLE_MASTER:
+            raise ValueError("Apenas administradores master podem excluir um cliente.")
+        self._require_user(target_user_id)
+
+        removed_account_ids = [
+            account.id for account in self.mt5_accounts.list_accounts(target_user_id)
+        ]
+        for account_id in removed_account_ids:
+            self.terminal_manager.remove_account_terminal(account_id)
+            self.mt5_accounts.remove_account(target_user_id, account_id)
+
+        with connect_database(self.database_path) as connection:
+            for sql in (
+                "DELETE FROM economic_calendar_notifications WHERE user_id = ?",
+                "DELETE FROM audit_events WHERE user_id = ?",
+                "DELETE FROM user_notification_settings WHERE user_id = ?",
+                "DELETE FROM customer_payments WHERE user_id = ?",
+                "DELETE FROM customer_billing WHERE user_id = ?",
+                "DELETE FROM client_login_tokens WHERE user_id = ?",
+                "DELETE FROM client_browser_sessions WHERE user_id = ?",
+                "DELETE FROM client_password_reset_tokens WHERE user_id = ?",
+                "DELETE FROM client_email_confirmation_tokens WHERE user_id = ?",
+                "DELETE FROM client_credentials WHERE user_id = ?",
+                "DELETE FROM channel_requests WHERE user_id = ?",
+                "DELETE FROM user_channel_subscriptions WHERE user_id = ?",
+                "DELETE FROM user_channel_settings WHERE user_id = ?",
+                "DELETE FROM commands WHERE user_id = ?",
+                "DELETE FROM user_settings WHERE user_id = ?",
+                "DELETE FROM users WHERE id = ?",
+            ):
+                cursor = connection.execute(sql, (target_user_id,))
+                cursor.close()
+
+        self._log_admin_action(
+            actor_telegram_user_id,
+            target_user_id,
+            "admin_panel_delete_client",
+            {"removed_account_ids": removed_account_ids},
+        )
+        return {"user_id": target_user_id, "removed_account_ids": removed_account_ids}
+
     def set_queue_pilot_enabled(
         self,
         *,
@@ -1577,6 +1647,9 @@ def render_admin_script() -> str:
       : '<button class="action ' + (nextStatus === "active" ? "activate" : "pause") +
         '" type="button" data-action-status="' + nextStatus + '" data-user-id="' + esc(user.id) + '">' +
         actionLabel + '</button>';
+    var deleteClientButton = state.role === "master"
+      ? '<button class="action danger" type="button" data-delete-client="' + esc(user.id) + '">Excluir cliente</button>'
+      : '';
     return '<article class="user-card" data-user-id="' + esc(user.id) + '">' +
       '<div class="user-main">' +
         '<div class="identity"><h2>' + esc(user.username ? "@" + user.username : "Cliente #" + user.id) + '</h2>' +
@@ -1586,6 +1659,7 @@ def render_admin_script() -> str:
         accountsHtml + billingHtml +
         '<div class="actions">' + primaryAction +
           '<button class="action finance" type="button" data-finance-user="' + esc(user.id) + '">Financeiro</button>' +
+          deleteClientButton +
         '</div>' +
       '</div></article>';
   }
@@ -1802,6 +1876,31 @@ def render_admin_script() -> str:
       .finally(function () { state.busy = false; button.disabled = false; });
   }
 
+  function deleteClient(userId, button) {
+    if (state.busy) { return; }
+    var user = userById(userId);
+    var name = user ? (user.username ? "@" + user.username : "Cliente #" + user.id) : "este cliente";
+    var accountCount = user ? userAccounts(user).length : 0;
+    var confirmed = window.confirm(
+      "Excluir " + name + " por completo?\n\n" +
+      "Isto apaga o cadastro (Telegram, financeiro, acesso ao portal) e " +
+      (accountCount
+        ? "todas as " + accountCount + " conta(s) MT5 dele, encerrando cada terminal na VPS"
+        : "qualquer conta MT5 associada") +
+      ". Não é possível desfazer — não sobra vaga pra reativar nem histórico de cobrança."
+    );
+    if (!confirmed) { return; }
+    if (!window.confirm("Tem certeza? Essa ação é definitiva e não pode ser desfeita.")) { return; }
+    state.busy = true;
+    button.disabled = true;
+    post("/api/admin/client-delete", authFields({
+      csrf_token: state.csrf,
+      user_id: userId
+    })).then(reloadDashboard)
+      .catch(function (error) { showError(error.message || "Não foi possível excluir o cliente."); })
+      .finally(function () { state.busy = false; button.disabled = false; });
+  }
+
   function userById(userId) {
     return state.users.find(function (user) { return String(user.id) === String(userId); });
   }
@@ -1942,6 +2041,11 @@ def render_admin_script() -> str:
         deleteMt5.getAttribute("data-delete-mt5-account"),
         deleteMt5
       );
+      return;
+    }
+    var deleteClientButton = event.target.closest("[data-delete-client]");
+    if (deleteClientButton) {
+      deleteClient(deleteClientButton.getAttribute("data-delete-client"), deleteClientButton);
       return;
     }
     var finance = event.target.closest("[data-finance-user]");

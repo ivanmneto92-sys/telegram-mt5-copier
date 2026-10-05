@@ -150,6 +150,18 @@ risco. O botão "Excluir MT5" também passou a ser **por conta**: aparece
 dentro do bloco de cada conta e apaga só aquela, sem afetar as outras
 contas do mesmo cliente.
 
+A partir da versão `0.45.9`, existe também o botão **"Excluir cliente"**,
+visível só para administradores master. Diferente do "Excluir MT5" (que
+apaga só uma conta, deixando o cadastro do cliente intacto pra ele poder
+reconectar depois), isto apaga o cliente por completo: todas as contas MT5
+dele — encerrando o terminal de cada uma na VPS, igual ao "Excluir MT5" —,
+o cadastro (Telegram, financeiro, credenciais do portal, preferências de
+canal) e tudo o mais que referencia aquele cliente no banco. Não sobra vaga
+pra reativar nem histórico de cobrança; o painel pede confirmação em duas
+etapas antes de excluir, porque não tem como desfazer. É master-only pelo
+mesmo motivo do toggle da fila central: é a ação mais destrutiva do painel,
+reservada a quem pode mexer em dinheiro de verdade.
+
 ## Catálogo de canais sugeridos pelos clientes
 
 O monitoramento usa uma única conta técnica do Telegram. O cliente não conecta

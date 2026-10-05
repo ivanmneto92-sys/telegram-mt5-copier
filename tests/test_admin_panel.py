@@ -279,6 +279,106 @@ class AdminPanelTests(unittest.TestCase):
                 account_id=account_id,
             )
 
+    def test_master_exclui_cliente_por_completo(self) -> None:
+        from telegram_mt5_copier.mt5.terminal_manager import TerminalManager
+
+        account_id = self._insert_account_with_profile(self.bob.id, "778899")
+        base_dir = Path(self.temp_dir.name) / "mt5accounts_client_delete"
+        terminal_manager = TerminalManager(base_dir)
+        account_dir = terminal_manager.account_dir(account_id)
+        account_dir.mkdir(parents=True, exist_ok=True)
+        (account_dir / "terminal64.exe").write_bytes(b"fake")
+        now = "2026-01-01T00:00:00+00:00"
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                "INSERT INTO customer_billing (user_id, customer_name, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?)",
+                (self.bob.id, "Bob Cliente", now, now),
+            )
+            connection.execute(
+                "INSERT INTO client_credentials "
+                "(user_id, email, password_hash, password_changed_at, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (self.bob.id, "bob@example.com", "hash", now, now, now),
+            )
+            connection.execute(
+                "INSERT INTO user_settings "
+                "(user_id, risk_mode, fixed_lot, risk_percent, daily_profit_target, "
+                "daily_loss_limit, max_open_trades, tp_distribution_mode, "
+                "breakeven_enabled, trailing_enabled, updated_at) "
+                "VALUES (?, 'fixed_lot', '0.01', '0', '0', '0', 1, 'equal', 0, 0, ?)",
+                (self.bob.id, now),
+            )
+            connection.execute(
+                "INSERT INTO commands (user_id, command_type, payload, status, created_at) "
+                "VALUES (?, 'test_mt5_connection', '{}', 'pending', ?)",
+                (self.bob.id, now),
+            )
+
+        accounts = MT5AccountService(self.database_path)
+        service = AdminPanelService(
+            self.database_path,
+            bot_token=self.token,
+            admin_ids=(9001,),
+            mt5_accounts=accounts,
+            terminal_manager=terminal_manager,
+        )
+
+        result = service.delete_client(
+            actor_telegram_user_id=9001,
+            target_user_id=self.bob.id,
+        )
+
+        self.assertEqual(result["removed_account_ids"], [account_id])
+        self.assertFalse(account_dir.exists())
+        with connect_database(self.database_path) as connection:
+            self.assertIsNone(
+                connection.execute(
+                    "SELECT id FROM users WHERE id = ?", (self.bob.id,)
+                ).fetchone()
+            )
+            for table in (
+                "mt5_accounts",
+                "customer_billing",
+                "client_credentials",
+                "user_settings",
+                "commands",
+            ):
+                remaining = connection.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE user_id = ?", (self.bob.id,)
+                ).fetchone()[0]
+                self.assertEqual(remaining, 0, f"{table} ainda tem linha do cliente apagado")
+            action = connection.execute(
+                "SELECT action_type, target_user_id FROM admin_actions "
+                "WHERE action_type = 'admin_panel_delete_client'"
+            ).fetchone()
+        self.assertEqual(tuple(action), ("admin_panel_delete_client", self.bob.id))
+        # Apagar um cliente nao deve afetar o outro.
+        self.assertIsNotNone(self.users.get_by_id(self.alice.id))
+
+    def test_admin_comum_nao_pode_excluir_cliente(self) -> None:
+        from telegram_mt5_copier.mt5.terminal_manager import TerminalManager
+
+        accounts = MT5AccountService(self.database_path)
+        terminal_manager = TerminalManager(Path(self.temp_dir.name) / "mt5accounts_regular")
+        service = AdminPanelService(
+            self.database_path,
+            bot_token=self.token,
+            admin_ids=(9001,),
+            mt5_accounts=accounts,
+            terminal_manager=terminal_manager,
+        )
+        service.add_admin(
+            actor_telegram_user_id=9001, target_telegram_user_id=303, role="regular",
+        )
+
+        with self.assertRaisesRegex(ValueError, "master"):
+            service.delete_client(
+                actor_telegram_user_id=303,
+                target_user_id=self.bob.id,
+            )
+        self.assertIsNotNone(self.users.get_by_id(self.bob.id))
+
     def test_master_liga_conta_como_piloto_da_fila_central(self) -> None:
         account_id = self._insert_account_with_profile(self.bob.id, "778899")
         accounts = MT5AccountService(self.database_path)

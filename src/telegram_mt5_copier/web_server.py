@@ -214,6 +214,9 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             if path == "/api/admin/mt5-account-delete":
                 self.handle_admin_mt5_account_delete(fields)
                 return
+            if path == "/api/admin/client-delete":
+                self.handle_admin_client_delete(fields)
+                return
             if path == "/api/admin/billing-update":
                 self.handle_admin_billing_update(fields)
                 return
@@ -899,6 +902,25 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         )
         self.send_json({"ok": True, "result": result})
 
+    def handle_admin_client_delete(self, fields: dict[str, str]) -> None:
+        identity = self.authenticate_admin_mutation(fields)
+        if identity.role != "master":
+            raise ValueError("Apenas administradores master podem excluir um cliente.")
+        try:
+            target_user_id = int(fields.get("user_id", ""))
+        except ValueError as exc:
+            raise ValueError("Cliente inválido.") from exc
+        result = self.admin_panel.delete_client(
+            actor_telegram_user_id=identity.telegram_user_id,
+            target_user_id=target_user_id,
+        )
+        safe_log(
+            "admin_client_deleted",
+            admin_id=str(identity.telegram_user_id),
+            target_id=str(target_user_id),
+        )
+        self.send_json({"ok": True, "result": result})
+
     def handle_admin_mt5_account_queue_pilot_status(self, fields: dict[str, str]) -> None:
         identity = self.authenticate_admin_mutation(fields)
         if identity.role != "master":
@@ -1338,6 +1360,7 @@ def safe_endpoint(value: str) -> str:
         "/api/admin/logout",
         "/api/admin/user-status",
         "/api/admin/mt5-account-delete",
+        "/api/admin/client-delete",
         "/api/admin/billing-update",
         "/api/admin/payment",
         "/api/admin/approve",
