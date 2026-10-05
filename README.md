@@ -769,6 +769,18 @@ já pertence a um cliente cadastrado pelo Telegram, o portal não cria uma conta
 duplicada: esse cliente deve entrar pelo bot e configurar o acesso web na sua
 sessão autenticada.
 
+A partir da versão `0.48.0`, o portal ganhou dois endpoints novos pra dar
+suporte a um calendário de histórico no site (filtro por data, com o
+resultado total de cada dia e as operações daquele dia):
+`GET /api/v1/performance-calendar?account_id=&month=AAAA-MM`, que devolve o
+resultado líquido de cada dia do mês pedido lendo direto de
+`account_daily_performance` (cobre Sistema Automático e Copy Trader, já que
+essa tabela é alimentada pelo histórico de deals real da conta, não pelo
+sinal disparado por este sistema); e `GET /api/v1/operations`, que já
+existia, ganhou um parâmetro opcional `date=AAAA-MM-DD` pra filtrar a lista
+de operações por dia (usa a data em que o sinal foi recebido, não a de
+fechamento).
+
 ## Notificação por push (site/PWA)
 
 A partir da versão `0.47.0`, o backend ganhou um canal de notificação push

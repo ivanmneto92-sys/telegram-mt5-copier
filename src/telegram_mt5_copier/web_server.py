@@ -3,6 +3,7 @@ from __future__ import annotations
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.cookies import SimpleCookie
 import json
+import re
 import secrets
 import sys
 from urllib.parse import parse_qs, urljoin, urlsplit
@@ -395,7 +396,18 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             elif path == "/api/v1/channels":
                 payload = self.client_portal.channels(user_id)
             elif path == "/api/v1/operations":
-                payload = self.client_portal.operations(user_id, account_id=account_id)
+                date = parse_qs(urlsplit(self.path).query).get("date", [None])[0]
+                payload = self.client_portal.operations(user_id, account_id=account_id, date=date)
+            elif path == "/api/v1/performance-calendar":
+                month = parse_qs(urlsplit(self.path).query).get("month", [None])[0]
+                if not month or not re.fullmatch(r"\d{4}-\d{2}", month):
+                    self.send_json(
+                        {"ok": False, "error": "Informe o mes no formato AAAA-MM."}, status=400
+                    )
+                    return
+                payload = self.client_portal.performance_calendar(
+                    user_id, month=month, account_id=account_id
+                )
             elif path == "/api/v1/profile":
                 payload = self.client_portal.profile(user_id)
             elif path == "/api/v1/financial":

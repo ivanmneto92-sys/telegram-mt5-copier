@@ -235,6 +235,53 @@ class ClientPortalService:
             "active_operations": int(active_count),
         }
 
+    def performance_calendar(
+        self, user_id: int, *, month: str, account_id: int | None = None
+    ) -> dict[str, object]:
+        """Resultado liquido por dia num mes (`month` no formato "YYYY-MM"),
+        pra alimentar o calendario de historico do portal. Cobre qualquer
+        conta MT5 ativa, Sistema Automatico ou Copy Trader -- os dois tipos
+        alimentam account_daily_performance a partir do historico de deals
+        real da corretora, sem depender de sinal disparado por este sistema.
+        """
+        try:
+            year_text, month_text = month.split("-", 1)
+            year, month_number = int(year_text), int(month_text)
+            if not 1 <= month_number <= 12:
+                raise ValueError
+        except ValueError as exc:
+            raise ValueError("Mes invalido. Use o formato AAAA-MM.") from exc
+        start = f"{year:04d}-{month_number:02d}-01"
+        if month_number == 12:
+            end = f"{year + 1:04d}-01-01"
+        else:
+            end = f"{year:04d}-{month_number + 1:02d}-01"
+
+        with connect_database(self.database_path) as db:
+            account = self._select_account(db, user_id, account_id)
+            if account is None:
+                return {"month": month, "days": []}
+            rows = db.execute(
+                """
+                SELECT performance_date, realized_profit, return_percent
+                FROM account_daily_performance
+                WHERE mt5_account_id = ? AND performance_date >= ? AND performance_date < ?
+                ORDER BY performance_date ASC
+                """,
+                (int(account[0]), start, end),
+            ).fetchall()
+        return {
+            "month": month,
+            "days": [
+                {
+                    "date": str(row[0]),
+                    "net_profit": str(row[1]),
+                    "return_percent": str(row[2]) if row[2] is not None else None,
+                }
+                for row in rows
+            ],
+        }
+
     def channels(self, user_id: int) -> dict[str, object]:
         with connect_database(self.database_path) as db:
             setting = db.execute(
@@ -417,8 +464,17 @@ class ClientPortalService:
         return {"subscribed": False}
 
     def operations(
-        self, user_id: int, *, limit: int = 100, account_id: int | None = None
+        self,
+        user_id: int,
+        *,
+        limit: int = 100,
+        account_id: int | None = None,
+        date: str | None = None,
     ) -> dict[str, object]:
+        """Lista de operacoes do cliente. `date` ("AAAA-MM-DD") filtra pelo dia
+        em que o sinal foi recebido (g.created_at) -- usado pelo calendario de
+        historico do portal; sem ele, mantem o comportamento de sempre
+        (ultimas `limit` operacoes, de qualquer dia)."""
         safe_limit = max(1, min(limit, 200))
         with connect_database(self.database_path) as db:
             if account_id is not None:
@@ -435,10 +491,11 @@ class ClientPortalService:
                 LEFT JOIN source_channels c ON c.telegram_chat_id = sig.source_chat_id
                 LEFT JOIN execution_orders o ON o.execution_group_id = g.id
                 WHERE g.user_id = ? AND (? IS NULL OR g.mt5_account_id = ?)
+                  AND (? IS NULL OR date(g.created_at) = ?)
                 GROUP BY g.id
                 ORDER BY g.id DESC LIMIT ?
                 """,
-                (user_id, account_id, account_id, safe_limit),
+                (user_id, account_id, account_id, date, date, safe_limit),
             ).fetchall()
         return {
             "operations": [

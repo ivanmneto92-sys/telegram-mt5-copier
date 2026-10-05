@@ -631,6 +631,89 @@ class ClientPortalTests(unittest.TestCase):
 
         self.assertEqual("15.5", operations[0]["net_profit"])
 
+    def test_operations_pode_ser_filtrado_por_data(self) -> None:
+        account_id = self._add_account(self.user_id, "Principal", "111111")
+        with connect_database(self.database_path) as db:
+            for created_at, symbol in (
+                ("2026-09-21T10:00:00+00:00", "XAUUSD"),
+                ("2026-09-22T10:00:00+00:00", "EURUSD"),
+            ):
+                db.execute(
+                    """
+                    INSERT INTO execution_groups (
+                        signal_id, user_id, mt5_account_id, status, direction, symbol,
+                        entry_low, entry_high, selected_entry_price, order_type,
+                        total_volume, stop_loss, expiration_at, execution_mode,
+                        signal_received_at, pending_created_at, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, 'buy', ?, '1', '1', '1', 'market',
+                              '0.01', '0.5', ?, 'simulation', ?, ?, ?, ?)
+                    """,
+                    (
+                        f"sig-{symbol}",
+                        self.user_id,
+                        account_id,
+                        "open",
+                        symbol,
+                        created_at,
+                        created_at,
+                        created_at,
+                        created_at,
+                        created_at,
+                    ),
+                )
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+
+        only_21 = portal.operations(self.user_id, date="2026-09-21")["operations"]
+        only_22 = portal.operations(self.user_id, date="2026-09-22")["operations"]
+        no_filter = portal.operations(self.user_id)["operations"]
+
+        self.assertEqual(["XAUUSD"], [op["symbol"] for op in only_21])
+        self.assertEqual(["EURUSD"], [op["symbol"] for op in only_22])
+        self.assertEqual(2, len(no_filter))
+
+    def test_performance_calendar_retorna_dias_do_mes_pedido(self) -> None:
+        account_id = self._add_account(self.user_id, "Principal", "111111")
+        now = utc_now()
+        with connect_database(self.database_path) as db:
+            for date, profit in (
+                ("2026-08-31", "-1"),
+                ("2026-09-01", "100"),
+                ("2026-09-15", "-50"),
+                ("2026-09-30", "25"),
+                ("2026-10-01", "999"),
+            ):
+                db.execute(
+                    """
+                    INSERT INTO account_daily_performance (
+                        mt5_account_id, performance_date, realized_profit,
+                        starting_balance, return_percent, updated_at
+                    ) VALUES (?, ?, ?, '10000', '1.0', ?)
+                    """,
+                    (account_id, date, profit, now),
+                )
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+
+        payload = portal.performance_calendar(self.user_id, month="2026-09")
+
+        self.assertEqual("2026-09", payload["month"])
+        self.assertEqual(
+            [("2026-09-01", "100"), ("2026-09-15", "-50"), ("2026-09-30", "25")],
+            [(day["date"], day["net_profit"]) for day in payload["days"]],
+        )
+
+    def test_performance_calendar_rejeita_mes_invalido(self) -> None:
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+
+        with self.assertRaises(ValueError):
+            portal.performance_calendar(self.user_id, month="mes-invalido")
+
+    def test_performance_calendar_sem_conta_devolve_lista_vazia(self) -> None:
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+
+        payload = portal.performance_calendar(self.user_id, month="2026-09")
+
+        self.assertEqual([], payload["days"])
+
     def test_dashboard_soma_flutuante_ao_realizado_como_resultado_do_dia(self) -> None:
         account_id = self._add_account(self.user_id, "Principal", "111111")
         now = utc_now()

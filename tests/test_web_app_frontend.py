@@ -754,6 +754,12 @@ class MiniAppFrontendTests(unittest.TestCase):
             status_foreign_risk, _ = get(f"{base_url}/api/v1/risk?account_id={foreign}", cookie)
             status_invalid, _ = get(f"{base_url}/api/v1/dashboard?account_id=abc", cookie)
             status_negative, _ = get(f"{base_url}/api/v1/operations?account_id=-1", cookie)
+            status_calendar, calendar = get(
+                f"{base_url}/api/v1/performance-calendar?account_id={second}&month=2026-09", cookie
+            )
+            status_calendar_bad_month, _ = get(
+                f"{base_url}/api/v1/performance-calendar?account_id={second}&month=lixo", cookie
+            )
             updated = post_expect_error_with_cookie(
                 f"{base_url}/api/v1/risk",
                 {"account_id": str(second), "max_open_signals": "7", "csrf_token": csrf_token},
@@ -778,6 +784,10 @@ class MiniAppFrontendTests(unittest.TestCase):
         self.assertEqual(404, status_foreign_risk)
         self.assertEqual(400, status_invalid)
         self.assertEqual(400, status_negative)
+        self.assertEqual(200, status_calendar)
+        self.assertEqual("2026-09", calendar["month"])
+        self.assertEqual([], calendar["days"])
+        self.assertEqual(400, status_calendar_bad_month)
         self.assertEqual(200, updated["status"])
         self.assertEqual(7, updated["body"]["risk"]["max_open_signals"])
         self.assertEqual(404, updated_foreign["status"])
