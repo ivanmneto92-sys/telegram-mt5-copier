@@ -466,6 +466,18 @@ em `mt5/account_service.py`) — uma conta Copy Trader continua conectada,
 com heartbeat e monitoramento de posição normais, só nunca entra como
 candidata a executar um sinal novo.
 
+A partir da versão `0.46.1`, o saldo, a equity e o resultado do dia de uma
+conta Copy Trader aparecem no bot já convertidos de centavos (Cents) para
+dólar de verdade. Toda conta Copy Trader é uma conta Cents na corretora —
+um saldo real de USD 100 aparece como 10000 USC dentro do MT5, e um lucro
+de USD 3 aparece como 300 USC — então o bot divide por 100 automaticamente
+(`account_currency_divisor` em `bot_service.py`) antes de exibir "Saldo",
+"Equity" e "Resultado do dia" nas telas 💼 Minha conta e 🖥️ Minhas contas,
+tanto para o lucro realizado quanto para lucro bruto/custos. O percentual
+de resultado não muda, só o valor em dólar. Contas Sistema Automático não
+são afetadas. A futura tela de resultados pelo site (Entrega 2) deve usar
+a mesma conversão.
+
 A partir da versão `0.37.1`, atingir a meta diária ou o limite diário pausa
 novos sinais imediatamente, mesmo quando o negócio que cruzou o limiar
 encerrou a última posição aberta da conta. Antes, a trava financeira só

@@ -137,6 +137,7 @@ from .mt5.models import (
     ENTRY_PRICE_DISTRIBUTED,
     ENTRY_PRICE_FIRST_TOUCH,
     ENTRY_PRICE_MIDDLE,
+    PRODUCT_KIND_BROKER_COPY,
     MT5Account,
 )
 from .settings_service import SettingsService, UserSettings, decimal_to_storage
@@ -1150,11 +1151,12 @@ class BotService:
         daily_result = "Aguardando atualização do Worker MT5"
         integration_message = "As informações financeiras serão exibidas após a integração com o MetaTrader 5."
         if account is not None:
+            divisor = account_currency_divisor(account)
             connection_status = mt5_account_connection_label(account.connection_status)
-            balance = money_label(account.balance)
-            equity = money_label(account.equity)
+            balance = money_label(account.balance, divisor=divisor)
+            equity = money_label(account.equity, divisor=divisor)
             daily_result = daily_performance_label(
-                self.mt5_accounts.daily_performance(account.id)
+                self.mt5_accounts.daily_performance(account.id), divisor=divisor
             )
             integration_message = "Informações atualizadas pela conexão com o MetaTrader 5."
         return BotResponse(
@@ -1484,6 +1486,7 @@ class BotService:
 
         status_label, operations_label = self._status_labels(user)
         error_lines = ["", f"Erro: {account.last_error}"] if account.last_error else []
+        divisor = account_currency_divisor(account)
         return BotResponse(
             "\n".join(
                 [
@@ -1493,8 +1496,8 @@ class BotService:
                     f"Servidor: {account.server_name}",
                     f"Tipo: {account_type_label(account)}",
                     f"Modo: {account_mode_label(account)}",
-                    f"Saldo: {money_label(account.balance)}",
-                    f"Equity: {money_label(account.equity)}",
+                    f"Saldo: {money_label(account.balance, divisor=divisor)}",
+                    f"Equity: {money_label(account.equity, divisor=divisor)}",
                     f"Conexão: {mt5_account_connection_label(account.connection_status)}",
                     f"Heartbeat: {account.worker_heartbeat_at or 'Aguardando worker'}",
                     f"Copiador: {status_label} / {operations_label}",
@@ -1686,16 +1689,25 @@ def account_mode_label(account: MT5Account) -> str:
     return "Hedging"
 
 
-def money_label(value: Decimal | None) -> str:
+def account_currency_divisor(account: MT5Account) -> Decimal:
+    """Contas Copy Trader são sempre contas Cents na corretora (ex.: um saldo
+    de USD 100 aparece como 10000 USC no MT5) -- dividir por 100 para exibir
+    ao cliente o equivalente real em USD."""
+    if account.product_kind == PRODUCT_KIND_BROKER_COPY:
+        return Decimal(100)
+    return Decimal(1)
+
+
+def money_label(value: Decimal | None, *, divisor: Decimal = Decimal(1)) -> str:
     if value is None:
         return "Indisponível"
-    return f"$ {format(value, '.2f')}"
+    return f"$ {format(value / divisor, '.2f')}"
 
 
-def daily_performance_label(performance: object | None) -> str:
+def daily_performance_label(performance: object | None, *, divisor: Decimal = Decimal(1)) -> str:
     if performance is None:
         return "Aguardando atualização do Worker MT5"
-    profit = Decimal(str(getattr(performance, "realized_profit")))
+    profit = Decimal(str(getattr(performance, "realized_profit"))) / divisor
     percentage_value = getattr(performance, "return_percent")
     percentage = Decimal(str(percentage_value)) if percentage_value is not None else None
     marker = "🟢" if profit > 0 else "🔴" if profit < 0 else "⚪"
@@ -1706,8 +1718,8 @@ def daily_performance_label(performance: object | None) -> str:
     costs_value = getattr(performance, "trading_costs", None)
     if gross_value is None or costs_value is None:
         return result
-    gross_profit = Decimal(str(gross_value))
-    trading_costs = Decimal(str(costs_value))
+    gross_profit = Decimal(str(gross_value)) / divisor
+    trading_costs = Decimal(str(costs_value)) / divisor
     return "\n".join(
         [
             result,

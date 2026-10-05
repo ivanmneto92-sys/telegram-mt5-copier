@@ -92,6 +92,64 @@ class BotManagementTests(unittest.TestCase):
             service.close()
             accounts.close()
 
+    def test_conta_copy_trader_exibe_saldo_resultado_convertido_de_cents_para_usd(self) -> None:
+        accounts = MT5AccountService(
+            self.database_path,
+            credential_service=CredentialService(CredentialService.generate_key()),
+            terminal_manager=TerminalManager(Path(self.temp_dir.name) / "mt5-copy"),
+            client_factory=lambda: SimulatedMT5Client(),
+        )
+        service = BotService(self.database_path, mt5_account_service=accounts)
+        try:
+            service.start(101, "alice")
+            user = self.users.get_by_telegram_user_id(101)
+            account = accounts.register_account(
+                user.id,
+                MT5AccountForm(
+                    "Broker",
+                    "Broker-Demo",
+                    "12345678",
+                    "secret",
+                    "Copy",
+                    product_kind="broker_copy",
+                ),
+            )
+            accounts.update_connection_status(
+                user.id,
+                account.id,
+                status=account.connection_status,
+                account_type=account.account_type,
+                account_mode=account.account_mode,
+                last_error=None,
+                balance=Decimal("10000"),
+                equity=Decimal("10000"),
+                connected=True,
+            )
+            accounts.update_daily_performance(
+                account.id,
+                DailyPerformance(
+                    current_performance_date(),
+                    Decimal("300"),
+                    Decimal("10000"),
+                    Decimal("3"),
+                    "2026-07-28T15:00:00+00:00",
+                    Decimal("300"),
+                    Decimal("0"),
+                ),
+            )
+
+            account_response = service.handle_callback(101, "alice", "v1:a")
+            accounts_response = service.handle_callback(101, "alice", "v1:mt5:accounts")
+
+            self.assertIn("Saldo: $ 100.00", account_response.text)
+            self.assertIn("Equity: $ 100.00", account_response.text)
+            self.assertIn("Resultado do dia: 🟢 $ +3.00 (+3.00%)", account_response.text)
+            self.assertIn("Saldo: $ 100.00", accounts_response.text)
+            self.assertIn("Equity: $ 100.00", accounts_response.text)
+        finally:
+            service.close()
+            accounts.close()
+
     def test_cliente_nao_consegue_se_autoativar(self) -> None:
         self.service.start(101, "alice")
 
