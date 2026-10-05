@@ -470,6 +470,47 @@ class ClientPortalTests(unittest.TestCase):
         self.assertNotIn("encrypted", str(accounts))
         self.assertNotIn("111111", str(accounts))
 
+    def test_copy_trader_account_values_are_shown_in_usd_not_cents(self) -> None:
+        account_id = self._add_account(self.user_id, "Copy", "333333")
+        with connect_database(self.database_path) as db:
+            db.execute(
+                "UPDATE mt5_accounts SET product_kind = 'broker_copy', balance = '10000', "
+                "equity = '12500' WHERE id = ?",
+                (account_id,),
+            )
+            db.execute(
+                """
+                INSERT INTO account_daily_performance (
+                    mt5_account_id, performance_date, realized_profit, gross_profit,
+                    trading_costs, starting_balance, return_percent, updated_at
+                ) VALUES (?, '2026-10-01', '500', '600', '-100', '10000', '5', ?)
+                """,
+                (account_id, utc_now()),
+            )
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+
+        dashboard = portal.dashboard(self.user_id, account_id)
+        self.assertEqual("broker_copy", dashboard["account"]["product_kind"])
+        self.assertEqual(Decimal("100"), Decimal(dashboard["account"]["balance"]))
+        self.assertEqual(Decimal("125"), Decimal(dashboard["account"]["equity"]))
+        self.assertEqual(Decimal("5"), Decimal(dashboard["daily_performance"]["net_profit"]))
+        self.assertEqual(Decimal("5"), Decimal(dashboard["daily_performance"]["return_percent"]))
+        calendar = portal.performance_calendar(self.user_id, month="2026-10", account_id=account_id)
+        self.assertEqual(Decimal("5"), Decimal(calendar["days"][0]["net_profit"]))
+
+    def test_add_account_rejects_unknown_product_kind(self) -> None:
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+        with self.assertRaisesRegex(ValueError, "Copy Trader"):
+            portal.add_account(
+                self.user_id,
+                broker_name="HFM",
+                server_name="HFM-Live",
+                login="123",
+                password="x",
+                account_alias="A",
+                product_kind="outro",
+            )
+
     def test_dashboard_and_risk_follow_the_selected_account(self) -> None:
         first = self._add_account(self.user_id, "Principal", "111111")
         second = self._add_account(self.user_id, "Secundaria", "222222", "disconnected")

@@ -663,6 +663,7 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             login=fields.get("login", ""),
             password=fields.get("password", ""),
             account_alias=fields.get("account_alias", ""),
+            product_kind=fields.get("product_kind", "") or "signal_copier",
         )
         safe_log("client_account_created", user_id=str(user_id))
         account = payload.get("account")

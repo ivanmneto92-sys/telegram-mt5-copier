@@ -11,6 +11,7 @@ from .daily_schedule import next_daily_signal_resume_at
 from .client_auth import normalize_email, validate_customer_name, validate_phone
 from .database import connect_database, initialize_database, utc_now
 from .mt5.account_service import MT5AccountForm, MT5AccountService
+from .mt5.models import PRODUCT_KIND_BROKER_COPY, PRODUCT_KIND_SIGNAL_COPIER
 from .mt5.pending_order_executor import rejection_reason_label
 from .mt5.settlement_monitor import get_result_mode, set_result_mode
 from .settings_service import SettingsService
@@ -24,7 +25,7 @@ class AccountNotFoundError(ValueError):
 
 _ACCOUNT_COLUMNS = """
     id, account_alias, broker_name, server_name, login, account_type,
-    connection_status, balance, equity, worker_heartbeat_at, last_error
+    connection_status, balance, equity, worker_heartbeat_at, last_error, product_kind
 """
 
 
@@ -86,7 +87,10 @@ class ClientPortalService:
         login: str,
         password: str,
         account_alias: str,
+        product_kind: str = PRODUCT_KIND_SIGNAL_COPIER,
     ) -> dict[str, object]:
+        if product_kind not in {PRODUCT_KIND_SIGNAL_COPIER, PRODUCT_KIND_BROKER_COPY}:
+            raise ValueError("Escolha o tipo da conta: Sistema Automatico ou Copy Trader.")
         if self.mt5_accounts is None:
             raise ValueError("Cadastro de conta MT5 indisponivel nesta instancia.")
         try:
@@ -111,6 +115,7 @@ class ClientPortalService:
             login=login,
             password=password,
             account_alias=account_alias,
+            product_kind=product_kind,
         )
         account = self.mt5_accounts.register_account(
             user_id, form, keep_on_connection_failure=True
@@ -231,7 +236,9 @@ class ClientPortalService:
                 "daily_signal_pause_until": user[2],
             },
             "account": self._account(account),
-            "daily_performance": self._performance(performance, floating_total),
+            "daily_performance": self._performance(
+                performance, floating_total, divisor=_currency_divisor(account)
+            ),
             "active_operations": int(active_count),
         }
 
@@ -261,6 +268,7 @@ class ClientPortalService:
             account = self._select_account(db, user_id, account_id)
             if account is None:
                 return {"month": month, "days": []}
+            divisor = _currency_divisor(account)
             rows = db.execute(
                 """
                 SELECT performance_date, realized_profit, return_percent
@@ -275,7 +283,7 @@ class ClientPortalService:
             "days": [
                 {
                     "date": str(row[0]),
-                    "net_profit": str(row[1]),
+                    "net_profit": _scaled(row[1], divisor),
                     "return_percent": str(row[2]) if row[2] is not None else None,
                 }
                 for row in rows
@@ -763,15 +771,20 @@ class ClientPortalService:
     def _account(row: object) -> dict[str, object] | None:
         if row is None:
             return None
+        divisor = _currency_divisor(row)
         return {
             "id": int(row[0]), "alias": row[1], "broker": row[2], "server": row[3],
             "masked_login": f"••••{str(row[4])[-4:]}", "account_type": row[5],
-            "connection_status": row[6], "balance": row[7], "equity": row[8],
+            "connection_status": row[6],
+            "balance": _scaled(row[7], divisor), "equity": _scaled(row[8], divisor),
             "worker_heartbeat_at": row[9], "last_error": row[10], "currency": "USD",
+            "product_kind": row[11],
         }
 
     @staticmethod
-    def _performance(row: object, floating_total: Decimal = Decimal("0")) -> dict[str, object] | None:
+    def _performance(
+        row: object, floating_total: Decimal = Decimal("0"), *, divisor: Decimal = Decimal(1)
+    ) -> dict[str, object] | None:
         if row is None:
             return None
         # net_profit devolvido aqui e o resultado "real real": realizado hoje
@@ -790,7 +803,26 @@ class ClientPortalService:
             except InvalidOperation:
                 pass
         return {
-            "date": row[0], "net_profit": str(combined), "gross_profit": row[2],
-            "trading_costs": row[3], "starting_balance": starting_balance,
+            "date": row[0], "net_profit": str(combined / divisor),
+            "gross_profit": _scaled(row[2], divisor),
+            "trading_costs": _scaled(row[3], divisor),
+            "starting_balance": _scaled(starting_balance, divisor),
             "return_percent": return_percent, "updated_at": row[6],
         }
+
+
+def _currency_divisor(account_row: object) -> Decimal:
+    """Conta Copy Trader e sempre Cents na corretora: o portal mostra o valor
+    em USD (dividido por 100), igual ao bot (bot_service.account_currency_divisor)."""
+    if account_row is not None and account_row[11] == PRODUCT_KIND_BROKER_COPY:
+        return Decimal(100)
+    return Decimal(1)
+
+
+def _scaled(value: object, divisor: Decimal) -> object:
+    if value is None or divisor == 1:
+        return value
+    try:
+        return str(Decimal(str(value)) / divisor)
+    except InvalidOperation:
+        return value
