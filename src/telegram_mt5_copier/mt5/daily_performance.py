@@ -68,6 +68,93 @@ def calculate_daily_performance(
     )
 
 
+def calculate_history_performance(
+    client: object,
+    balance: Decimal | None,
+    *,
+    days: int = 180,
+    now: datetime | None = None,
+    timezone_name: str = DEFAULT_BROKER_TIMEZONE,
+    utc_offset_hours: int | None = None,
+) -> list[DailyPerformance]:
+    """Resultado por dia ja encerrado (antes de hoje) a partir do historico de
+    deals do MT5 -- usado uma vez ao conectar a conta, pra o calendario ja
+    mostrar o passado. So devolve dias com negociacao.
+
+    O saldo inicial de cada dia e reconstruido de tras pra frente a partir do
+    saldo atual: saldo_inicio(D) = saldo_fim(D) - resultado(D) - depositos/
+    saques(D), e saldo_fim(D) = saldo_inicio(D+1).
+    """
+    current = now or datetime.now(tz=timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current = current.astimezone(timezone.utc)
+    report_timezone = performance_timezone(timezone_name, utc_offset_hours)
+    local_now = current.astimezone(report_timezone)
+    today = local_now.date()
+    range_start = (
+        local_now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days)
+    ).astimezone(timezone.utc)
+
+    buy_type = client_constant(client, "DEAL_TYPE_BUY", 0)
+    sell_type = client_constant(client, "DEAL_TYPE_SELL", 1)
+    balance_type = client_constant(client, "DEAL_TYPE_BALANCE", 2)
+    gross: dict[str, Decimal] = {}
+    costs: dict[str, Decimal] = {}
+    cash_flow: dict[str, Decimal] = {}
+    for deal in client.history_deals_get(range_start, current) or ():
+        deal_time = field_value(deal, "time", None)
+        if deal_time is None:
+            continue
+        day = (
+            datetime.fromtimestamp(int(deal_time), tz=timezone.utc)
+            .astimezone(report_timezone)
+            .date()
+            .isoformat()
+        )
+        deal_type = field_value(deal, "type", None)
+        profit = Decimal(str(field_value(deal, "profit", 0) or 0))
+        if deal_type is not None and int(deal_type) == balance_type:
+            cash_flow[day] = cash_flow.get(day, Decimal("0")) + profit
+            continue
+        if deal_type is not None and int(deal_type) not in {buy_type, sell_type}:
+            continue
+        gross[day] = gross.get(day, Decimal("0")) + profit
+        day_costs = costs.get(day, Decimal("0"))
+        for field_name in ("commission", "swap", "fee"):
+            day_costs += Decimal(str(field_value(deal, field_name, 0) or 0))
+        costs[day] = day_costs
+
+    results: list[DailyPerformance] = []
+    end_balance = balance
+    for offset in range(0, days + 1):
+        day = (today - timedelta(days=offset)).isoformat()
+        realized = gross.get(day, Decimal("0")) + costs.get(day, Decimal("0"))
+        start_balance = (
+            end_balance - realized - cash_flow.get(day, Decimal("0"))
+            if end_balance is not None
+            else None
+        )
+        if offset > 0 and day in gross:
+            return_percent = None
+            if start_balance is not None and start_balance > 0:
+                return_percent = realized * Decimal("100") / start_balance
+            results.append(
+                DailyPerformance(
+                    performance_date=day,
+                    realized_profit=realized,
+                    starting_balance=start_balance,
+                    return_percent=return_percent,
+                    updated_at=current.isoformat(),
+                    gross_profit=gross[day],
+                    trading_costs=costs.get(day, Decimal("0")),
+                )
+            )
+        end_balance = start_balance
+    results.reverse()
+    return results
+
+
 def current_performance_date(
     *,
     now: datetime | None = None,

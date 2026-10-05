@@ -15,6 +15,7 @@ from .daily_performance import (
     DEFAULT_BROKER_TIMEZONE,
     DailyPerformance,
     calculate_daily_performance,
+    calculate_history_performance,
     current_performance_date,
 )
 from .models import (
@@ -304,6 +305,7 @@ class MT5AccountService:
             )
             if performance is not None:
                 self.update_daily_performance(account_id, performance)
+            self._backfill_history_once(client, account_id, info.balance)
             self.record_audit(user_id, "mt5_connection_tested", {"account_id": account_id, "status": "connected"})
             return self.get_account(user_id, account_id)
         except Exception as exc:
@@ -620,6 +622,64 @@ class MT5AccountService:
     def first_account(self, user_id: int) -> MT5Account | None:
         accounts = self.list_accounts(user_id)
         return accounts[0] if accounts else None
+
+    def _backfill_history_once(
+        self, client: object, account_id: int, balance: Decimal | None
+    ) -> None:
+        """Na primeira conexao bem-sucedida, preenche o calendario com os dias
+        anteriores a partir do historico do MT5. Falha aqui nunca derruba a
+        conexao; sem marcar, tenta de novo na proxima."""
+        with connect_database(self.database_path) as connection:
+            row = connection.execute(
+                "SELECT history_backfilled_at FROM mt5_accounts WHERE id = ?",
+                (account_id,),
+            ).fetchone()
+        if row is None or row[0] is not None:
+            return
+        try:
+            history = calculate_history_performance(
+                client, balance, timezone_name=self.daily_performance_timezone
+            )
+        except Exception:
+            return
+        self.store_history_performance(account_id, history)
+
+    def store_history_performance(
+        self, account_id: int, history: list[DailyPerformance]
+    ) -> None:
+        """Grava dias passados sem sobrescrever o que o sistema ja registrou ao
+        vivo, e ja como "resumo enviado" -- historico importado nao gera push."""
+        now = utc_now()
+        with connect_database(self.database_path) as connection:
+            connection.executemany(
+                """
+                INSERT INTO account_daily_performance (
+                    mt5_account_id, performance_date, realized_profit,
+                    gross_profit, trading_costs, starting_balance, return_percent,
+                    updated_at, push_notified_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(mt5_account_id, performance_date) DO NOTHING
+                """,
+                [
+                    (
+                        account_id,
+                        day.performance_date,
+                        str(day.realized_profit),
+                        str(day.gross_profit) if day.gross_profit is not None else None,
+                        str(day.trading_costs) if day.trading_costs is not None else None,
+                        str(day.starting_balance) if day.starting_balance is not None else None,
+                        str(day.return_percent) if day.return_percent is not None else None,
+                        day.updated_at,
+                        now,
+                    )
+                    for day in history
+                ],
+            ).close()
+            connection.execute(
+                "UPDATE mt5_accounts SET history_backfilled_at = ? WHERE id = ?",
+                (now, account_id),
+            ).close()
 
     def update_daily_performance(
         self,

@@ -1232,6 +1232,7 @@ def run_schema_migrations(connection: sqlite3.Connection) -> None:
     # em todo ciclo ate o fim do dia local da conta.
     ensure_column(connection, "account_daily_performance", "push_notified_at", "TEXT")
     ensure_column(connection, "push_subscriptions", "primed_at", "TEXT")
+    ensure_column(connection, "mt5_accounts", "history_backfilled_at", "TEXT")
     migrate_channel_subscriptions_to_explicit_opt_in(connection)
 
 
