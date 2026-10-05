@@ -27,6 +27,8 @@ from .models import (
     ENTRY_EXECUTION_MARKET_ON_ZONE,
     ENTRY_EXECUTION_PENDING_ORDER,
     ENTRY_PRICE_FIRST_TOUCH,
+    PRODUCT_KIND_BROKER_COPY,
+    PRODUCT_KIND_SIGNAL_COPIER,
     ExecutionProfile,
     MT5Account,
 )
@@ -41,6 +43,7 @@ class MT5AccountForm:
     login: str
     password: str = field(repr=False)
     account_alias: str
+    product_kind: str = PRODUCT_KIND_SIGNAL_COPIER
 
     def __repr__(self) -> str:
         return (
@@ -105,6 +108,11 @@ class MT5AccountService:
         login = require_login(form.login)
         account_alias = require_text(form.account_alias, "account_alias")
         password = require_text(form.password, "password")
+        product_kind = (
+            PRODUCT_KIND_BROKER_COPY
+            if form.product_kind == PRODUCT_KIND_BROKER_COPY
+            else PRODUCT_KIND_SIGNAL_COPIER
+        )
 
         encrypted_password = self.credential_service.encrypt_password(password)
         password = ""
@@ -156,10 +164,11 @@ class MT5AccountService:
                         account_mode,
                         account_type,
                         connection_status,
+                        product_kind,
                         created_at,
                         updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         user_id,
@@ -171,6 +180,7 @@ class MT5AccountService:
                         ACCOUNT_MODE_HEDGING,
                         ACCOUNT_TYPE_DEMO,
                         CONNECTION_STATUS_DISCONNECTED,
+                        product_kind,
                         now,
                         now,
                     ),
@@ -361,7 +371,7 @@ class MT5AccountService:
                 SELECT id, user_id, broker_name, server_name, login, encrypted_password,
                        account_alias, terminal_path, account_type, connection_status,
                        last_error, last_connected_at, account_mode, balance, equity,
-                       worker_heartbeat_at
+                       worker_heartbeat_at, product_kind
                 FROM mt5_accounts
                 WHERE user_id = ? AND login = ?
                   AND lower(server_name) = lower(?)
@@ -382,7 +392,7 @@ class MT5AccountService:
                     SELECT id, user_id, broker_name, server_name, login, encrypted_password,
                            account_alias, terminal_path, account_type, connection_status,
                            last_error, last_connected_at, account_mode, balance, equity,
-                           worker_heartbeat_at
+                           worker_heartbeat_at, product_kind
                     FROM mt5_accounts
                     WHERE user_id = ? AND login = ?
                       AND connection_status IN (?, ?)
@@ -485,7 +495,7 @@ class MT5AccountService:
                 SELECT id, user_id, broker_name, server_name, login, encrypted_password,
                        account_alias, terminal_path, account_type, connection_status,
                        last_error, last_connected_at, account_mode, balance, equity,
-                       worker_heartbeat_at
+                       worker_heartbeat_at, product_kind
                 FROM mt5_accounts
                 WHERE user_id = ?
                 ORDER BY COALESCE(
@@ -512,7 +522,7 @@ class MT5AccountService:
                 SELECT id, user_id, broker_name, server_name, login, encrypted_password,
                        account_alias, terminal_path, account_type, connection_status,
                        last_error, last_connected_at, account_mode, balance, equity,
-                       worker_heartbeat_at
+                       worker_heartbeat_at, product_kind
                 FROM mt5_accounts
                 WHERE id = ? AND user_id = ?
                 """,
@@ -536,7 +546,7 @@ class MT5AccountService:
                 SELECT id, user_id, broker_name, server_name, login, encrypted_password,
                        account_alias, terminal_path, account_type, connection_status,
                        last_error, last_connected_at, account_mode, balance, equity,
-                       worker_heartbeat_at
+                       worker_heartbeat_at, product_kind
                 FROM mt5_accounts
                 WHERE id = ?
                 """,
@@ -578,9 +588,10 @@ class MT5AccountService:
                        a.encrypted_password, a.account_alias, a.terminal_path,
                        a.account_type, a.connection_status, a.last_error,
                        a.last_connected_at, a.account_mode, a.balance, a.equity,
-                       a.worker_heartbeat_at
+                       a.worker_heartbeat_at, a.product_kind
                 FROM mt5_accounts a
                 WHERE a.queue_pilot_enabled = 1
+                  AND a.product_kind != 'broker_copy'
                   {channel_filter}
                 ORDER BY a.id ASC
                 """,
@@ -971,6 +982,7 @@ class MT5AccountService:
                   AND a.connection_status = ?
                   AND a.account_type = ?
                   AND p.enabled = 1
+                  AND a.product_kind != 'broker_copy'
                   {channel_filter}
                 ORDER BY a.id ASC
                 """,
@@ -1028,6 +1040,7 @@ class MT5AccountService:
                         AND CAST(cp.amount AS REAL) > 0
                   )
                   AND p.enabled = 1
+                  AND a.product_kind != 'broker_copy'
                   {channel_filter}
                 ORDER BY a.id ASC
                 """,
@@ -1152,6 +1165,7 @@ def account_from_row(row: tuple[object, ...]) -> MT5Account:
         balance=Decimal(str(row[13])) if len(row) > 13 and row[13] is not None else None,
         equity=Decimal(str(row[14])) if len(row) > 14 and row[14] is not None else None,
         worker_heartbeat_at=str(row[15]) if len(row) > 15 and row[15] else None,
+        product_kind=str(row[16]) if len(row) > 16 and row[16] else PRODUCT_KIND_SIGNAL_COPIER,
     )
 
 

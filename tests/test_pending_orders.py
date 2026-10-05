@@ -22,6 +22,7 @@ from telegram_mt5_copier.mt5.models import (
     ENTRY_PRICE_DISTRIBUTED,
     ENTRY_PRICE_MIDDLE,
     LatencyMetrics,
+    PRODUCT_KIND_BROKER_COPY,
     PendingOrderType,
     SymbolInfo,
     TickInfo,
@@ -759,6 +760,38 @@ class PendingOrderTests(unittest.TestCase):
 
         self.users.set_daily_signal_pause_until(self.user.id, past)
         self.assertEqual(len(self.accounts.accounts_for_approved_users()), 1)
+
+    def test_conta_copy_trader_fica_fora_dos_candidatos_a_sinal(self) -> None:
+        copy_account = self.accounts.register_account(
+            self.user.id,
+            MT5AccountForm(
+                "Broker",
+                "Broker-Demo",
+                "778899",
+                "secret",
+                "Copy",
+                product_kind=PRODUCT_KIND_BROKER_COPY,
+            ),
+        )
+        self.accounts.update_execution_profile_fixed_lot(self.user.id, copy_account.id, Decimal("0.04"))
+
+        self.assertEqual(copy_account.product_kind, PRODUCT_KIND_BROKER_COPY)
+
+        approved_ids = {account.id for account, _ in self.accounts.accounts_for_approved_users()}
+        self.assertIn(self.account.id, approved_ids)
+        self.assertNotIn(copy_account.id, approved_ids)
+
+        demo_ids = {
+            account.id for account, _ in self.accounts.connected_demo_accounts_for_active_users()
+        }
+        self.assertIn(self.account.id, demo_ids)
+        self.assertNotIn(copy_account.id, demo_ids)
+
+        active_ids = {account.id for account, _ in self.accounts.accounts_for_active_users()}
+        self.assertIn(copy_account.id, active_ids)
+
+        results = self.executor().execute_for_signal(parse_signal_text(BUY_SIGNAL).signal)
+        self.assertTrue(all(result.account.id != copy_account.id for result in results))
 
     def test_usuario_pausado_mantem_worker_enquanto_existe_ordem_aberta(self) -> None:
         result = self.executor().execute_for_account(

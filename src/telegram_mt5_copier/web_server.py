@@ -351,6 +351,7 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             login=fields.get("login", ""),
             password=fields.get("password", ""),
             account_alias=fields.get("account_alias", ""),
+            product_kind=fields.get("product_kind", ""),
         )
         self.send_json(
             {
@@ -358,6 +359,7 @@ class OnboardingHandler(BaseHTTPRequestHandler):
                 "account_id": result.account_id,
                 "masked_login": result.masked_login,
                 "connection_status": result.connection_status,
+                "product_kind": result.product_kind,
             }
         )
 

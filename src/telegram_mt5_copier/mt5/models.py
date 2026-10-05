@@ -14,6 +14,15 @@ CONNECTION_STATUS_FAILED = "failed"
 EXECUTION_STATUS_SIMULATED = "simulated"
 ACCOUNT_MODE_HEDGING = "hedging"
 ACCOUNT_MODE_NETTING = "netting"
+# signal_copier: o sistema automatico de sempre -- recebe sinal, executa,
+# gere (BE/trailing/trava diaria). broker_copy: so conecta o MT5 pra
+# acompanhar resultado de uma copy trading feita do lado da corretora;
+# nunca recebe sinal nenhum daqui, nem com canal/execution_profile
+# configurado -- connected_demo_accounts_for_active_users() e
+# accounts_for_approved_users() em account_service.py (os unicos pontos
+# que decidem quem recebe um sinal) ja excluem esse product_kind.
+PRODUCT_KIND_SIGNAL_COPIER = "signal_copier"
+PRODUCT_KIND_BROKER_COPY = "broker_copy"
 ENTRY_EXECUTION_PENDING_ORDER = "pending_order"
 ENTRY_EXECUTION_MARKET_ON_ZONE = "market_on_zone"
 ENTRY_EXECUTION_MARKET_IMMEDIATE = "market_immediate"
@@ -64,6 +73,7 @@ class MT5Account:
     balance: Decimal | None = None
     equity: Decimal | None = None
     worker_heartbeat_at: str | None = None
+    product_kind: str = PRODUCT_KIND_SIGNAL_COPIER
 
     @property
     def masked_login(self) -> str:

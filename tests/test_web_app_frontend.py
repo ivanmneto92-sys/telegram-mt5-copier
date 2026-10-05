@@ -73,6 +73,14 @@ class MiniAppFrontendTests(unittest.TestCase):
         self.assertIn('id="connect-form"', html)
         self.assertIn(OUTSIDE_TELEGRAM_MESSAGE, html)
 
+    def test_formulario_oferece_escolha_entre_sistema_automatico_e_copy_trader(self) -> None:
+        html = render_onboarding_form()
+
+        self.assertIn('name="product_kind" value="signal_copier" checked', html)
+        self.assertIn('name="product_kind" value="broker_copy"', html)
+        self.assertIn("Sistema Automático", html)
+        self.assertIn("Copy Trader", html)
+
     def test_formulario_lista_apenas_corretoras_configuradas(self) -> None:
         html = render_onboarding_form(
             broker_options=("HFM", "FTMO", "FXGlobe", "Exness", "INFINOX")

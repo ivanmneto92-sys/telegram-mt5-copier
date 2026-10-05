@@ -752,6 +752,75 @@ class MT5OnboardingTests(unittest.TestCase):
         self.assertEqual(result.masked_login, "••••5678")
         self.assertNotIn("mt5-secret-password", repr(result))
 
+    def test_onboarding_registra_conta_copy_trader_quando_escolhida(self) -> None:
+        token = "123456:bot-token"
+        csrf = CSRFTokenService("csrf-secret")
+        now = int(time.time())
+        init_data = build_signed_init_data(
+            token,
+            {
+                "query_id": "abc",
+                "auth_date": str(now),
+                "user": json.dumps({"id": 101, "username": "alice"}, separators=(",", ":")),
+            },
+        )
+
+        service = MT5OnboardingService(
+            bot_token=token,
+            users=self.users,
+            accounts=self.accounts,
+            csrf=csrf,
+            require_https=True,
+        )
+        result = service.submit_account_form(
+            init_data=init_data,
+            csrf_token=csrf.issue(101, now=now),
+            request_scheme="https",
+            broker_name="Broker",
+            server_name="Broker-Demo",
+            login="12345678",
+            password="mt5-secret-password",
+            account_alias="Demo",
+            product_kind="broker_copy",
+        )
+
+        self.assertEqual(result.product_kind, "broker_copy")
+        stored_account = self.accounts.get_account_by_id(result.account_id)
+        self.assertEqual(stored_account.product_kind, "broker_copy")
+
+    def test_onboarding_sem_product_kind_cadastra_como_sistema_automatico(self) -> None:
+        token = "123456:bot-token"
+        csrf = CSRFTokenService("csrf-secret")
+        now = int(time.time())
+        init_data = build_signed_init_data(
+            token,
+            {
+                "query_id": "abc",
+                "auth_date": str(now),
+                "user": json.dumps({"id": 101, "username": "alice"}, separators=(",", ":")),
+            },
+        )
+
+        service = MT5OnboardingService(
+            bot_token=token,
+            users=self.users,
+            accounts=self.accounts,
+            csrf=csrf,
+            require_https=True,
+        )
+        result = service.submit_account_form(
+            init_data=init_data,
+            csrf_token=csrf.issue(101, now=now),
+            request_scheme="https",
+            broker_name="Broker",
+            server_name="Broker-Demo",
+            login="12345678",
+            password="mt5-secret-password",
+            account_alias="Demo",
+        )
+
+        self.assertEqual(result.product_kind, "signal_copier")
+
     def test_onboarding_rejeita_servidor_fora_da_lista_da_corretora(self) -> None:
         service = MT5OnboardingService(
             bot_token="123456:bot-token",

@@ -11,7 +11,7 @@ from typing import Mapping, MutableSet
 from urllib.parse import parse_qsl, urlencode
 
 from .mt5.account_service import MT5AccountForm, MT5AccountService
-from .mt5.models import mask_login
+from .mt5.models import PRODUCT_KIND_BROKER_COPY, PRODUCT_KIND_SIGNAL_COPIER, mask_login
 from .users import UserRepository
 
 
@@ -34,6 +34,7 @@ class OnboardingResult:
     account_id: int
     masked_login: str
     connection_status: str
+    product_kind: str = PRODUCT_KIND_SIGNAL_COPIER
 
 
 class WebAppValidationError(ValueError):
@@ -197,6 +198,7 @@ class MT5OnboardingService:
         login: str,
         password: str,
         account_alias: str,
+        product_kind: str = PRODUCT_KIND_SIGNAL_COPIER,
     ) -> OnboardingResult:
         if self.require_https and request_scheme.lower() != "https":
             raise WebAppValidationError("HTTPS obrigatorio em producao.")
@@ -222,6 +224,11 @@ class MT5OnboardingService:
             enforce=self.enforce_broker_servers,
         )
 
+        normalized_product_kind = (
+            PRODUCT_KIND_BROKER_COPY
+            if product_kind == PRODUCT_KIND_BROKER_COPY
+            else PRODUCT_KIND_SIGNAL_COPIER
+        )
         user = self.users.get_or_create_user(init.user.id, init.user.username)
         form = MT5AccountForm(
             broker_name=broker_name,
@@ -229,6 +236,7 @@ class MT5OnboardingService:
             login=login,
             password=password,
             account_alias=account_alias,
+            product_kind=normalized_product_kind,
         )
         account = self.accounts.register_account(user.id, form, keep_on_connection_failure=True)
         password = ""
@@ -236,6 +244,7 @@ class MT5OnboardingService:
             account_id=account.id,
             masked_login=mask_login(account.login),
             connection_status=account.connection_status,
+            product_kind=account.product_kind,
         )
 
     def _validated_server_name(
@@ -369,6 +378,11 @@ def render_onboarding_form(
     button {{ margin-top: 20px; width: 100%; padding: 13px; border: 0; border-radius: 8px; background: #1473e6; color: white; font-weight: 700; }}
     button:disabled {{ opacity: .62; }}
     [hidden] {{ display: none !important; }}
+    .product-kind {{ display: flex; gap: 10px; margin-top: 10px; }}
+    .product-kind-option {{ flex: 1; display: block; border: 1px solid #c9ced6; border-radius: 8px; padding: 12px; cursor: pointer; font-weight: 600; margin-top: 0; }}
+    .product-kind-option input {{ width: auto; margin: 0 8px 0 0; }}
+    .product-kind-option.selected {{ border-color: #1473e6; background: #f0f7ff; }}
+    .product-kind-help {{ display: block; margin-top: 6px; font-weight: 400; color: #555; }}
   </style>
   <script{nonce_attribute}>
     (function () {{
@@ -400,6 +414,19 @@ def render_onboarding_form(
     <form id="connect-form" method="post" action="/api/connect" autocomplete="off">
       <input type="hidden" name="csrf_token" value="{csrf_token}">
       <input type="hidden" name="init_data" id="init_data">
+      <label>Tipo de conta</label>
+      <div class="product-kind">
+        <label class="product-kind-option" id="product-kind-signal_copier">
+          <input type="radio" name="product_kind" value="signal_copier" checked>
+          Sistema Automático
+          <span class="product-kind-help">Recebe e executa os sinais dos canais, com toda a gestão (BE, trailing, trava diária etc.).</span>
+        </label>
+        <label class="product-kind-option" id="product-kind-broker_copy">
+          <input type="radio" name="product_kind" value="broker_copy">
+          Copy Trader
+          <span class="product-kind-help">Só conecta sua conta para você acompanhar o resultado do copy feito dentro da corretora. Não recebe sinais nem aplica gestão.</span>
+        </label>
+      </div>
       <label>Corretora{broker_field}</label>
       <label>Servidor
         <select name="server_name" required disabled>
@@ -586,6 +613,29 @@ def render_miniapp_script() -> str:
       serverInput.addEventListener("change", toggleCustomServerField);
     }
 
+    var productKindInputs = document.querySelectorAll("input[name='product_kind']");
+    function productKindInput() {
+      for (var index = 0; index < productKindInputs.length; index += 1) {
+        if (productKindInputs[index].checked) {
+          return productKindInputs[index];
+        }
+      }
+      return null;
+    }
+    function updateProductKindSelection() {
+      for (var index = 0; index < productKindInputs.length; index += 1) {
+        var input = productKindInputs[index];
+        var optionLabel = document.getElementById("product-kind-" + input.value);
+        if (optionLabel) {
+          optionLabel.className = "product-kind-option" + (input.checked ? " selected" : "");
+        }
+      }
+    }
+    for (var productKindIndex = 0; productKindIndex < productKindInputs.length; productKindIndex += 1) {
+      productKindInputs[productKindIndex].addEventListener("change", updateProductKindSelection);
+    }
+    updateProductKindSelection();
+
     function showMessage(text, kind) {
       if (!message) {
         return;
@@ -711,7 +761,8 @@ def render_miniapp_script() -> str:
         custom_server_name: customServerInput ? customServerInput.value : "",
         login: document.querySelector("input[name='login']").value,
         password: passwordInput ? passwordInput.value : "",
-        account_alias: document.querySelector("input[name='account_alias']").value
+        account_alias: document.querySelector("input[name='account_alias']").value,
+        product_kind: productKindInput() ? productKindInput().value : "signal_copier"
       };
       postApi("/api/connect", fields)
         .then(function (response) {

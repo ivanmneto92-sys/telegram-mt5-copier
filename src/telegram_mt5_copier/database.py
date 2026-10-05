@@ -1184,6 +1184,14 @@ def run_schema_migrations(connection: sqlite3.Connection) -> None:
             WHERE source_signal_id IS NOT NULL AND source_account_id IS NOT NULL
         """
     ).close()
+    # Entrega 1 do Copy Trader: toda conta MT5 ja existente continua
+    # 'signal_copier' (o sistema automatico de sempre, sem nada mudando pra
+    # ela). 'broker_copy' e a conta nova que so conecta o MT5 pra acompanhar
+    # resultado -- nunca recebe sinal nenhum, independente de canal ou
+    # execution_profile configurado (ver connected_demo_accounts_for_active_users()
+    # e accounts_for_approved_users() em mt5/account_service.py, os unicos
+    # pontos que decidem quem recebe um sinal, que ja excluem esse product_kind).
+    ensure_column(connection, "mt5_accounts", "product_kind", "TEXT NOT NULL DEFAULT 'signal_copier'")
     migrate_channel_subscriptions_to_explicit_opt_in(connection)
 
 

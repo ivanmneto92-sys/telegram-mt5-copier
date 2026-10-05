@@ -447,6 +447,25 @@ Para validar uma conta na VPS:
 
 O modo real aplica antes do envio: lote fixo ou risco percentual, spread máximo, limite/meta diária, máximo de sinais, volume mínimo/step, distância mínima de stops e `order_check`. Ordens de múltiplos TPs são verificadas antes do primeiro envio; se uma submissão intermediária falhar, o serviço tenta remover as pendentes já criadas.
 
+A partir da versão `0.46.0`, a Mini App de conexão pergunta antes do
+cadastro se a conta é **Sistema Automático** ou **Copy Trader** (Entrega 1
+do recurso Copy Trader — a tela de resultados em si, acessível pelo site,
+é uma entrega futura separada). "Sistema Automático" é o fluxo de sempre,
+sem nenhuma mudança: recebe sinal, executa, aplica toda a gestão (BE,
+trailing, trava diária). "Copy Trader" é para o cliente que já usa o copy
+trading interno da própria corretora e só quer conectar a conta na VPS
+para acompanhar o resultado de forma mais simples do que pelo app da
+corretora — essa conta nunca recebe sinal nenhum daqui, independente de
+canal ou perfil operacional configurado, e nenhuma gestão de risco se
+aplica a ela (sem lote, sem risco, sem TP, sem trava diária). A escolha
+fica salva por conta MT5 (coluna `product_kind`, migração automática
+marcando toda conta já existente como `signal_copier`) e é aplicada direto
+nas duas únicas consultas que decidem quem recebe um sinal disparado
+(`accounts_for_approved_users` e `connected_demo_accounts_for_active_users`
+em `mt5/account_service.py`) — uma conta Copy Trader continua conectada,
+com heartbeat e monitoramento de posição normais, só nunca entra como
+candidata a executar um sinal novo.
+
 A partir da versão `0.37.1`, atingir a meta diária ou o limite diário pausa
 novos sinais imediatamente, mesmo quando o negócio que cruzou o limiar
 encerrou a última posição aberta da conta. Antes, a trava financeira só
