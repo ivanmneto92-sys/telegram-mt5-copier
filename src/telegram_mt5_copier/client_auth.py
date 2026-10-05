@@ -30,6 +30,11 @@ class BrowserClientSession:
     expires_at: str
 
 
+# Cliente fica conectado (inclusive no app da tela de inicio) enquanto usar o
+# portal: a sessao vale 30 dias e e renovada a cada acesso autenticado.
+CLIENT_SESSION_TTL_HOURS = 24 * 30
+
+
 class ClientBrowserAuthService:
     """Emite links descartaveis e sessoes web vinculadas a um unico cliente."""
 
@@ -38,7 +43,7 @@ class ClientBrowserAuthService:
         database_path: Path,
         *,
         login_ttl_minutes: int = 5,
-        session_ttl_hours: int = 12,
+        session_ttl_hours: int = CLIENT_SESSION_TTL_HOURS,
         password_reset_ttl_minutes: int = 30,
         email_confirmation_ttl_hours: int = 48,
     ) -> None:
@@ -436,8 +441,15 @@ class ClientBrowserAuthService:
             if row is None or datetime.fromisoformat(str(row[2])) <= now:
                 raise ValueError("Sessao do cliente expirada.")
             connection.execute(
-                "UPDATE client_browser_sessions SET last_seen_at = ? WHERE id = ?",
-                (now.isoformat(), int(row[0])),
+                """
+                UPDATE client_browser_sessions SET last_seen_at = ?, expires_at = ?
+                WHERE id = ?
+                """,
+                (
+                    now.isoformat(),
+                    (now + timedelta(hours=self.session_ttl_hours)).isoformat(),
+                    int(row[0]),
+                ),
             )
         return int(row[1])
 

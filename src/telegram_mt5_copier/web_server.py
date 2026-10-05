@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, urljoin, urlsplit
 
 from .admin_auth import AdminBrowserAuthService
 from .admin_panel import AdminIdentity, AdminPanelService, render_admin_panel, render_admin_script
-from .client_auth import ClientBrowserAuthService, normalize_email
+from .client_auth import CLIENT_SESSION_TTL_HOURS, ClientBrowserAuthService, normalize_email
 from .client_portal import AccountNotFoundError, ClientPortalService
 from .config import AppConfig
 from .credential_service import CredentialService
@@ -421,7 +421,14 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             else:
                 self.send_error(404)
                 return
-            self.send_json({"ok": True, **payload})
+            # Renova tambem o cookie (a sessao no banco ja foi renovada em
+            # authenticate_client), pra quem usa o app nao cair no login.
+            extra_headers: tuple[tuple[str, str], ...] = ()
+            if path in {"/api/v1/session", "/api/v1/dashboard"}:
+                extra_headers = (
+                    ("Set-Cookie", client_session_cookie(self.client_session_cookie())),
+                )
+            self.send_json({"ok": True, **payload}, extra_headers=extra_headers)
         except InvalidAccountIdError as exc:
             self.send_json({"ok": False, "error": str(exc)}, status=400)
         except AccountNotFoundError as exc:
@@ -1445,7 +1452,7 @@ def clear_admin_session_cookie() -> str:
 
 def client_session_cookie(token: str) -> str:
     return (
-        f"client_session={token}; Path=/; Max-Age=43200; "
+        f"client_session={token}; Path=/; Max-Age={CLIENT_SESSION_TTL_HOURS * 3600}; "
         "Secure; HttpOnly; SameSite=Strict"
     )
 

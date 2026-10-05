@@ -64,6 +64,26 @@ class PasswordResetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "expirado"):
             self.auth.reset_password(token, "SenhaNova123")
 
+    def test_session_lasts_30_days_and_is_renewed_on_use(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        def expires_at() -> datetime:
+            with connect_database(self.database_path) as db:
+                value = db.execute("SELECT expires_at FROM client_browser_sessions").fetchone()[0]
+            return datetime.fromisoformat(str(value))
+
+        now = datetime.now(tz=timezone.utc)
+        self.assertGreater(expires_at(), now + timedelta(days=29))
+        with connect_database(self.database_path) as db:
+            db.execute(
+                "UPDATE client_browser_sessions SET expires_at = ?",
+                ((now + timedelta(hours=1)).isoformat(),),
+            )
+
+        self.auth.authenticate_session(self.session.session_token)
+
+        self.assertGreater(expires_at(), now + timedelta(days=29))
+
     def test_reset_password_revokes_existing_sessions(self) -> None:
         other_session = self.auth.login(email="cliente@example.com", password="SenhaAntiga123")
         self.assertEqual(
