@@ -67,8 +67,14 @@ class TradePushNotifier:
             info = client.account_info()
             if info is None:
                 return
-            self._notify_closed_deals(client, account, subscriptions)
-            self._maybe_send_daily_summary(client, account, info.balance, subscriptions)
+            # Inscricao nova so passa a receber a partir da proxima rodada: nesta
+            # os deals/resumos pendentes sao apenas marcados como avisados.
+            primed = [subscription for subscription in subscriptions if subscription.primed]
+            self._notify_closed_deals(client, account, primed)
+            self._maybe_send_daily_summary(client, account, info.balance, primed)
+            self.accounts.mark_push_subscriptions_primed(
+                [subscription.endpoint for subscription in subscriptions if not subscription.primed]
+            )
         except Exception:
             self.logger.exception("Falha ao processar push da conta %s", account.id)
         finally:

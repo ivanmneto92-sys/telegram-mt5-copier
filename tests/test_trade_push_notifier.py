@@ -70,6 +70,8 @@ class TradePushNotifierTests(unittest.TestCase):
             auth_key="auth",
             user_agent="pytest",
         )
+        # Simula inscricao ja ativa ha tempo; a rodada de "armar" tem teste proprio.
+        self.accounts.mark_push_subscriptions_primed(["https://push.example/device-a"])
 
     def tearDown(self) -> None:
         self.accounts.close()
@@ -130,6 +132,39 @@ class TradePushNotifierTests(unittest.TestCase):
 
         self.notifier(client, sender).process_account(self.account)
         self.assertEqual(sender.sent, [])
+
+    def test_inscricao_nova_nao_recebe_historico_pendente(self) -> None:
+        self.accounts.remove_push_subscription(self.user.id, "https://push.example/device-a")
+        self.accounts.save_push_subscription(
+            self.user.id,
+            endpoint="https://push.example/device-new",
+            p256dh_key="p256dh",
+            auth_key="auth",
+            user_agent="pytest",
+        )
+        yesterday = (datetime.now(tz=timezone.utc) - timedelta(days=1)).date().isoformat()
+        self.accounts.update_daily_performance(
+            self.account.id,
+            DailyPerformance(
+                performance_date=yesterday,
+                realized_profit=Decimal("30"),
+                starting_balance=Decimal("1000"),
+                return_percent=Decimal("3"),
+                updated_at=datetime.now(tz=timezone.utc).isoformat(),
+            ),
+        )
+        backlog = tuple(deal(f"OLD{index}", "10") for index in range(30))
+        sender = RecordingSender()
+
+        self.notifier(SimulatedMT5Client(history_deals=backlog), sender).process_account(
+            self.account
+        )
+        self.assertEqual(sender.sent, [])
+
+        client = SimulatedMT5Client(history_deals=(*backlog, deal("NEW", "25")))
+        self.notifier(client, sender).process_account(self.account)
+        self.assertEqual(len(sender.sent), 1)
+        self.assertIn("+US$ 25.00", sender.sent[0][2])
 
     def test_resumo_diario_e_enviado_uma_vez_quando_o_dia_vira(self) -> None:
         yesterday = (datetime.now(tz=timezone.utc) - timedelta(days=1)).date().isoformat()

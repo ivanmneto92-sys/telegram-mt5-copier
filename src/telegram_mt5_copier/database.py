@@ -1231,6 +1231,7 @@ def run_schema_migrations(connection: sqlite3.Connection) -> None:
     # enviado pra essa linha -- sem isso, o worker reenviaria o mesmo resumo
     # em todo ciclo ate o fim do dia local da conta.
     ensure_column(connection, "account_daily_performance", "push_notified_at", "TEXT")
+    ensure_column(connection, "push_subscriptions", "primed_at", "TEXT")
     migrate_channel_subscriptions_to_explicit_opt_in(connection)
 
 

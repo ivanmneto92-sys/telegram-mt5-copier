@@ -24,6 +24,10 @@ class PushSubscription:
     auth_key: str
     trade_alerts_enabled: bool = True
     daily_summary_enabled: bool = True
+    # False ate o worker passar uma vez por esta inscricao. Enquanto nao
+    # "armada", ela nao recebe nada: evita despejar no aparelho recem-inscrito
+    # todo o historico pendente (deals dos ultimos dias, resumos antigos).
+    primed: bool = True
 
 
 def generate_vapid_keypair() -> tuple[str, str]:

@@ -733,7 +733,8 @@ class MT5AccountService:
         with connect_database(self.database_path) as connection:
             rows = connection.execute(
                 """
-                SELECT endpoint, p256dh_key, auth_key, trade_alerts_enabled, daily_summary_enabled
+                SELECT endpoint, p256dh_key, auth_key, trade_alerts_enabled,
+                       daily_summary_enabled, primed_at
                 FROM push_subscriptions
                 WHERE user_id = ?
                 """,
@@ -746,9 +747,20 @@ class MT5AccountService:
                 auth_key=str(row[2]),
                 trade_alerts_enabled=bool(row[3]),
                 daily_summary_enabled=bool(row[4]),
+                primed=row[5] is not None,
             )
             for row in rows
         ]
+
+    def mark_push_subscriptions_primed(self, endpoints: list[str]) -> None:
+        if not endpoints:
+            return
+        now = utc_now()
+        with connect_database(self.database_path) as connection:
+            connection.executemany(
+                "UPDATE push_subscriptions SET primed_at = ? WHERE endpoint = ? AND primed_at IS NULL",
+                [(now, endpoint) for endpoint in endpoints],
+            ).close()
 
     def save_push_subscription(
         self,
