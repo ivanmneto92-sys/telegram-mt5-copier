@@ -314,6 +314,12 @@ class AdminPanelTests(unittest.TestCase):
                 "VALUES (?, 'test_mt5_connection', '{}', 'pending', ?)",
                 (self.bob.id, now),
             )
+            connection.execute(
+                "INSERT INTO push_subscriptions "
+                "(user_id, endpoint, p256dh_key, auth_key, created_at, updated_at) "
+                "VALUES (?, 'https://push.example/bob', 'p', 'a', ?, ?)",
+                (self.bob.id, now, now),
+            )
 
         accounts = MT5AccountService(self.database_path)
         service = AdminPanelService(
@@ -343,6 +349,7 @@ class AdminPanelTests(unittest.TestCase):
                 "client_credentials",
                 "user_settings",
                 "commands",
+                "push_subscriptions",
             ):
                 remaining = connection.execute(
                     f"SELECT COUNT(*) FROM {table} WHERE user_id = ?", (self.bob.id,)

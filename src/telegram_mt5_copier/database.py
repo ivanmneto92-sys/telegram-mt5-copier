@@ -898,6 +898,41 @@ def initialize_database(database_path: Path) -> None:
                 FOREIGN KEY (mt5_account_id) REFERENCES mt5_accounts(id)
             );
 
+            -- Inscricoes Web Push (notificacao do site/PWA, independente do bot do
+            -- Telegram). Cada endpoint e um dispositivo/navegador distinto -- um
+            -- mesmo usuario pode ter varias linhas (celular + computador).
+            CREATE TABLE IF NOT EXISTS push_subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                endpoint TEXT NOT NULL UNIQUE,
+                p256dh_key TEXT NOT NULL,
+                auth_key TEXT NOT NULL,
+                user_agent TEXT,
+                trade_alerts_enabled INTEGER NOT NULL DEFAULT 1,
+                daily_summary_enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            );
+
+            -- Dedup de push por negociacao fechada: ao contrario de
+            -- execution_close_events (so operacoes do proprio copiador, por
+            -- magic number), aqui registra QUALQUER deal de fechamento ja
+            -- notificado por push, direto do historico do MT5 -- cobre tambem
+            -- o resultado do copy trading interno da corretora (contas
+            -- product_kind='broker_copy', que nunca passam por
+            -- execution_close_events).
+            CREATE TABLE IF NOT EXISTS push_notified_deals (
+                mt5_account_id INTEGER NOT NULL,
+                mt5_deal_ticket TEXT NOT NULL,
+                notified_at TEXT NOT NULL,
+                PRIMARY KEY (mt5_account_id, mt5_deal_ticket),
+                FOREIGN KEY (mt5_account_id) REFERENCES mt5_accounts(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user
+                ON push_subscriptions(user_id);
+
             CREATE INDEX IF NOT EXISTS idx_signal_events_status
                 ON signal_events(status);
 
@@ -1192,6 +1227,10 @@ def run_schema_migrations(connection: sqlite3.Connection) -> None:
     # e accounts_for_approved_users() em mt5/account_service.py, os unicos
     # pontos que decidem quem recebe um sinal, que ja excluem esse product_kind).
     ensure_column(connection, "mt5_accounts", "product_kind", "TEXT NOT NULL DEFAULT 'signal_copier'")
+    # Marca se o resumo diario por push (Web Push/PWA, resultado em %) ja foi
+    # enviado pra essa linha -- sem isso, o worker reenviaria o mesmo resumo
+    # em todo ciclo ate o fim do dia local da conta.
+    ensure_column(connection, "account_daily_performance", "push_notified_at", "TEXT")
     migrate_channel_subscriptions_to_explicit_opt_in(connection)
 
 

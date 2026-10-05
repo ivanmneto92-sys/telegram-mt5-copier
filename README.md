@@ -769,6 +769,56 @@ já pertence a um cliente cadastrado pelo Telegram, o portal não cria uma conta
 duplicada: esse cliente deve entrar pelo bot e configurar o acesso web na sua
 sessão autenticada.
 
+## Notificação por push (site/PWA)
+
+A partir da versão `0.47.0`, o backend ganhou um canal de notificação push
+pelo navegador (Web Push, RFC 8030/8291/8292) — independente do bot do
+Telegram e vale para **todas** as contas, Sistema Automático e Copy Trader.
+Funciona mesmo com o app fechado, inclusive no iOS depois que o cliente
+adiciona o site à tela de início (Safari 16.4+).
+
+Dois tipos de aviso, por conta:
+
+1. **Operação fechada** (positiva ou negativa), assim que detectada — olha
+   o histórico de deals do MT5 direto, sem filtrar por magic number do
+   copiador, então cobre também o resultado do copy trading feito dentro da
+   própria corretora (contas `product_kind='broker_copy'`).
+2. **Resumo do dia** (resultado em %), enviado uma única vez por conta, logo
+   depois que o dia local dela (mesmo fuso de `DAILY_PERFORMANCE_TIMEZONE`)
+   vira — nunca reenviado para a mesma data.
+
+Infraestrutura nova:
+
+- Tabela `push_subscriptions` (uma linha por dispositivo/navegador inscrito,
+  com toggle independente para "operação" e "resumo diário") e
+  `push_notified_deals` (dedup por deal, pra nunca notificar a mesma
+  operação duas vezes).
+- `src/telegram_mt5_copier/web_push.py`: assinatura VAPID própria (sem
+  depender de nenhum serviço de terceiro) e envio via `pywebpush`.
+- `src/telegram_mt5_copier/mt5/trade_push_notifier.py`: roda dentro do
+  `telegram-mt5-worker`, a cada 30s por conta ativa (mais espaçado que o
+  heartbeat normal, já que notificação não tem a urgência de stop/TP).
+- Endpoints do portal: `GET /api/v1/push/vapid-public-key`,
+  `POST /api/v1/push/subscribe`, `POST /api/v1/push/unsubscribe` — o
+  frontend (repositório do site) é quem registra o service worker, pede a
+  permissão do navegador e envia a inscrição pra esses endpoints.
+
+Configuração no `.env` da VPS — gere o par de chaves uma vez:
+
+```powershell
+.\.venv\Scripts\python.exe -c "from telegram_mt5_copier.web_push import generate_vapid_keypair; pub, priv = generate_vapid_keypair(); print(f'VAPID_PUBLIC_KEY={pub}'); print(f'VAPID_PRIVATE_KEY={priv}')"
+```
+
+```env
+VAPID_PUBLIC_KEY=<saida do comando acima>
+VAPID_PRIVATE_KEY=<saida do comando acima>
+VAPID_CONTACT_EMAIL=contato@institutotrader.online
+```
+
+Sem essas duas chaves configuradas, o envio de push fica silenciosamente
+desativado (`WebPushSender.configured == False`) — o resto do sistema
+continua funcionando normalmente, só sem esse canal.
+
 ## Backend central (Supabase)
 
 O listener grava cada sinal aceito também numa fila local

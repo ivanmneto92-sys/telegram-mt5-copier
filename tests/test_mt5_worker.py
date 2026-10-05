@@ -44,6 +44,14 @@ class RecordingSettlementMonitor:
         self.delivered_account_ids.append(account.id)
 
 
+class RecordingTradePushNotifier:
+    def __init__(self) -> None:
+        self.processed_account_ids: list[int] = []
+
+    def process_account(self, account) -> None:
+        self.processed_account_ids.append(account.id)
+
+
 class ProcessAccountIsolationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -85,7 +93,9 @@ class ProcessAccountIsolationTests(unittest.TestCase):
         }
         position_manager = RecordingPositionManager()
         settlement_monitor = RecordingSettlementMonitor()
+        trade_push_notifier = RecordingTradePushNotifier()
         last_account_checks: dict[int, float] = {}
+        last_push_checks: dict[int, float] = {}
         account_connection_states: dict[int, bool] = {}
 
         for account, profile in (
@@ -100,12 +110,15 @@ class ProcessAccountIsolationTests(unittest.TestCase):
                 command_queue=None,
                 position_manager=position_manager,
                 settlement_monitor=settlement_monitor,
+                trade_push_notifier=trade_push_notifier,
                 last_account_checks=last_account_checks,
+                last_push_checks=last_push_checks,
                 account_connection_states=account_connection_states,
             )
 
         self.assertEqual(position_manager.managed_account_ids, [self.healthy_account.id])
         self.assertEqual(settlement_monitor.delivered_account_ids, [self.healthy_account.id])
+        self.assertEqual(trade_push_notifier.processed_account_ids, [self.healthy_account.id])
         self.assertNotIn(self.broken_account.id, account_connection_states)
 
 

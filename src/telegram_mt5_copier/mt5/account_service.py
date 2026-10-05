@@ -9,6 +9,7 @@ from typing import Callable
 
 from ..credential_service import CredentialService
 from ..database import connect_database, initialize_database, utc_now
+from ..web_push import PushSubscription
 from .client import MT5Client
 from .daily_performance import (
     DEFAULT_BROKER_TIMEZONE,
@@ -694,6 +695,136 @@ class MT5AccountService:
             trading_costs=Decimal(str(row[6])) if row[6] is not None else None,
         )
 
+    def pending_daily_summary_rows(
+        self, account_id: int
+    ) -> list[tuple[str, Decimal | None]]:
+        """Dias ja encerrados (antes de hoje) cujo resumo por push ainda nao
+        foi enviado. Retorna [(performance_date, return_percent), ...]."""
+        today = current_performance_date(timezone_name=self.daily_performance_timezone)
+        with connect_database(self.database_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT performance_date, return_percent
+                FROM account_daily_performance
+                WHERE mt5_account_id = ?
+                  AND performance_date < ?
+                  AND push_notified_at IS NULL
+                ORDER BY performance_date ASC
+                """,
+                (account_id, today),
+            ).fetchall()
+        return [
+            (str(row[0]), Decimal(str(row[1])) if row[1] is not None else None)
+            for row in rows
+        ]
+
+    def mark_daily_summary_push_sent(self, account_id: int, performance_date: str) -> None:
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                """
+                UPDATE account_daily_performance
+                SET push_notified_at = ?
+                WHERE mt5_account_id = ? AND performance_date = ?
+                """,
+                (utc_now(), account_id, performance_date),
+            ).close()
+
+    def push_subscriptions_for_user(self, user_id: int) -> list[PushSubscription]:
+        with connect_database(self.database_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT endpoint, p256dh_key, auth_key, trade_alerts_enabled, daily_summary_enabled
+                FROM push_subscriptions
+                WHERE user_id = ?
+                """,
+                (user_id,),
+            ).fetchall()
+        return [
+            PushSubscription(
+                endpoint=str(row[0]),
+                p256dh_key=str(row[1]),
+                auth_key=str(row[2]),
+                trade_alerts_enabled=bool(row[3]),
+                daily_summary_enabled=bool(row[4]),
+            )
+            for row in rows
+        ]
+
+    def save_push_subscription(
+        self,
+        user_id: int,
+        *,
+        endpoint: str,
+        p256dh_key: str,
+        auth_key: str,
+        user_agent: str | None,
+        trade_alerts_enabled: bool = True,
+        daily_summary_enabled: bool = True,
+    ) -> None:
+        now = utc_now()
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO push_subscriptions (
+                    user_id, endpoint, p256dh_key, auth_key, user_agent,
+                    trade_alerts_enabled, daily_summary_enabled, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(endpoint) DO UPDATE SET
+                    user_id = excluded.user_id,
+                    p256dh_key = excluded.p256dh_key,
+                    auth_key = excluded.auth_key,
+                    user_agent = excluded.user_agent,
+                    trade_alerts_enabled = excluded.trade_alerts_enabled,
+                    daily_summary_enabled = excluded.daily_summary_enabled,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    user_id,
+                    endpoint,
+                    p256dh_key,
+                    auth_key,
+                    user_agent,
+                    1 if trade_alerts_enabled else 0,
+                    1 if daily_summary_enabled else 0,
+                    now,
+                    now,
+                ),
+            ).close()
+
+    def remove_push_subscription(self, user_id: int, endpoint: str) -> None:
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                "DELETE FROM push_subscriptions WHERE user_id = ? AND endpoint = ?",
+                (user_id, endpoint),
+            ).close()
+
+    def remove_push_subscription_by_endpoint(self, endpoint: str) -> None:
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                "DELETE FROM push_subscriptions WHERE endpoint = ?",
+                (endpoint,),
+            ).close()
+
+    def is_trade_closed_push_notified(self, account_id: int, deal_ticket: str) -> bool:
+        with connect_database(self.database_path) as connection:
+            row = connection.execute(
+                "SELECT 1 FROM push_notified_deals WHERE mt5_account_id = ? AND mt5_deal_ticket = ?",
+                (account_id, deal_ticket),
+            ).fetchone()
+        return row is not None
+
+    def mark_trade_closed_push_notified(self, account_id: int, deal_ticket: str) -> None:
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO push_notified_deals (mt5_account_id, mt5_deal_ticket, notified_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(mt5_account_id, mt5_deal_ticket) DO NOTHING
+                """,
+                (account_id, deal_ticket, utc_now()),
+            ).close()
+
     def remove_account(self, user_id: int, account_id: int) -> None:
         with connect_database(self.database_path) as connection:
             connection.execute(
@@ -706,6 +837,10 @@ class MT5AccountService:
             )
             connection.execute(
                 "DELETE FROM signal_account_execution_claims WHERE mt5_account_id = ?",
+                (account_id,),
+            )
+            connection.execute(
+                "DELETE FROM push_notified_deals WHERE mt5_account_id = ?",
                 (account_id,),
             )
             for sql in (

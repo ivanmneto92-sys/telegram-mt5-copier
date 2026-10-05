@@ -310,6 +310,12 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             if path == "/api/v1/settings":
                 self.handle_client_settings_update(fields)
                 return
+            if path == "/api/v1/push/subscribe":
+                self.handle_client_push_subscribe(fields)
+                return
+            if path == "/api/v1/push/unsubscribe":
+                self.handle_client_push_unsubscribe(fields)
+                return
             self.send_error(404)
         except WebAppValidationError as exc:
             safe_log("validation_rejected", reason=safe_reason(str(exc)))
@@ -398,6 +404,8 @@ class OnboardingHandler(BaseHTTPRequestHandler):
                 payload = self.client_portal.risk(user_id, account_id)
             elif path == "/api/v1/settings":
                 payload = self.client_portal.news_preference(user_id)
+            elif path == "/api/v1/push/vapid-public-key":
+                payload = self.client_portal.push_vapid_public_key()
             else:
                 self.send_error(404)
                 return
@@ -748,6 +756,24 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             )
         if not payload:
             raise ValueError("Nenhuma preferencia informada.")
+        self.send_json({"ok": True, **payload})
+
+    def handle_client_push_subscribe(self, fields: dict[str, str]) -> None:
+        user_id = self.authenticate_client_mutation(fields)
+        payload = self.client_portal.push_subscribe(
+            user_id,
+            endpoint=fields.get("endpoint", ""),
+            p256dh_key=fields.get("p256dh", ""),
+            auth_key=fields.get("auth", ""),
+            user_agent=fields.get("user_agent") or None,
+        )
+        safe_log("client_push_subscribed", user_id=str(user_id))
+        self.send_json({"ok": True, **payload})
+
+    def handle_client_push_unsubscribe(self, fields: dict[str, str]) -> None:
+        user_id = self.authenticate_client_mutation(fields)
+        payload = self.client_portal.push_unsubscribe(user_id, endpoint=fields.get("endpoint", ""))
+        safe_log("client_push_unsubscribed", user_id=str(user_id))
         self.send_json({"ok": True, **payload})
 
     def handle_admin_browser_login(self, fields: dict[str, str]) -> None:
@@ -1245,6 +1271,7 @@ def main() -> int:
             market_news_enabled=config.market_news_enabled,
             market_news_minutes_before=config.market_news_minutes_before,
             market_news_minutes_after=config.market_news_minutes_after,
+            vapid_public_key=config.vapid_public_key,
         )
         OnboardingHandler.bot_token = config.telegram_bot_token
         OnboardingHandler.broker_options = broker_options

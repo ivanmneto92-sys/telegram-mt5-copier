@@ -599,6 +599,7 @@ class AdminPanelService:
                 "DELETE FROM economic_calendar_notifications WHERE user_id = ?",
                 "DELETE FROM audit_events WHERE user_id = ?",
                 "DELETE FROM user_notification_settings WHERE user_id = ?",
+                "DELETE FROM push_subscriptions WHERE user_id = ?",
                 "DELETE FROM customer_payments WHERE user_id = ?",
                 "DELETE FROM customer_billing WHERE user_id = ?",
                 "DELETE FROM client_login_tokens WHERE user_id = ?",

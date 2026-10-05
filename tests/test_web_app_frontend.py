@@ -915,6 +915,67 @@ class MiniAppFrontendTests(unittest.TestCase):
         self.assertTrue(settings_result["body"]["avoid_high_impact_news"])
         self.assertTrue(after_settings["avoid_high_impact_news"])
 
+    def test_cliente_inscreve_e_cancela_notificacao_push(self) -> None:
+        def get(url: str, cookie: str) -> tuple[int, dict[str, object]]:
+            try:
+                with urlopen(Request(url, headers={"Cookie": cookie}), timeout=5) as response:
+                    return response.status, json.loads(response.read().decode("utf-8"))
+            except HTTPError as exc:
+                return exc.code, json.loads(exc.read().decode("utf-8"))
+
+        server = mini_app_server(with_mt5_accounts=True, vapid_public_key="chave-publica-vapid")
+        with server as base_url:
+            registration = Request(
+                f"{base_url}/api/v1/auth/register",
+                data=urlencode(
+                    {
+                        "customer_name": "Cliente Push",
+                        "email": "push@example.com",
+                        "phone": "11999990001",
+                        "password": "SenhaPushForte123",
+                        "accepted_terms": "true",
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                method="POST",
+            )
+            with urlopen(registration, timeout=5) as response:
+                cookie = response.headers.get("Set-Cookie", "").split(";", 1)[0]
+
+            _, dashboard = get(f"{base_url}/api/v1/dashboard", cookie)
+            csrf_token = str(dashboard["csrf_token"])
+
+            _, vapid_key = get(f"{base_url}/api/v1/push/vapid-public-key", cookie)
+
+            subscribe_result = post_expect_error_with_cookie(
+                f"{base_url}/api/v1/push/subscribe",
+                {
+                    "endpoint": "https://push.example/device-1",
+                    "p256dh": "chave-p256dh",
+                    "auth": "chave-auth",
+                    "user_agent": "pytest-ua",
+                    "csrf_token": csrf_token,
+                },
+                cookie,
+            )
+            missing_key_result = post_expect_error_with_cookie(
+                f"{base_url}/api/v1/push/subscribe",
+                {"endpoint": "https://push.example/device-2", "csrf_token": csrf_token},
+                cookie,
+            )
+            unsubscribe_result = post_expect_error_with_cookie(
+                f"{base_url}/api/v1/push/unsubscribe",
+                {"endpoint": "https://push.example/device-1", "csrf_token": csrf_token},
+                cookie,
+            )
+
+        self.assertEqual("chave-publica-vapid", vapid_key["vapid_public_key"])
+        self.assertEqual(200, subscribe_result["status"])
+        self.assertTrue(subscribe_result["body"]["subscribed"])
+        self.assertEqual(400, missing_key_result["status"])
+        self.assertEqual(200, unsubscribe_result["status"])
+        self.assertFalse(unsubscribe_result["body"]["subscribed"])
+
     def test_migracao_de_cliente_telegram_vincula_conta_existente_pela_web(self) -> None:
         """Ponta a ponta do fluxo real: bot emite o link ("Acessar aplicativo"),
         o navegador troca o token por sessao, o cliente configura e-mail/senha
@@ -1268,10 +1329,12 @@ class mini_app_server:
         bot_token: str = "123456:bot-token",
         admin_ids: tuple[int, ...] = (),
         with_mt5_accounts: bool = False,
+        vapid_public_key: str | None = None,
     ) -> None:
         self.bot_token = bot_token
         self.admin_ids = admin_ids
         self.with_mt5_accounts = with_mt5_accounts
+        self.vapid_public_key = vapid_public_key
         self.server: ThreadingHTTPServer | None = None
         self.thread: threading.Thread | None = None
         self.temp_dir: tempfile.TemporaryDirectory[str] | None = None
@@ -1304,6 +1367,7 @@ class mini_app_server:
             database_path,
             brand_name="Instituto Trader",
             mt5_accounts=self.mt5_accounts,
+            vapid_public_key=self.vapid_public_key,
         )
         OnboardingHandler.client_app_url = "https://app.example.com/"
         OnboardingHandler.password_reset_rate_limiter = SimpleRateLimiter(limit=3, window_seconds=900)

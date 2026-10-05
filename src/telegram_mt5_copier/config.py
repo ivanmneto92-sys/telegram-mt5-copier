@@ -129,6 +129,9 @@ class AppConfig:
     b2_key_id: str | None = field(repr=False)
     b2_application_key: str | None = field(repr=False)
     b2_bucket_name: str | None = field(repr=False)
+    vapid_public_key: str | None = field(repr=False)
+    vapid_private_key: str | None = field(repr=False)
+    vapid_contact_email: str
 
     @classmethod
     def load(
@@ -331,6 +334,11 @@ class AppConfig:
             b2_key_id=_optional_value("B2_KEY_ID", file_values, runtime_env),
             b2_application_key=_optional_value("B2_APPLICATION_KEY", file_values, runtime_env),
             b2_bucket_name=_optional_value("B2_BUCKET_NAME", file_values, runtime_env),
+            vapid_public_key=_optional_value("VAPID_PUBLIC_KEY", file_values, runtime_env),
+            vapid_private_key=_optional_value("VAPID_PRIVATE_KEY", file_values, runtime_env),
+            vapid_contact_email=_value(
+                "VAPID_CONTACT_EMAIL", file_values, runtime_env, "contato@institutotrader.online"
+            ).strip(),
         )
 
         if create_dirs:

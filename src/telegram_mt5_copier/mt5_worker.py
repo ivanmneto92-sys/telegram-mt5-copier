@@ -14,11 +14,17 @@ from .mt5.client import MT5Client
 from .mt5.position_manager import PositionManager
 from .mt5.settlement_monitor import SettlementMonitor
 from .mt5.pending_order_monitor import PendingOrderMonitor
+from .mt5.trade_push_notifier import TradePushNotifier
 from .mt5.models import ExecutionProfile, MT5Account
 from .telegram_notifier import TelegramUserNotifier
+from .web_push import WebPushSender
 
 POSITION_PROTECTION_POLL_SECONDS = 1
 ACCOUNT_HEARTBEAT_SECONDS = 15
+# Push (site/PWA) le o historico completo de deals e conecta no MT5 so pra
+# isso -- mais caro que o heartbeat normal, e nao precisa da mesma
+# frequencia de um stop/TP (o cliente nao perde dinheiro esperando o push).
+PUSH_NOTIFICATION_POLL_SECONDS = 30
 
 
 def process_account(
@@ -30,7 +36,9 @@ def process_account(
     command_queue: CommandQueue,
     position_manager: PositionManager,
     settlement_monitor: SettlementMonitor,
+    trade_push_notifier: TradePushNotifier,
     last_account_checks: dict[int, float],
+    last_push_checks: dict[int, float],
     account_connection_states: dict[int, bool],
 ) -> None:
     """Advance one account by one worker tick, in isolation.
@@ -60,6 +68,10 @@ def process_account(
         if account_connection_states.get(account.id, False):
             position_manager.manage_account(account, profile)
             settlement_monitor.deliver_pending(account)
+            last_push = last_push_checks.get(account.id)
+            if last_push is None or now - last_push >= PUSH_NOTIFICATION_POLL_SECONDS:
+                trade_push_notifier.process_account(account)
+                last_push_checks[account.id] = time.monotonic()
     except Exception as exc:
         print(f"Falha ao processar conta {account.id}: {exc}", file=sys.stderr)
 
@@ -114,8 +126,21 @@ def run(only_account_id: int | None = None) -> int:
             user_notifier,
         )
         pending_monitor = PendingOrderMonitor(config.database_path)
+        push_sender = WebPushSender(
+            vapid_public_key=config.vapid_public_key,
+            vapid_private_key=config.vapid_private_key,
+            vapid_contact=config.vapid_contact_email,
+            logger=logging.getLogger("mt5-push-notifier"),
+        )
+        trade_push_notifier = TradePushNotifier(
+            accounts,
+            push_sender,
+            client_factory=MT5Client,
+            timezone_name=config.daily_performance_timezone,
+        )
         workers: dict[int, MT5AccountWorker] = {}
         last_account_checks: dict[int, float] = {}
+        last_push_checks: dict[int, float] = {}
         account_connection_states: dict[int, bool] = {}
         try:
             while True:
@@ -132,6 +157,7 @@ def run(only_account_id: int | None = None) -> int:
                     if account_id not in active_accounts:
                         workers.pop(account_id).close()
                         last_account_checks.pop(account_id, None)
+                        last_push_checks.pop(account_id, None)
                         account_connection_states.pop(account_id, None)
 
                 for account, profile in active_accounts.values():
@@ -143,7 +169,9 @@ def run(only_account_id: int | None = None) -> int:
                         command_queue=command_queue,
                         position_manager=position_manager,
                         settlement_monitor=settlement_monitor,
+                        trade_push_notifier=trade_push_notifier,
                         last_account_checks=last_account_checks,
+                        last_push_checks=last_push_checks,
                         account_connection_states=account_connection_states,
                     )
 

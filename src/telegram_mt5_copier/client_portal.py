@@ -41,6 +41,7 @@ class ClientPortalService:
         market_news_enabled: bool = False,
         market_news_minutes_before: int = 0,
         market_news_minutes_after: int = 0,
+        vapid_public_key: str | None = None,
     ) -> None:
         self.database_path = database_path
         self.brand_name = brand_name
@@ -48,6 +49,7 @@ class ClientPortalService:
         self.market_news_enabled = market_news_enabled
         self.market_news_minutes_before = market_news_minutes_before
         self.market_news_minutes_after = market_news_minutes_after
+        self.vapid_public_key = vapid_public_key
         # Cadastro de conta pelo site reaproveita a mesma validacao de corretora/
         # servidor do fluxo do bot no Telegram (web_app.py), incluindo o mesmo
         # catalogo: sem ele (broker_servers=None), qualquer corretora/servidor
@@ -378,6 +380,41 @@ class ClientPortalService:
         o mesmo usado pelo bot no menu "Alertas de resultados"."""
         set_result_mode(self.database_path, user_id, "all" if enabled else "off")
         return self.news_preference(user_id)
+
+    def push_vapid_public_key(self) -> dict[str, object]:
+        """Chave publica que o navegador usa como applicationServerKey ao
+        chamar pushManager.subscribe() -- nao e segredo, pode ser publica."""
+        return {"vapid_public_key": self.vapid_public_key}
+
+    def push_subscribe(
+        self,
+        user_id: int,
+        *,
+        endpoint: str,
+        p256dh_key: str,
+        auth_key: str,
+        user_agent: str | None,
+    ) -> dict[str, object]:
+        """Registra (ou atualiza) a inscricao Web Push deste navegador/celular
+        -- usuario pode ter varias (um por dispositivo)."""
+        if self.mt5_accounts is None:
+            raise ValueError("Notificacao push indisponivel nesta instancia.")
+        if not endpoint or not p256dh_key or not auth_key:
+            raise ValueError("Inscricao de notificacao incompleta.")
+        self.mt5_accounts.save_push_subscription(
+            user_id,
+            endpoint=endpoint,
+            p256dh_key=p256dh_key,
+            auth_key=auth_key,
+            user_agent=user_agent,
+        )
+        return {"subscribed": True}
+
+    def push_unsubscribe(self, user_id: int, *, endpoint: str) -> dict[str, object]:
+        if self.mt5_accounts is None:
+            raise ValueError("Notificacao push indisponivel nesta instancia.")
+        self.mt5_accounts.remove_push_subscription(user_id, endpoint)
+        return {"subscribed": False}
 
     def operations(
         self, user_id: int, *, limit: int = 100, account_id: int | None = None
