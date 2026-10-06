@@ -352,7 +352,8 @@ def daily_totals(deals: tuple[object, ...], *, timezone_name: str) -> tuple[Deci
     robot = Decimal("0")
     account = Decimal("0")
     for deal in deals:
-        if deal_datetime(deal).astimezone(ZoneInfo(timezone_name)).date() != local_date:
+        # deal_datetime ja e a hora de parede da corretora (ver server_clock).
+        if deal_datetime(deal).date() != local_date:
             continue
         deal_type = field(deal, "type", None)
         if deal_type is not None and int(deal_type) not in {0, 1}:

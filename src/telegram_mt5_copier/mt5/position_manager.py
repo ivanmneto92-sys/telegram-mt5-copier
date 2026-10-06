@@ -9,6 +9,7 @@ import time
 from typing import Callable
 
 from ..database import connect_database, utc_now
+from .daily_performance import DEFAULT_BROKER_TIMEZONE, server_clock
 from ..daily_schedule import (
     SAO_PAULO_TIMEZONE,
     current_daily_signal_session_start_at,
@@ -316,7 +317,12 @@ class PositionManager:
             return None
         session_start = current_daily_signal_session_start_at(now)
         realized_result = Decimal("0")
-        for deal in client.history_deals_get(session_start, now):
+        broker_timezone = getattr(
+            self.accounts, "daily_performance_timezone", DEFAULT_BROKER_TIMEZONE
+        )
+        for deal in client.history_deals_get(
+            server_clock(session_start, broker_timezone), server_clock(now, broker_timezone)
+        ):
             if int(value(deal, "magic", 0) or 0) != MT5_MAGIC_NUMBER:
                 continue
             for field_name in ("profit", "commission", "swap", "fee"):

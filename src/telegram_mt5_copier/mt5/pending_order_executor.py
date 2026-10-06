@@ -9,6 +9,7 @@ import time
 from typing import Callable
 
 from ..models import TradeSignal, decimal_to_text
+from .daily_performance import server_clock
 from ..daily_schedule import (
     current_daily_signal_session_start_at,
     next_daily_signal_resume_at,
@@ -581,7 +582,8 @@ def validate_operational_limits(
     now = datetime.now(tz=timezone.utc)
     day_start = current_daily_signal_session_start_at(now)
     daily_result = Decimal("0")
-    for deal in client.history_deals_get(day_start, now):
+    # Datas no relogio da corretora: o horario dos deals vem nessa escala.
+    for deal in client.history_deals_get(server_clock(day_start), server_clock(now)):
         if int(result_value(deal, "magic", 0) or 0) != MT5_MAGIC_NUMBER:
             continue
         for field_name in ("profit", "commission", "swap", "fee"):

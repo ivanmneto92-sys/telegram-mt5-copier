@@ -21,6 +21,21 @@ class DailyPerformance:
     trading_costs: Decimal | None = None
 
 
+def server_clock(
+    moment: datetime,
+    timezone_name: str = DEFAULT_BROKER_TIMEZONE,
+    utc_offset_hours: int | None = None,
+) -> datetime:
+    """O MT5 grava o horario dos deals no relogio do servidor da corretora
+    (ex.: GMT+3) como se fosse UTC, e history_deals_get compara as datas
+    recebidas com esse mesmo relogio. Converte um instante real para essa
+    escala: a hora de parede da corretora, marcada como UTC."""
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    report_timezone = performance_timezone(timezone_name, utc_offset_hours)
+    return moment.astimezone(report_timezone).replace(tzinfo=timezone.utc)
+
+
 def calculate_daily_performance(
     client: object,
     balance: Decimal | None,
@@ -35,14 +50,18 @@ def calculate_daily_performance(
     current = current.astimezone(timezone.utc)
     report_timezone = performance_timezone(timezone_name, utc_offset_hours)
     local_now = current.astimezone(report_timezone)
-    local_day_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
-    day_start = local_day_start.astimezone(timezone.utc)
+    # Janela do dia no relogio da corretora (ver server_clock): de 00:00 ate
+    # 24:00 de hoje na hora de parede do servidor.
+    day_start = local_now.replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ).replace(tzinfo=timezone.utc)
+    day_end = day_start + timedelta(days=1)
 
     buy_type = client_constant(client, "DEAL_TYPE_BUY", 0)
     sell_type = client_constant(client, "DEAL_TYPE_SELL", 1)
     gross_profit = Decimal("0")
     trading_costs = Decimal("0")
-    for deal in client.history_deals_get(day_start, current):
+    for deal in client.history_deals_get(day_start, day_end):
         deal_type = field_value(deal, "type", None)
         if deal_type is not None and int(deal_type) not in {buy_type, sell_type}:
             continue
@@ -92,9 +111,11 @@ def calculate_history_performance(
     report_timezone = performance_timezone(timezone_name, utc_offset_hours)
     local_now = current.astimezone(report_timezone)
     today = local_now.date()
-    range_start = (
-        local_now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days)
-    ).astimezone(timezone.utc)
+    # Relogio da corretora (ver server_clock).
+    range_start = local_now.replace(
+        hour=0, minute=0, second=0, microsecond=0, tzinfo=None
+    ).replace(tzinfo=timezone.utc) - timedelta(days=days)
+    range_end = range_start + timedelta(days=days + 1)
 
     buy_type = client_constant(client, "DEAL_TYPE_BUY", 0)
     sell_type = client_constant(client, "DEAL_TYPE_SELL", 1)
@@ -102,16 +123,11 @@ def calculate_history_performance(
     gross: dict[str, Decimal] = {}
     costs: dict[str, Decimal] = {}
     cash_flow: dict[str, Decimal] = {}
-    for deal in client.history_deals_get(range_start, current) or ():
+    for deal in client.history_deals_get(range_start, range_end) or ():
         deal_time = field_value(deal, "time", None)
         if deal_time is None:
             continue
-        day = (
-            datetime.fromtimestamp(int(deal_time), tz=timezone.utc)
-            .astimezone(report_timezone)
-            .date()
-            .isoformat()
-        )
+        day = datetime.fromtimestamp(int(deal_time), tz=timezone.utc).date().isoformat()
         deal_type = field_value(deal, "type", None)
         profit = Decimal(str(field_value(deal, "profit", 0) or 0))
         if deal_type is not None and int(deal_type) == balance_type:
