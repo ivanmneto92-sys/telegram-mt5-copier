@@ -1651,6 +1651,8 @@ class PendingOrderTests(unittest.TestCase):
         manual = payload["manual_positions"][0]
         self.assertEqual(("777", "XAUUSD", "SELL"), (manual["ticket"], manual["symbol"], manual["direction"]))
         self.assertEqual("-13.0", manual["floating_profit"])
+        dashboard = portal.dashboard(self.user.id)
+        self.assertEqual(1, dashboard["active_operations"])
 
         # Posicao fechada no MT5: some do portal na proxima gravacao.
         manager._external_snapshots.clear()

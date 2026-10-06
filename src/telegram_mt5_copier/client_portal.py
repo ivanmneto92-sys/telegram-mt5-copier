@@ -218,12 +218,33 @@ class ClientPortalService:
                     (int(account[0]),),
                 ).fetchone()
                 floating_total = Decimal(str(floating_row[0] or 0))
+                # Entradas manuais no MT5 (retrato recente do worker) tambem
+                # contam no resultado do dia.
+                manual_row = db.execute(
+                    """
+                    SELECT COALESCE(SUM(CAST(profit AS REAL)), 0) FROM mt5_open_positions
+                    WHERE mt5_account_id = ?
+                      AND datetime(updated_at) >= datetime('now', '-3 minutes')
+                    """,
+                    (int(account[0]),),
+                ).fetchone()
+                floating_total += Decimal(str(manual_row[0] or 0))
             # Sem conta escolhida, conta as operacoes de todas as contas do cliente.
             active_count = db.execute(
                 """
                 SELECT COUNT(*) FROM execution_groups
                 WHERE user_id = ? AND status IN ('pending_active', 'filled', 'open')
                   AND (? IS NULL OR mt5_account_id = ?)
+                """,
+                (user_id, account_id, account_id),
+            ).fetchone()[0]
+            # Posicoes abertas manualmente tambem sao operacoes ativas.
+            active_count += db.execute(
+                """
+                SELECT COUNT(*) FROM mt5_open_positions p
+                JOIN mt5_accounts a ON a.id = p.mt5_account_id
+                WHERE a.user_id = ? AND (? IS NULL OR a.id = ?)
+                  AND datetime(p.updated_at) >= datetime('now', '-3 minutes')
                 """,
                 (user_id, account_id, account_id),
             ).fetchone()[0]
