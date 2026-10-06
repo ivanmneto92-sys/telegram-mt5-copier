@@ -1177,14 +1177,22 @@ class MT5AccountService:
                       u.daily_signal_pause_until IS NULL
                       OR datetime(u.daily_signal_pause_until) <= datetime('now')
                   )
-                  AND b.billing_status = 'paid'
-                  AND b.due_date IS NOT NULL
-                  AND date(b.due_date) >= date('now')
-                  AND EXISTS (
-                      SELECT 1 FROM customer_payments cp
-                      WHERE cp.user_id = a.user_id
-                        AND cp.status = 'paid'
-                        AND CAST(cp.amount AS REAL) > 0
+                  -- Mesma regra de access_control.paid_access_decision: isento
+                  -- recebe sem pagamento e sem validade; os demais precisam de
+                  -- pagamento registrado e validade em dia.
+                  AND (
+                      b.billing_status = 'exempt'
+                      OR (
+                          b.billing_status = 'paid'
+                          AND b.due_date IS NOT NULL
+                          AND date(b.due_date) >= date('now')
+                          AND EXISTS (
+                              SELECT 1 FROM customer_payments cp
+                              WHERE cp.user_id = a.user_id
+                                AND cp.status = 'paid'
+                                AND CAST(cp.amount AS REAL) > 0
+                          )
+                      )
                   )
                   AND a.connection_status = ?
                   AND a.account_type = ?
@@ -1237,14 +1245,22 @@ class MT5AccountService:
                       u.daily_signal_pause_until IS NULL
                       OR datetime(u.daily_signal_pause_until) <= datetime('now')
                   )
-                  AND b.billing_status = 'paid'
-                  AND b.due_date IS NOT NULL
-                  AND date(b.due_date) >= date('now')
-                  AND EXISTS (
-                      SELECT 1 FROM customer_payments cp
-                      WHERE cp.user_id = a.user_id
-                        AND cp.status = 'paid'
-                        AND CAST(cp.amount AS REAL) > 0
+                  -- Mesma regra de access_control.paid_access_decision: isento
+                  -- recebe sem pagamento e sem validade; os demais precisam de
+                  -- pagamento registrado e validade em dia.
+                  AND (
+                      b.billing_status = 'exempt'
+                      OR (
+                          b.billing_status = 'paid'
+                          AND b.due_date IS NOT NULL
+                          AND date(b.due_date) >= date('now')
+                          AND EXISTS (
+                              SELECT 1 FROM customer_payments cp
+                              WHERE cp.user_id = a.user_id
+                                AND cp.status = 'paid'
+                                AND CAST(cp.amount AS REAL) > 0
+                          )
+                      )
                   )
                   AND p.enabled = 1
                   AND a.product_kind != 'broker_copy'

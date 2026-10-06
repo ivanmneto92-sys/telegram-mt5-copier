@@ -761,6 +761,20 @@ class PendingOrderTests(unittest.TestCase):
         self.users.set_daily_signal_pause_until(self.user.id, past)
         self.assertEqual(len(self.accounts.accounts_for_approved_users()), 1)
 
+    def test_cliente_isento_continua_recebendo_sinais(self) -> None:
+        # Isento (sem cobranca e sem validade) precisa seguir recebendo sinal,
+        # igual a regra de access_control.paid_access_decision.
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                "UPDATE customer_billing SET billing_status = 'exempt', due_date = NULL "
+                "WHERE user_id = ?",
+                (self.user.id,),
+            )
+            connection.execute("DELETE FROM customer_payments WHERE user_id = ?", (self.user.id,))
+
+        self.assertEqual(len(self.accounts.accounts_for_approved_users()), 1)
+        self.assertEqual(len(self.accounts.connected_demo_accounts_for_active_users()), 1)
+
     def test_conta_copy_trader_fica_fora_dos_candidatos_a_sinal(self) -> None:
         copy_account = self.accounts.register_account(
             self.user.id,
