@@ -930,6 +930,26 @@ def initialize_database(database_path: Path) -> None:
                 FOREIGN KEY (mt5_account_id) REFERENCES mt5_accounts(id)
             );
 
+            -- Retrato das posicoes abertas no MT5 que NAO sao do copiador
+            -- (entrada manual, app da corretora, copy da corretora), regravado
+            -- a cada ciclo do PositionManager -- o portal mostra junto com as
+            -- operacoes do sistema em "Abertas".
+            CREATE TABLE IF NOT EXISTS mt5_open_positions (
+                mt5_account_id INTEGER NOT NULL,
+                ticket TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                volume TEXT NOT NULL,
+                price_open TEXT,
+                stop_loss TEXT,
+                take_profit TEXT,
+                profit TEXT NOT NULL,
+                opened_at TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (mt5_account_id, ticket),
+                FOREIGN KEY (mt5_account_id) REFERENCES mt5_accounts(id)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user
                 ON push_subscriptions(user_id);
 

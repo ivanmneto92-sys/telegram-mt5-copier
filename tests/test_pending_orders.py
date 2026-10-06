@@ -1629,6 +1629,37 @@ class PendingOrderTests(unittest.TestCase):
         self.assertEqual("-255.5", closed[0])
         self.assertNotEqual("open", group_status)
 
+    def test_posicao_manual_aparece_no_portal_junto_com_as_do_sistema(self) -> None:
+        from telegram_mt5_copier.client_portal import ClientPortalService
+
+        client = SimulatedMT5Client(
+            tick=TickInfo(bid=Decimal("4080"), ask=Decimal("4080")),
+            positions=(
+                {
+                    "magic": 0, "comment": "", "ticket": 777, "symbol": "XAUUSD",
+                    "type": 1, "volume": 0.1, "price_open": 4100, "sl": 4120, "tp": 4050,
+                    "profit": -12.5, "swap": -0.5, "time": 1_790_000_000,
+                },
+            ),
+        )
+        manager = PositionManager(self.database_path, self.accounts, lambda: client)
+        manager.manage_account(self.account, self.profile())
+
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+        payload = portal.operations(self.user.id)
+        self.assertEqual(1, len(payload["manual_positions"]))
+        manual = payload["manual_positions"][0]
+        self.assertEqual(("777", "XAUUSD", "SELL"), (manual["ticket"], manual["symbol"], manual["direction"]))
+        self.assertEqual("-13.0", manual["floating_profit"])
+
+        # Posicao fechada no MT5: some do portal na proxima gravacao.
+        manager._external_snapshots.clear()
+        client._positions = ()
+        manager.manage_account(self.account, self.profile())
+        self.assertEqual([], portal.operations(self.user.id)["manual_positions"])
+        # Filtro por data (calendario) nao mistura posicoes abertas.
+        self.assertNotIn("manual", str(portal.operations(self.user.id, date="2026-01-01")["manual_positions"]))
+
     def test_fechamento_e_registrado_e_notificado_uma_unica_vez(self) -> None:
         signal = parse_signal_text(BUY_SIGNAL).signal
         result = self.executor().execute_for_account(signal, self.account, self.profile())

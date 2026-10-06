@@ -915,6 +915,10 @@ class MT5AccountService:
                 "DELETE FROM push_notified_deals WHERE mt5_account_id = ?",
                 (account_id,),
             )
+            connection.execute(
+                "DELETE FROM mt5_open_positions WHERE mt5_account_id = ?",
+                (account_id,),
+            )
             for sql in (
                 """
                 DELETE FROM execution_close_events

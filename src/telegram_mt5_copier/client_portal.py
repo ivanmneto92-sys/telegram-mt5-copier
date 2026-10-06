@@ -505,7 +505,34 @@ class ClientPortalService:
                 """,
                 (user_id, account_id, account_id, date, date, safe_limit),
             ).fetchall()
+            external = []
+            if date is None:
+                # So o retrato recente (worker atualiza a cada ciclo): conta
+                # desconectada nao fica mostrando posicao velha.
+                external = db.execute(
+                    """
+                    SELECT p.mt5_account_id, p.ticket, p.symbol, p.direction, p.volume,
+                           p.price_open, p.stop_loss, p.take_profit, p.profit, p.opened_at,
+                           a.product_kind
+                    FROM mt5_open_positions p
+                    JOIN mt5_accounts a ON a.id = p.mt5_account_id
+                    WHERE a.user_id = ? AND (? IS NULL OR a.id = ?)
+                      AND datetime(p.updated_at) >= datetime('now', '-3 minutes')
+                    ORDER BY p.opened_at DESC
+                    """,
+                    (user_id, account_id, account_id),
+                ).fetchall()
         return {
+            "manual_positions": [
+                {
+                    "account_id": int(r[0]), "ticket": r[1], "symbol": r[2],
+                    "direction": r[3], "volume": r[4], "entry_price": r[5],
+                    "stop_loss": r[6], "take_profit": r[7],
+                    "floating_profit": _scaled(r[8], _currency_divisor_kind(r[10])),
+                    "opened_at": r[9],
+                }
+                for r in external
+            ],
             "operations": [
                 {
                     "id": int(r[0]), "status": r[1], "symbol": r[2], "direction": r[3],
@@ -817,6 +844,10 @@ def _currency_divisor(account_row: object) -> Decimal:
     if account_row is not None and account_row[11] == PRODUCT_KIND_BROKER_COPY:
         return Decimal(100)
     return Decimal(1)
+
+
+def _currency_divisor_kind(product_kind: object) -> Decimal:
+    return Decimal(100) if product_kind == PRODUCT_KIND_BROKER_COPY else Decimal(1)
 
 
 def _scaled(value: object, divisor: Decimal) -> object:

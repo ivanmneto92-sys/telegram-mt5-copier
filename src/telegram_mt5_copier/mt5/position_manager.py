@@ -72,6 +72,7 @@ class PositionManager:
         self.settlement_monitor = settlement_monitor
         self.notifier = notifier
         self._last_settlement_check: dict[int, float] = {}
+        self._external_snapshots: dict[int, tuple[tuple[object, ...], float]] = {}
         self._daily_limit_notifications: set[tuple[int, str, str]] = set()
 
     def manage_account(self, account: MT5Account, profile: ExecutionProfile) -> int:
@@ -98,6 +99,7 @@ class PositionManager:
                 for order in pending_orders
                 if int(value(order, "magic", 0) or 0) == MT5_MAGIC_NUMBER
             )
+            self._store_external_positions(account.id, positions)
             daily_limit_changes = self._enforce_daily_result_limits(
                 client,
                 account,
@@ -1090,6 +1092,56 @@ class PositionManager:
             parsed_comment.signal_prefix,
             parsed_comment.tp_index,
         )
+
+    def _store_external_positions(self, account_id: int, positions: tuple[object, ...]) -> None:
+        """Regrava o retrato das posicoes abertas que nao sao do copiador."""
+        now = utc_now()
+        rows = []
+        for position in positions:
+            if int(value(position, "magic", 0) or 0) == MT5_MAGIC_NUMBER:
+                continue
+            opened = value(position, "time", None)
+            rows.append(
+                (
+                    account_id,
+                    str(value(position, "ticket", "")),
+                    str(value(position, "symbol", "")),
+                    "SELL" if int(value(position, "type", 0) or 0) == 1 else "BUY",
+                    str(value(position, "volume", "0")),
+                    str(value(position, "price_open", "")),
+                    str(value(position, "sl", "")),
+                    str(value(position, "tp", "")),
+                    str(
+                        Decimal(str(value(position, "profit", 0) or 0))
+                        + Decimal(str(value(position, "swap", 0) or 0))
+                    ),
+                    datetime.fromtimestamp(int(opened), tz=timezone.utc).isoformat()
+                    if opened
+                    else None,
+                    now,
+                )
+            )
+        # Grava na hora quando abre/fecha/muda SL-TP; o flutuante sozinho e
+        # atualizado a cada 15 s -- nao escreve no banco a cada ciclo de 1 s.
+        signature = tuple((*row[:8], row[9]) for row in rows)
+        previous = self._external_snapshots.get(account_id)
+        if previous is not None and previous[0] == signature and time.monotonic() - previous[1] < 15:
+            return
+        self._external_snapshots[account_id] = (signature, time.monotonic())
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                "DELETE FROM mt5_open_positions WHERE mt5_account_id = ?", (account_id,)
+            ).close()
+            if rows:
+                connection.executemany(
+                    """
+                    INSERT OR REPLACE INTO mt5_open_positions (
+                        mt5_account_id, ticket, symbol, direction, volume, price_open,
+                        stop_loss, take_profit, profit, opened_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                ).close()
 
     def _mark_filled(self, order_id: int, position_ticket: int) -> None:
         with connect_database(self.database_path) as connection:
