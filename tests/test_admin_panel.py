@@ -7,6 +7,7 @@ import time
 import unittest
 from datetime import date, timedelta
 
+from telegram_mt5_copier.access_control import paid_access_decision
 from telegram_mt5_copier.admin_panel import (
     AdminPanelService,
     render_admin_panel,
@@ -488,6 +489,45 @@ class AdminPanelTests(unittest.TestCase):
         self.assertTrue(alice["access"]["allowed"])
         self.assertEqual(alice["access"]["amount_paid"], "250.00")
         self.assertEqual(dashboard["summary"]["approved_accesses"], 1)
+
+    def test_cliente_isento_e_aprovado_sem_pagamento_e_sem_validade(self) -> None:
+        result = self.service.approve_exempt_access(
+            admin_telegram_user_id=9001,
+            target_user_id=self.alice.id,
+        )
+        dashboard = self.service.dashboard()
+        alice = next(item for item in dashboard["users"] if item["id"] == self.alice.id)
+
+        self.assertEqual(result["status"], USER_STATUS_ACTIVE)
+        self.assertTrue(alice["access"]["allowed"])
+        self.assertIsNone(alice["access"]["expires_on"])
+        self.assertEqual(alice["billing"]["effective_status"], "exempt")
+        self.assertEqual(
+            paid_access_decision(self.database_path, self.alice.id, today=date(2099, 1, 1)).allowed,
+            True,
+        )
+
+    def test_cliente_isento_volta_a_ser_cobrado_ao_registrar_pagamento(self) -> None:
+        self.service.approve_exempt_access(
+            admin_telegram_user_id=9001, target_user_id=self.alice.id
+        )
+        expires = (date.today() + timedelta(days=30)).isoformat()
+        self.service.approve_paid_access(
+            admin_telegram_user_id=9001,
+            target_user_id=self.alice.id,
+            amount="100.00",
+            paid_at=date.today().isoformat(),
+            method="PIX",
+            reference="",
+            expires_on=expires,
+        )
+        access = paid_access_decision(self.database_path, self.alice.id)
+        self.assertTrue(access.allowed)
+        self.assertEqual(access.expires_on, expires)
+        later = date.today() + timedelta(days=31)
+        self.assertFalse(
+            paid_access_decision(self.database_path, self.alice.id, today=later).allowed
+        )
 
     def test_cadastro_financeiro_aparece_no_dashboard(self) -> None:
         due_date = (date.today() + timedelta(days=5)).isoformat()

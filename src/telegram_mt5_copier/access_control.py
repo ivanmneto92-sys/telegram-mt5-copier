@@ -46,6 +46,10 @@ def paid_access_decision(
             """,
             (user_id,),
         ).fetchone()
+    # Cliente isento: acesso liberado sem pagamento e sem data de validade,
+    # ate o admin voltar a cobrar (registrar pagamento muda para 'paid').
+    if row is not None and str(row[0]) == "exempt":
+        return AccessDecision(True, ACCESS_ALLOWED, None, None)
     if row is None or row[2] is None:
         return AccessDecision(False, ACCESS_AWAITING_APPROVAL, None, None)
 

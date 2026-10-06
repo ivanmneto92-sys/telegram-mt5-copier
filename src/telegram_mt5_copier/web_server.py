@@ -1038,6 +1038,18 @@ class OnboardingHandler(BaseHTTPRequestHandler):
     def handle_admin_approve(self, fields: dict[str, str]) -> None:
         identity = self.authenticate_admin_mutation(fields)
         target_user_id = parsed_user_id(fields)
+        if fields.get("exempt", "") in {"1", "true"}:
+            result = self.admin_panel.approve_exempt_access(
+                admin_telegram_user_id=identity.telegram_user_id,
+                target_user_id=target_user_id,
+            )
+            safe_log(
+                "admin_access_approved_exempt",
+                admin_id=str(identity.telegram_user_id),
+                target_id=str(target_user_id),
+            )
+            self.send_json({"ok": True, "approval": result})
+            return
         result = self.admin_panel.approve_paid_access(
             admin_telegram_user_id=identity.telegram_user_id,
             target_user_id=target_user_id,

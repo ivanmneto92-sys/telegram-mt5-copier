@@ -664,6 +664,52 @@ class AdminPanelService:
         )
         return {"user_id": target_user_id, "account_id": account_id, "queue_pilot_enabled": enabled}
 
+    def approve_exempt_access(
+        self,
+        *,
+        admin_telegram_user_id: int,
+        target_user_id: int,
+    ) -> dict[str, object]:
+        """Libera o cliente como isento: sem cobranca e sem data de validade.
+        Para voltar a cobrar, basta aprovar com pagamento (vira 'paid')."""
+        self._require_user(target_user_id)
+        now = datetime.now(tz=timezone.utc).isoformat()
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO customer_billing (
+                    user_id, plan_name, monthly_amount, due_date, billing_status,
+                    created_at, updated_at
+                )
+                VALUES (?, 'Isento', '0.00', NULL, 'exempt', ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    monthly_amount = '0.00',
+                    due_date = NULL,
+                    billing_status = 'exempt',
+                    updated_at = excluded.updated_at
+                """,
+                (target_user_id, now, now),
+            ).close()
+        user = self.set_user_status(
+            admin_telegram_user_id=admin_telegram_user_id,
+            target_user_id=target_user_id,
+            status=USER_STATUS_ACTIVE,
+        )
+        self._log_admin_action(
+            admin_telegram_user_id,
+            target_user_id,
+            "admin_panel_approve_exempt_access",
+            {},
+        )
+        return {
+            "user_id": target_user_id,
+            "status": user["status"],
+            "amount": None,
+            "paid_at": None,
+            "expires_on": None,
+            "exempt": True,
+        }
+
     def approve_paid_access(
         self,
         *,
