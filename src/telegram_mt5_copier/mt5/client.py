@@ -142,6 +142,14 @@ class MT5Client:
         deals = self._mt5.history_deals_get(date_from, date_to) if self._mt5 is not None else None
         return tuple(deals or ())
 
+    def history_deals_for_position(self, position_ticket: int) -> tuple[object, ...]:
+        """Todos os deals de uma posicao, sem janela de datas -- nao depende
+        do fuso do servidor da corretora."""
+        if self._mt5 is None:
+            return ()
+        deals = self._mt5.history_deals_get(position=int(position_ticket))
+        return tuple(deals or ())
+
     def symbol_select(self, symbol: str, enable: bool = True) -> bool:
         if self._mt5 is None:
             return False
@@ -266,6 +274,17 @@ class SimulatedMT5Client:
     def history_deals_get(self, date_from: datetime, date_to: datetime) -> tuple[object, ...]:
         self.history_deal_queries.append((date_from, date_to))
         return self._history_deals
+
+    def history_deals_for_position(self, position_ticket: int) -> tuple[object, ...]:
+        return tuple(
+            deal
+            for deal in self._history_deals
+            if str(
+                (deal.get("position_id") if isinstance(deal, dict) else getattr(deal, "position_id", None))
+                or ""
+            )
+            == str(position_ticket)
+        )
 
     def symbol_select(self, symbol: str, enable: bool = True) -> bool:
         _ = enable

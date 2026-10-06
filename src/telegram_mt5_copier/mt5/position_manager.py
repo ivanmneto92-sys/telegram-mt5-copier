@@ -250,6 +250,11 @@ class PositionManager:
                 last_check = self._last_settlement_check.get(account.id, 0.0)
                 if time.monotonic() - last_check >= 3:
                     changed += self.settlement_monitor.reconcile(client, account)
+                    changed += self.settlement_monitor.reconcile_closed_positions(
+                        client,
+                        account,
+                        {str(value(position, "ticket", "")) for position in positions},
+                    )
                     self._last_settlement_check[account.id] = time.monotonic()
             return changed
         finally:

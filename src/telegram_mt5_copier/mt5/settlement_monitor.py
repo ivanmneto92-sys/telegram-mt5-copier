@@ -13,6 +13,8 @@ from .models import MT5Account
 from .pending_order_executor import MT5_MAGIC_NUMBER, mt5_constant
 from .trade_comment import parse_trade_comment
 
+SERVER_TIME_MARGIN = timedelta(days=1)
+
 TERMINAL_ORDER_STATUSES = {
     "closed", "cancelled", "expired", "failed", "rejected", "simulated"
 }
@@ -36,7 +38,12 @@ class SettlementMonitor:
     def reconcile(self, client: object, account: MT5Account) -> int:
         now = datetime.now(tz=timezone.utc)
         notify_after = self._last_reconciled_at(account.id) or (now - timedelta(seconds=30))
-        deals = tuple(client.history_deals_get(now - timedelta(days=2), now))
+        # O horario dos deals vem no fuso do servidor da corretora (a frente
+        # do UTC): sem folga no fim da janela, um fechamento recente ficava de
+        # fora por horas.
+        deals = tuple(
+            client.history_deals_get(now - timedelta(days=2), now + SERVER_TIME_MARGIN)
+        )
         closing_entry = {
             mt5_constant(client, "DEAL_ENTRY_OUT", 1),
             mt5_constant(client, "DEAL_ENTRY_OUT_BY", 3),
@@ -61,6 +68,51 @@ class SettlementMonitor:
             deals, timezone_name=self.timezone_name
         )
         self._save_reconciled_at(account.id, now)
+        return inserted
+
+    def reconcile_closed_positions(
+        self, client: object, account: MT5Account, open_position_tickets: set[str]
+    ) -> int:
+        """Ordens 'filled' cuja posicao sumiu do MT5 foram fechadas: busca os
+        deals pela propria posicao (sem janela de datas) e registra o
+        fechamento. Rede de seguranca do reconcile() por periodo."""
+        history_for_position = getattr(client, "history_deals_for_position", None)
+        if not callable(history_for_position):
+            return 0
+        with connect_database(self.database_path) as database:
+            rows = database.execute(
+                """
+                SELECT o.id,g.id,g.user_id,g.symbol,g.direction,o.tp_index,
+                       o.entry_price,o.take_profit,o.mt5_position_ticket
+                FROM execution_orders o
+                JOIN execution_groups g ON g.id=o.execution_group_id
+                WHERE g.mt5_account_id=? AND o.status='filled'
+                  AND o.mt5_position_ticket IS NOT NULL AND o.mt5_position_ticket != ''
+                """,
+                (account.id,),
+            ).fetchall()
+        closing_entry = {
+            mt5_constant(client, "DEAL_ENTRY_OUT", 1),
+            mt5_constant(client, "DEAL_ENTRY_OUT_BY", 3),
+        }
+        recent = datetime.now(tz=timezone.utc) - timedelta(minutes=10)
+        inserted = 0
+        for row in rows:
+            ticket = str(row[8])
+            if ticket in open_position_tickets or not ticket.isdigit():
+                continue
+            deals = tuple(history_for_position(int(ticket)))
+            closing = [
+                deal for deal in deals
+                if int(field(deal, "entry", -1) or -1) in closing_entry
+            ]
+            if not closing:
+                continue
+            deal = closing[-1]
+            if self._record_close(
+                client, deal, row[:8], deals, should_notify=deal_datetime(deal) >= recent
+            ):
+                inserted += 1
         return inserted
 
     def _match_order(

@@ -86,7 +86,7 @@ class TradePushNotifier:
         self, client: object, account: MT5Account, subscriptions: list
     ) -> None:
         now = datetime.now(tz=timezone.utc)
-        deals = tuple(client.history_deals_get(now - timedelta(days=2), now))
+        deals = tuple(client.history_deals_get(now - timedelta(days=2), now + timedelta(days=1)))
         closing_entry = {
             mt5_constant(client, "DEAL_ENTRY_OUT", 1),
             mt5_constant(client, "DEAL_ENTRY_OUT_BY", 3),
