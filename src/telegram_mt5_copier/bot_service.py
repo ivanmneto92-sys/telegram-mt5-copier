@@ -1190,7 +1190,7 @@ class BotService:
                 FROM execution_groups g
                 LEFT JOIN execution_orders o ON o.execution_group_id = g.id
                 WHERE g.user_id = ?
-                  AND g.status IN ('pending_submission', 'pending_active')
+                  AND g.status IN ('pending_submission', 'pending_active', 'open')
                 GROUP BY g.id
                 ORDER BY g.id DESC LIMIT 10
                 """,

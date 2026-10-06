@@ -1393,6 +1393,45 @@ class PendingOrderTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(floating, "12.5")
 
+    def test_ordem_pendente_executada_leva_o_grupo_para_aberto(self) -> None:
+        # Sem isso o grupo ficava 'pending_active' e o portal mostrava a
+        # operacao em "Pendentes" mesmo com a posicao ja aberta no MT5.
+        signal = parse_signal_text(BUY_SIGNAL).signal
+        result = self.executor().execute_for_account(signal, self.account, self.profile())
+        group_id = result.group_result.group.id
+        with connect_database(self.database_path) as connection:
+            # O executor de teste roda simulado; aqui o grupo esta como no
+            # MT5 real, com a ordem pendente ativa na corretora.
+            connection.execute(
+                "UPDATE execution_groups SET status = 'pending_active' WHERE id = ?",
+                (group_id,),
+            )
+        client = SimulatedMT5Client(
+            tick=TickInfo(bid=Decimal("4080"), ask=Decimal("4080")),
+            positions=(
+                {
+                    "magic": 27071301,
+                    "comment": f"tgcp {signal.signature[:8]} TP1",
+                    "ticket": 9003,
+                    "symbol": "XAUUSD",
+                    "price_open": 4061,
+                    "sl": 4044,
+                    "tp": 4066,
+                    "profit": 3,
+                },
+            ),
+        )
+
+        PositionManager(self.database_path, self.accounts, lambda: client).manage_account(
+            self.account, self.profile()
+        )
+
+        with connect_database(self.database_path) as connection:
+            after = connection.execute(
+                "SELECT status FROM execution_groups WHERE id = ?", (group_id,)
+            ).fetchone()[0]
+        self.assertEqual("open", after)
+
     def test_fechamento_de_verdade_limpa_o_lucro_flutuante(self) -> None:
         # Depois que SettlementMonitor confirma o fechamento real, o campo
         # flutuante nao pode continuar com um valor velho -- net_profit

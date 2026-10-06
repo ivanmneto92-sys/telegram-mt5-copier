@@ -1091,6 +1091,17 @@ class PositionManager:
                 (str(position_ticket), utc_now(), utc_now(), order_id),
             )
             cursor.close()
+            # Sem isto o grupo ficava 'pending_active' para sempre e o portal
+            # mostrava a operacao em "Pendentes" mesmo com posicao aberta.
+            cursor = connection.execute(
+                """
+                UPDATE execution_groups SET status = 'open', updated_at = ?
+                WHERE id = (SELECT execution_group_id FROM execution_orders WHERE id = ?)
+                  AND status IN ('pending_submission', 'pending_active')
+                """,
+                (utc_now(), order_id),
+            )
+            cursor.close()
 
     def _update_floating_profit(self, order_id: int, profit: object) -> None:
         """Grava o lucro/prejuizo flutuante corrente de uma posicao ainda

@@ -1233,6 +1233,17 @@ def run_schema_migrations(connection: sqlite3.Connection) -> None:
     ensure_column(connection, "account_daily_performance", "push_notified_at", "TEXT")
     ensure_column(connection, "push_subscriptions", "primed_at", "TEXT")
     ensure_column(connection, "mt5_accounts", "history_backfilled_at", "TEXT")
+    # Grupos que ja tinham posicao aberta antes do status 'open' existir.
+    connection.execute(
+        """
+        UPDATE execution_groups SET status = 'open'
+        WHERE status IN ('pending_submission', 'pending_active')
+          AND EXISTS (
+              SELECT 1 FROM execution_orders o
+              WHERE o.execution_group_id = execution_groups.id AND o.status = 'filled'
+          )
+        """
+    ).close()
     migrate_channel_subscriptions_to_explicit_opt_in(connection)
 
 

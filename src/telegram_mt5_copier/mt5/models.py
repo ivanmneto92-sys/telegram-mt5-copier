@@ -37,6 +37,9 @@ GROUP_STATUS_CANCELLED = "cancelled"
 GROUP_STATUS_PENDING_SUBMISSION = "pending_submission"
 GROUP_STATUS_PENDING_ACTIVE = "pending_active"
 GROUP_STATUS_FAILED = "failed"
+# Ao menos uma ordem do grupo virou posicao no MT5 (as demais podem seguir
+# pendentes); SettlementMonitor leva para 'closed' quando tudo encerra.
+GROUP_STATUS_OPEN = "open"
 ORDER_STATUS_PLANNED = "planned"
 ORDER_STATUS_SIMULATED = "simulated"
 ORDER_STATUS_REJECTED = "rejected"

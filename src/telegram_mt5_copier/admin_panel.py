@@ -205,7 +205,7 @@ class AdminPanelService:
             active_groups = connection.execute(
                 """
                 SELECT COUNT(*) FROM execution_groups
-                WHERE status IN ('pending_submission', 'pending_active')
+                WHERE status IN ('pending_submission', 'pending_active', 'open')
                 """
             ).fetchone()[0]
             queue_pilot_enabled_count = connection.execute(
@@ -225,7 +225,7 @@ class AdminPanelService:
                     (
                         SELECT COUNT(*) FROM execution_groups g
                         WHERE g.user_id = u.id
-                          AND g.status IN ('pending_submission', 'pending_active')
+                          AND g.status IN ('pending_submission', 'pending_active', 'open')
                     ),
                     (
                         SELECT MAX(g.created_at) FROM execution_groups g
@@ -261,7 +261,7 @@ class AdminPanelService:
                     (
                         SELECT COUNT(*) FROM execution_groups g
                         WHERE g.mt5_account_id = a.id
-                          AND g.status IN ('pending_submission', 'pending_active')
+                          AND g.status IN ('pending_submission', 'pending_active', 'open')
                     ),
                     (SELECT MAX(g.created_at) FROM execution_groups g WHERE g.mt5_account_id = a.id),
                     a.queue_pilot_enabled
