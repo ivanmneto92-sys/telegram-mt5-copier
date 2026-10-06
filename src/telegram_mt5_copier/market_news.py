@@ -9,6 +9,7 @@ import hashlib
 from urllib import parse, request
 from zoneinfo import ZoneInfo
 
+from .web_push import PushSubscription
 from .database import connect_database, initialize_database, utc_now
 
 
@@ -219,6 +220,33 @@ class MarketNewsService:
             ).fetchall()
         return tuple((int(r[0]), int(r[1]), bool(r[2])) for r in rows)
 
+    def push_targets(self) -> tuple[tuple[int, bool, bool], ...]:
+        """Clientes com conta conectada (Sistema Automatico ou Copy Trader)
+        para o aviso de noticia por push no app: (user_id, protegido,
+        tem_conta_que_recebe_sinal)."""
+        with connect_database(self.database_path) as connection:
+            rows = connection.execute(
+                """SELECT u.id, COALESCE(s.avoid_high_impact_news,0),
+                          MAX(CASE WHEN a.product_kind != 'broker_copy' THEN 1 ELSE 0 END)
+                   FROM users u JOIN mt5_accounts a ON a.user_id=u.id
+                   LEFT JOIN user_settings s ON s.user_id=u.id
+                   WHERE u.status='active' AND a.connection_status='connected'
+                   GROUP BY u.id"""
+            ).fetchall()
+        return tuple((int(r[0]), bool(r[1]), bool(r[2])) for r in rows)
+
+    def push_subscriptions(self, user_id: int) -> tuple[PushSubscription, ...]:
+        with connect_database(self.database_path) as connection:
+            rows = connection.execute(
+                "SELECT endpoint, p256dh_key, auth_key FROM push_subscriptions WHERE user_id = ?",
+                (user_id,),
+            ).fetchall()
+        return tuple(PushSubscription(str(r[0]), str(r[1]), str(r[2])) for r in rows)
+
+    def remove_push_subscription(self, endpoint: str) -> None:
+        with connect_database(self.database_path) as connection:
+            connection.execute("DELETE FROM push_subscriptions WHERE endpoint = ?", (endpoint,))
+
     def due_events(self, now: datetime | None = None) -> tuple[tuple[EconomicEvent, str], ...]:
         instant = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         lower = instant - timedelta(minutes=2)
@@ -266,6 +294,24 @@ def format_news_alert(event: EconomicEvent, phase: str, protected: bool, *, bran
         details.append(f"Atual: {event.actual_value}")
     source = "Forex Factory" if event.provider == "forex_factory" else "Trading Economics"
     return "\n".join(details + ["", protection, "Ordens já abertas não são alteradas.", "", f"Fonte: {source}", brand_name])
+
+
+def format_news_push(
+    event: EconomicEvent, phase: str, *, protected: bool, receives_signals: bool
+) -> tuple[str, str]:
+    """Titulo e texto curtos do aviso de noticia no app (push)."""
+    local_time = event.event_at.astimezone(ZoneInfo("America/Sao_Paulo")).strftime("%H:%M")
+    title = "🔴 Notícia forte em 10 min" if phase == "before" else "🔴 Notícia forte agora"
+    lines = [f"{event.currency} — {event.event_name} às {local_time} (Brasília)"]
+    if phase == "now" and event.actual_value:
+        lines.append(f"Atual: {event.actual_value}")
+    elif event.forecast_value:
+        lines.append(f"Previsão: {event.forecast_value}")
+    if receives_signals and protected:
+        lines.append("Proteção ativa: novas entradas bloqueadas.")
+    else:
+        lines.append("Mercado pode ficar volátil.")
+    return title, "\n".join(lines)
 
 
 def format_news_rejection(event: EconomicEvent, account_alias: str) -> str:

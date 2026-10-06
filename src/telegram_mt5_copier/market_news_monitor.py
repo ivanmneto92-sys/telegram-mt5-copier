@@ -13,7 +13,9 @@ from .market_news import (
     ForexFactoryCalendarClient,
     TradingEconomicsCalendarClient,
     format_news_alert,
+    format_news_push,
 )
+from .web_push import ExpiredPushSubscription, WebPushSender
 from .telegram_notifier import TelegramUserNotifier
 
 SERVICE_NAME = "market_news_monitor"
@@ -57,6 +59,12 @@ def main() -> int:
         if config.economic_calendar_api_key
         else ForexFactoryCalendarClient()
     )
+    push_sender = WebPushSender(
+        vapid_public_key=config.vapid_public_key,
+        vapid_private_key=config.vapid_private_key,
+        vapid_contact=config.vapid_contact_email,
+        logger=logger,
+    )
     next_fetch = datetime.min.replace(tzinfo=timezone.utc)
     logger.info(
         "Monitor de notícias iniciado. antecedencia=%s tolerancia=%s fonte=%s",
@@ -84,6 +92,8 @@ def main() -> int:
                         format_news_alert(event, phase, protected, brand_name=config.brand_name),
                     ):
                         service.mark_notification_sent(event, user_id, phase)
+                if push_sender.configured:
+                    send_news_push(service, push_sender, event, phase)
             update_service_heartbeat(
                 config.database_path, SERVICE_NAME,
                 details="provider=ok",
@@ -92,6 +102,33 @@ def main() -> int:
             # Fail-open: uma indisponibilidade externa nunca bloqueia sinais sem calendário válido.
             logger.exception("Falha temporária no calendário financeiro: %s", type(exc).__name__)
         time.sleep(config.market_news_poll_seconds)
+
+
+def send_news_push(
+    service: MarketNewsService, sender: WebPushSender, event: object, phase: str
+) -> None:
+    """Mesmo aviso do Telegram, como notificacao no app, para clientes do
+    Sistema Automatico e do Copy Trader. Controle de envio separado do
+    Telegram (fase 'push_before'/'push_now')."""
+    push_phase = f"push_{phase}"
+    for user_id, protected, receives_signals in service.push_targets():
+        if service.notification_sent(event, user_id, push_phase):
+            continue
+        title, body = format_news_push(
+            event, phase, protected=protected, receives_signals=receives_signals
+        )
+        for subscription in service.push_subscriptions(user_id):
+            try:
+                sender.send(
+                    subscription,
+                    title=title,
+                    body=body,
+                    tag=f"news-{event.provider_event_id}-{phase}",
+                    data={"type": "market_news"},
+                )
+            except ExpiredPushSubscription:
+                service.remove_push_subscription(subscription.endpoint)
+        service.mark_notification_sent(event, user_id, push_phase)
 
 
 if __name__ == "__main__":

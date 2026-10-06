@@ -84,3 +84,65 @@ def test_forex_factory_parser_keeps_only_high_impact(monkeypatch):
     assert events[0].currency == "USD"
     assert events[0].provider == "forex_factory"
     assert events[0].event_at == datetime(2026, 8, 12, 12, 30, tzinfo=timezone.utc)
+
+
+def _add_account(database_path, user_id: int, product_kind: str) -> None:
+    with connect_database(database_path) as connection:
+        connection.execute(
+            """INSERT INTO mt5_accounts (user_id, account_alias, broker_name, terminal_path,
+               server_name, login, encrypted_password, account_type, account_mode,
+               connection_status, product_kind, created_at, updated_at)
+               VALUES (?, 'Conta', 'HFM', 't.exe', 'HFM-Live', '111', 'x', 'real', 'hedging',
+                       'connected', ?, ?, ?)""",
+            (user_id, product_kind, utc_now(), utc_now()),
+        )
+        connection.execute(
+            """INSERT INTO push_subscriptions (user_id, endpoint, p256dh_key, auth_key,
+               created_at, updated_at) VALUES (?, ?, 'k', 'a', ?, ?)""",
+            (user_id, f"https://push.example/{user_id}", utc_now(), utc_now()),
+        )
+
+
+def test_news_push_reaches_copy_trader_and_automatic_once(tmp_path):
+    from telegram_mt5_copier.market_news_monitor import send_news_push
+    from telegram_mt5_copier.web_push import ExpiredPushSubscription
+
+    database_path = tmp_path / "news.sqlite3"
+    automatic = create_user(database_path)
+    with connect_database(database_path) as connection:
+        copy_user = int(connection.execute(
+            "INSERT INTO users(telegram_user_id,telegram_username,status,created_at,updated_at) VALUES(?,?,?,?,?)",
+            (456, "copy", "active", utc_now(), utc_now()),
+        ).lastrowid)
+    _add_account(database_path, automatic, "signal_copier")
+    _add_account(database_path, copy_user, "broker_copy")
+    SettingsService(database_path).update_avoid_high_impact_news(automatic, True)
+    service = MarketNewsService(database_path)
+    event = EconomicEvent("9", datetime.now(timezone.utc) + timedelta(minutes=5), "United States", "USD", "CPI")
+
+    class Sender:
+        configured = True
+
+        def __init__(self) -> None:
+            self.sent: list[tuple[str, str, str]] = []
+
+        def send(self, subscription, *, title, body, tag=None, data=None):
+            self.sent.append((subscription.endpoint, title, body))
+            return True
+
+    sender = Sender()
+    send_news_push(service, sender, event, "before")
+    send_news_push(service, sender, event, "before")  # nao repete
+
+    by_endpoint = {endpoint: body for endpoint, _title, body in sender.sent}
+    assert len(sender.sent) == 2
+    assert "Proteção ativa" in by_endpoint[f"https://push.example/{automatic}"]
+    assert "Mercado pode ficar volátil" in by_endpoint[f"https://push.example/{copy_user}"]
+    assert all(title == "🔴 Notícia forte em 10 min" for _e, title, _b in sender.sent)
+
+    class ExpiredSender(Sender):
+        def send(self, subscription, **kwargs):
+            raise ExpiredPushSubscription(subscription.endpoint)
+
+    send_news_push(service, ExpiredSender(), event, "now")
+    assert service.push_subscriptions(automatic) == ()
