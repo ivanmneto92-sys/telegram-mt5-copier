@@ -43,8 +43,9 @@ class SettlementMonitor:
         }
         inserted = 0
         for deal in deals:
-            if int(field(deal, "magic", 0) or 0) != MT5_MAGIC_NUMBER:
-                continue
+            # Nao filtra pelo magic: fechamento manual no MT5 (botao fechar,
+            # celular) gera o deal de saida com magic 0. A posicao continua
+            # sendo do copiador -- _match_order confirma pelo position_id.
             if int(field(deal, "entry", -1) or -1) not in closing_entry:
                 continue
             deal_ticket = str(field(deal, "ticket", "") or "")
@@ -66,6 +67,15 @@ class SettlementMonitor:
         self, account_id: int, deal: object, history_deals: tuple[object, ...]
     ):
         position_id = str(field(deal, "position_id", field(deal, "position", "")) or "")
+        # A posicao e do copiador se o deal de saida ou a entrada dela tem o
+        # nosso magic (fechamento manual: saida com magic 0, entrada nossa).
+        own_magic = int(field(deal, "magic", 0) or 0) == MT5_MAGIC_NUMBER or any(
+            int(field(related, "magic", 0) or 0) == MT5_MAGIC_NUMBER
+            for related in history_deals
+            if position_id
+            and str(field(related, "position_id", field(related, "position", "")) or "")
+            == position_id
+        )
         comment_match = parse_trade_comment(str(field(deal, "comment", "") or ""))
         if comment_match is None and position_id:
             for related in history_deals:
@@ -95,7 +105,9 @@ class SettlementMonitor:
                 ).fetchone()
                 if row is not None:
                     return row
-            if comment_match:
+            # Pelo comentario so quando o deal e do proprio copiador -- um
+            # deal manual sem position_id conhecido nao e nosso.
+            if comment_match and own_magic:
                 return database.execute(
                     """
                     SELECT o.id,g.id,g.user_id,g.symbol,g.direction,o.tp_index,
@@ -170,6 +182,20 @@ class SettlementMonitor:
                   AND status NOT IN ('closed','cancelled','expired','failed','rejected','simulated'))
                 """,
                 (now, group_id, group_id),
+            ).close()
+            # Sem posicao aberta, mas com ordem ainda pendente na corretora (TP
+            # que nao chegou a executar): a operacao volta a ser "pendente" em
+            # vez de ficar presa em "aberta".
+            database.execute(
+                """
+                UPDATE execution_groups SET status='pending_active',updated_at=?
+                WHERE id=? AND status='open'
+                  AND NOT EXISTS (SELECT 1 FROM execution_orders
+                                  WHERE execution_group_id=? AND status='filled')
+                  AND EXISTS (SELECT 1 FROM execution_orders
+                              WHERE execution_group_id=? AND status='pending_active')
+                """,
+                (now, group_id, group_id, group_id),
             ).close()
         return True
 

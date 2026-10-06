@@ -1490,6 +1490,64 @@ class PendingOrderTests(unittest.TestCase):
         self.assertIsNone(floating_after)
         self.assertEqual(net_profit, "19.8")
 
+    def test_fechamento_manual_no_mt5_leva_a_operacao_para_o_historico(self) -> None:
+        # Fechar pelo botao do MT5 gera o deal de saida com magic 0; mesmo
+        # assim a operacao tem que sair de "Abertas" e ir para o historico.
+        signal = parse_signal_text(BUY_SIGNAL).signal
+        result = self.executor().execute_for_account(signal, self.account, self.profile())
+        group_id = result.group_result.group.id
+        comment = f"tgcp {signal.signature[:8]} TP1"
+        with connect_database(self.database_path) as connection:
+            connection.execute(
+                "UPDATE execution_groups SET status = 'pending_active' WHERE id = ?",
+                (group_id,),
+            )
+        client = SimulatedMT5Client(
+            tick=TickInfo(bid=Decimal("4080"), ask=Decimal("4080")),
+            positions=(
+                {
+                    "magic": 27071301, "comment": comment, "ticket": 9010,
+                    "symbol": "XAUUSD", "price_open": 4061, "sl": 4044, "tp": 4066,
+                    "profit": 5.0,
+                },
+            ),
+        )
+        PositionManager(self.database_path, self.accounts, lambda: client).manage_account(
+            self.account, self.profile()
+        )
+
+        class SilentNotifier:
+            def send(self, telegram_user_id: int, message: str) -> bool:
+                return True
+
+        now = datetime.now(tz=timezone.utc).timestamp()
+        SettlementMonitor(self.database_path, SilentNotifier()).reconcile(  # type: ignore[arg-type]
+            SimulatedMT5Client(
+                history_deals=(
+                    {"ticket": 6000, "position_id": 9010, "magic": 27071301,
+                     "entry": 0, "time": now, "profit": 0, "comment": comment},
+                    {"ticket": 6001, "position_id": 9010, "magic": 0,
+                     "entry": 1, "reason": 0, "time": now, "price": 4070,
+                     "profit": 9.0, "commission": 0, "swap": 0, "fee": 0},
+                ),
+            ),
+            self.account,
+        )
+
+        with connect_database(self.database_path) as connection:
+            group_status = connection.execute(
+                "SELECT status FROM execution_groups WHERE id = ?", (group_id,)
+            ).fetchone()[0]
+            order_statuses = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT status FROM execution_orders WHERE execution_group_id = ?",
+                    (group_id,),
+                )
+            }
+        self.assertIn("closed", order_statuses)
+        self.assertNotEqual("open", group_status)
+
     def test_fechamento_e_registrado_e_notificado_uma_unica_vez(self) -> None:
         signal = parse_signal_text(BUY_SIGNAL).signal
         result = self.executor().execute_for_account(signal, self.account, self.profile())
