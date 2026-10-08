@@ -13,6 +13,7 @@ from .mt5.account_worker import MT5AccountWorker
 from .mt5.client import MT5Client
 from .mt5.position_manager import PositionManager
 from .mt5.settlement_monitor import SettlementMonitor
+from .signal_resume_notifier import notify_resumed_signal_pauses
 from .mt5.pending_order_monitor import PendingOrderMonitor
 from .mt5.trade_push_notifier import TradePushNotifier
 from .mt5.models import ExecutionProfile, MT5Account
@@ -142,8 +143,17 @@ def run(only_account_id: int | None = None) -> int:
         last_account_checks: dict[int, float] = {}
         last_push_checks: dict[int, float] = {}
         account_connection_states: dict[int, bool] = {}
+        last_resume_check = 0.0
         try:
             while True:
+                if time.monotonic() - last_resume_check >= 30:
+                    last_resume_check = time.monotonic()
+                    try:
+                        notify_resumed_signal_pauses(
+                            config.database_path, user_notifier, push_sender
+                        )
+                    except Exception as exc:
+                        print(f"Falha no aviso de retomada: {exc}", file=sys.stderr)
                 active_accounts = {
                     account.id: (account, profile)
                     for account, profile in accounts.accounts_for_active_users()

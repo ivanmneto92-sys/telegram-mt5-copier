@@ -7,7 +7,11 @@ from typing import Mapping
 
 from .access_control import paid_access_decision
 from .channel_catalog import ChannelCatalogService
-from .daily_schedule import next_daily_signal_resume_at
+from .daily_schedule import (
+    INDEFINITE_SIGNAL_PAUSE_UNTIL,
+    is_indefinite_signal_pause,
+    next_daily_signal_resume_at,
+)
 from .client_auth import normalize_email, validate_customer_name, validate_phone
 from .database import connect_database, initialize_database, utc_now
 from .mt5.account_service import MT5AccountForm, MT5AccountService
@@ -404,6 +408,25 @@ class ClientPortalService:
         updated = self.users.set_daily_signal_pause_until(user_id, resume_at.isoformat())
         return self._daily_stop_payload(updated.daily_signal_pause_until)
 
+    def set_signal_pause(self, user_id: int, mode: str) -> dict[str, object]:
+        """Chave "Recebendo sinais" do app: mode "today" (volta sozinho as
+        23h), "indefinite" (so volta quando o cliente religar) ou "resume"."""
+        if mode == "resume":
+            return self.resume_signals_today(user_id)
+        if mode == "today":
+            return self.stop_signals_today(user_id)
+        if mode == "indefinite":
+            user = self.users.get_by_id(user_id)
+            if user.status != USER_STATUS_ACTIVE or not paid_access_decision(
+                self.database_path, user_id
+            ).allowed:
+                raise ValueError("Não há novas entradas liberadas para interromper neste momento.")
+            updated = self.users.set_daily_signal_pause_until(
+                user_id, INDEFINITE_SIGNAL_PAUSE_UNTIL
+            )
+            return self._daily_stop_payload(updated.daily_signal_pause_until)
+        raise ValueError("Opção de pausa inválida.")
+
     def resume_signals_today(self, user_id: int) -> dict[str, object]:
         updated = self.users.set_daily_signal_pause_until(user_id, None)
         return self._daily_stop_payload(updated.daily_signal_pause_until)
@@ -428,6 +451,7 @@ class ClientPortalService:
         return {
             "daily_signal_pause_until": pause_until if active else None,
             "daily_signal_pause_active": active,
+            "daily_signal_pause_indefinite": active and is_indefinite_signal_pause(pause_until),
         }
 
     def news_preference(self, user_id: int) -> dict[str, object]:

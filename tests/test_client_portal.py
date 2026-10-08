@@ -229,6 +229,31 @@ class ClientPortalTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertIsNone(stored_after)
 
+    def test_pausa_ate_religar_nao_volta_sozinha_e_retoma_quando_pedido(self) -> None:
+        grant_paid_access(self.database_path, self.user_id)
+        portal = ClientPortalService(self.database_path, brand_name="Marca")
+
+        stopped = portal.set_signal_pause(self.user_id, "indefinite")
+        self.assertTrue(stopped["daily_signal_pause_active"])
+        self.assertTrue(stopped["daily_signal_pause_indefinite"])
+        # Mesmo daqui a anos continua pausado (a coluna e a mesma da pausa diaria).
+        with connect_database(self.database_path) as db:
+            still_paused = db.execute(
+                "SELECT datetime(daily_signal_pause_until) > datetime('now', '+3650 days') "
+                "FROM users WHERE id = ?",
+                (self.user_id,),
+            ).fetchone()[0]
+        self.assertEqual(1, still_paused)
+        self.assertFalse(portal.daily_stop_status(self.user_id)["daily_signal_pause_until"] is None)
+
+        today = portal.set_signal_pause(self.user_id, "today")
+        self.assertFalse(today["daily_signal_pause_indefinite"])
+
+        resumed = portal.set_signal_pause(self.user_id, "resume")
+        self.assertFalse(resumed["daily_signal_pause_active"])
+        with self.assertRaisesRegex(ValueError, "inválida"):
+            portal.set_signal_pause(self.user_id, "outra")
+
     def test_web_registration_creates_pending_customer_and_secure_login(self) -> None:
         auth = ClientBrowserAuthService(self.database_path)
         session = auth.register(

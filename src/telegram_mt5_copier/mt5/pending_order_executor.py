@@ -314,10 +314,16 @@ class PendingOrderExecutor:
             connection.execute(
                 """
                 UPDATE users
-                SET daily_signal_pause_until = ?, updated_at = ?
+                SET daily_signal_pause_until = CASE
+                        -- Nunca encurta uma pausa maior ja ativa (ex.: "parar
+                        -- ate eu religar") ao bater meta/limite do dia.
+                        WHEN daily_signal_pause_until IS NOT NULL
+                         AND datetime(daily_signal_pause_until) > datetime(?)
+                        THEN daily_signal_pause_until ELSE ? END,
+                    updated_at = ?
                 WHERE id = ?
                 """,
-                (pause_until, utc_now(), user_id),
+                (pause_until, pause_until, utc_now(), user_id),
             ).close()
 
     def _validate_execution_mode(self, account: MT5Account, plan: PendingOrderPlan) -> None:

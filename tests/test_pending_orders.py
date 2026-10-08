@@ -761,6 +761,15 @@ class PendingOrderTests(unittest.TestCase):
         self.users.set_daily_signal_pause_until(self.user.id, past)
         self.assertEqual(len(self.accounts.accounts_for_approved_users()), 1)
 
+    def test_pausa_ate_religar_nao_e_encurtada_pela_pausa_automatica_do_dia(self) -> None:
+        indefinite = "9999-12-31T00:00:00+00:00"
+        self.users.set_daily_signal_pause_until(self.user.id, indefinite)
+
+        self.executor()._pause_user_until_next_session(self.user.id, datetime.now(tz=timezone.utc))
+
+        self.assertEqual(indefinite, self.users.get_by_id(self.user.id).daily_signal_pause_until)
+        self.assertEqual(len(self.accounts.accounts_for_approved_users()), 0)
+
     def test_cliente_isento_continua_recebendo_sinais(self) -> None:
         # Isento (sem cobranca e sem validade) precisa seguir recebendo sinal,
         # igual a regra de access_control.paid_access_decision.

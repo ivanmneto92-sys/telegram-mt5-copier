@@ -1253,6 +1253,7 @@ def run_schema_migrations(connection: sqlite3.Connection) -> None:
     ensure_column(connection, "account_daily_performance", "push_notified_at", "TEXT")
     ensure_column(connection, "push_subscriptions", "primed_at", "TEXT")
     ensure_column(connection, "mt5_accounts", "history_backfilled_at", "TEXT")
+    ensure_column(connection, "users", "signal_pause_resume_notified_for", "TEXT")
     # Grupos que ja tinham posicao aberta antes do status 'open' existir.
     connection.execute(
         """

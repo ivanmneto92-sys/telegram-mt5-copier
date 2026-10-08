@@ -11,6 +11,15 @@ except ZoneInfoNotFoundError:
 
 DAILY_SIGNAL_RESUME_HOUR = 23
 
+# "Parar ate eu religar": mesma coluna da pausa diaria (users.
+# daily_signal_pause_until), com uma data que nunca chega -- toda checagem
+# existente (SQL `<= now`, daily_signal_pause_is_active) ja trata como pausado.
+INDEFINITE_SIGNAL_PAUSE_UNTIL = "9999-12-31T00:00:00+00:00"
+
+
+def is_indefinite_signal_pause(value: object) -> bool:
+    return isinstance(value, str) and value.startswith("9999-")
+
 
 def next_daily_signal_resume_at(now: datetime | None = None) -> datetime:
     local_now = normalized_utc(now).astimezone(SAO_PAULO_TIMEZONE)

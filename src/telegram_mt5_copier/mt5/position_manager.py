@@ -381,10 +381,21 @@ class PositionManager:
             connection.execute(
                 """
                 UPDATE users
-                SET daily_signal_pause_until = ?, updated_at = ?
+                SET daily_signal_pause_until = CASE
+                        -- Nunca encurta uma pausa maior ja ativa (ex.: "parar
+                        -- ate eu religar") ao bater meta/limite do dia.
+                        WHEN daily_signal_pause_until IS NOT NULL
+                         AND datetime(daily_signal_pause_until) > datetime(?)
+                        THEN daily_signal_pause_until ELSE ? END,
+                    updated_at = ?
                 WHERE id = ?
                 """,
-                (pause_until.isoformat(), utc_now(), account.user_id),
+                (
+                    pause_until.isoformat(),
+                    pause_until.isoformat(),
+                    utc_now(),
+                    account.user_id,
+                ),
             ).close()
 
         changed = 0

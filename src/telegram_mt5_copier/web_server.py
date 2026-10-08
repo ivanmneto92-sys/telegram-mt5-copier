@@ -305,6 +305,9 @@ class OnboardingHandler(BaseHTTPRequestHandler):
             if path == "/api/v1/copier/pause-toggle":
                 self.handle_client_copier_pause_toggle(fields)
                 return
+            if path == "/api/v1/copier/signal-pause":
+                self.handle_client_signal_pause(fields)
+                return
             if path == "/api/v1/copier/daily-stop-toggle":
                 self.handle_client_daily_stop_toggle(fields)
                 return
@@ -743,6 +746,13 @@ class OnboardingHandler(BaseHTTPRequestHandler):
         user_id = self.authenticate_client_mutation(fields)
         payload = self.client_portal.toggle_copier_pause(user_id)
         safe_log("client_copier_status_toggled", user_id=str(user_id), status=str(payload["status"]))
+        self.send_json({"ok": True, **payload})
+
+    def handle_client_signal_pause(self, fields: dict[str, str]) -> None:
+        user_id = self.authenticate_client_mutation(fields)
+        mode = fields.get("mode", "")
+        payload = self.client_portal.set_signal_pause(user_id, mode)
+        safe_log("client_signal_pause", user_id=str(user_id), mode=mode)
         self.send_json({"ok": True, **payload})
 
     def handle_client_daily_stop_toggle(self, fields: dict[str, str]) -> None:

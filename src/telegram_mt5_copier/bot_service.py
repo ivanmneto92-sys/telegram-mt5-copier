@@ -1608,6 +1608,8 @@ def format_daily_resume(
 ) -> str:
     if resume_at is None:
         return f"{DAILY_SIGNAL_RESUME_HOUR:02d}:00 de Brasília"
+    if resume_at.year >= 9999:
+        return "você religar"
     local_resume = resume_at.astimezone(SAO_PAULO_TIMEZONE)
     if include_date:
         return local_resume.strftime("%d/%m/%Y às %H:%M (Brasília)")
@@ -1619,13 +1621,17 @@ def daily_stop_response(user: User) -> BotResponse:
     return BotResponse(
         "\n".join(
             [
-                "🛑 SINAIS PARADOS POR HOJE",
+                "🛑 SINAIS PARADOS"
+                if resume_at is not None and resume_at.year >= 9999
+                else "🛑 SINAIS PARADOS POR HOJE",
                 "",
                 "Nenhum novo sinal criará operações.",
                 "",
                 "Operações e ordens já existentes continuam sendo gerenciadas.",
                 "",
-                f"Retomada automática: {format_daily_resume(resume_at)}.",
+                "Retomada: somente quando você religar."
+                if resume_at is not None and resume_at.year >= 9999
+                else f"Retomada automática: {format_daily_resume(resume_at)}.",
             ]
         ),
         DAILY_STOPPED_MENU,
